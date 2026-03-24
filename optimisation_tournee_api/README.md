@@ -1,14 +1,15 @@
-# 🚚 Nomadis - Système d'Optimisation de Tournées avec IA
+#  Nomadis - Système d'Optimisation de Tournées avec IA
 
 Ce projet est une solution complète pour gérer et optimiser les tournées commerciales de la société Nomadis. L'application utilise un algorithme d'Intelligence Artificielle pour analyser le potentiel commercial et suggérer le meilleur itinéraire et le chargement idéal du camion.
 
 ##  Architecture du Projet
 Ce dépôt contient deux parties principales :
-* `optimisation_tournee_api` : Le Backend (Serveur Node.js / Express / MySQL)
+* `optimisation_tournee_api` : Le Backend (Serveur Node.js / Express / MySQL) intégrant l'IA en Python (`api_ia.py` pour le serveur Flask et `train_auto.py` pour l'apprentissage).
 * `optimisation_tournee_front` : Le Frontend (Interface utilisateur React / Vite)
 
-## ⚙️ Prérequis
+##  Prérequis
 * [Node.js](https://nodejs.org/) installé sur votre machine.
+* [Python](https://www.python.org/) (v3.8+) installé sur votre machine.
 * Un serveur MySQL local (ex: XAMPP, WAMP, ou phpMyAdmin).
 
 ---
@@ -20,7 +21,7 @@ Ce dépôt contient deux parties principales :
 2. Créez une base de données nommée `dist_utic` (si elle n'existe pas).
 3. Importez le fichier SQL présent dans le backend : `dist_utic.sql`.
 
-### Étape 2 : Lancement du Backend (API & Moteur IA)
+### Étape 2 : Lancement du Backend (API Node.js)
 1. Ouvrez un terminal et naviguez dans le dossier de l'API :
    `cd optimisation_tournee_api`
 2. Créez un fichier `.env` à la racine de ce dossier et ajoutez vos identifiants :
@@ -35,8 +36,17 @@ Ce dépôt contient deux parties principales :
    `node server.js`
    > L'API sera accessible sur `http://localhost:5000`
 
-### Étape 3 : Lancement du Frontend (React)
-1. Ouvrez un **nouveau** terminal et naviguez dans le dossier du frontend :
+### Étape 3 : Lancement du Serveur IA (Flask / Python)
+1. Ouvrez un **nouveau** terminal et naviguez dans le dossier de l'API :
+   `cd optimisation_tournee_api`
+2. Installez les bibliothèques requises pour l'Intelligence Artificielle :
+   `pip install flask pandas numpy xgboost scikit-learn sqlalchemy pymysql joblib`
+3. Démarrez le serveur IA :
+   `python api_ia.py`
+   > Le serveur IA sera accessible sur `http://127.0.0.1:5001`
+
+### Étape 4 : Lancement du Frontend (React)
+1. Ouvrez un **troisième** terminal et naviguez dans le dossier du frontend :
    `cd optimisation_tournee_front`
 2. Installez les dépendances requises :
    `npm install`
@@ -50,3 +60,4 @@ Ce dépôt contient deux parties principales :
 * Connexion à la base de données pour récupérer les régions.
 * Lecture d'un fichier Excel (`donnees_clients.csv.xlsx`) pour calculer la densité des clients.
 * **Moteur IA :** Suggestion d'une tournée complète basée sur le potentiel commercial par gouvernorat (stratégie Marguerite) et prédiction du chargement (Agro, Chips, Bureautique).
+* **Apprentissage IA :** Ré-entraînement dynamique du modèle via `train_auto.py` depuis l'interface, avec calcul du taux de confiance de l'IA.
