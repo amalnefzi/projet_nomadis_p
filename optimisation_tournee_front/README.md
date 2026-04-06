@@ -1,16 +1,36 @@
-# React + Vite
+## 🚀 Guide d'Installation et d'Exécution
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+### Étape 1 : Configuration de la Base de données
+1. Ouvrez phpMyAdmin (ou votre client MySQL).
+2. Créez une base de données nommée `dist_utic` (si elle n'existe pas).
+3. Importez le fichier SQL présent dans le backend : `dist_utic.sql`.
 
-Currently, two official plugins are available:
+### Étape 2 : Lancement du Backend (API Node.js)
+1. Ouvrez un **1er terminal** et naviguez dans le dossier de l'API :
+   `cd optimisation_tournee_api`
+2. Créez un fichier `.env` à la racine de ce dossier :
+   `DB_HOST=localhost`
+   `DB_USER=root`
+   `DB_PASS=`
+   `DB_NAME=dist_utic`
+   `PORT=5000`
+3. Installez les dépendances et démarrez le serveur :
+   `npm install`
+   `node server.js`
+   > L'API Node sera accessible sur `http://localhost:5000`
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+### Étape 3 : Lancement du Serveur IA (Flask / Python)
+1. Ouvrez un **2ème terminal** et naviguez toujours dans `optimisation_tournee_api`.
+2. Installez les bibliothèques requises :
+   `pip install flask pandas numpy xgboost scikit-learn sqlalchemy pymysql joblib`
+3. Démarrez le microservice de l'IA :
+   `python api_ia.py`
+   > Le serveur IA sera accessible sur `http://127.0.0.1:5001`
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+### Étape 4 : Lancement du Frontend (React)
+1. Ouvrez un **3ème terminal** et naviguez dans le dossier du frontend :
+   `cd optimisation_tournee_front`
+2. Installez les dépendances et démarrez l'application :
+   `npm install`
+   `npm run dev`
+   > L'interface utilisateur s'ouvrira sur `http://localhost:5173`

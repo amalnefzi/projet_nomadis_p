@@ -11,11 +11,16 @@ try:
     cols_ia = joblib.load('colonnes_ia.pkl')
     df_master = pd.read_csv('master_dataset_v3.csv')
     
-    # 🔥 NOUVEAU: On charge les préférences des clients (Chips, Agro, etc.) 🔥
-    df_prefs = pd.read_csv('preferences_clients.csv') 
+    # 🔥 Préférences produits clients (noms comme en base) 🔥
+    try:
+        df_prefs = pd.read_csv('preferences_clients_produits.csv')
+    except Exception:
+        # Fallback: ancien fichier (par familles) si pas encore ré-entraîné
+        df_prefs = pd.read_csv('preferences_clients.csv')
     print("✅ IA Prête avec les données réelles !")
 except Exception as e:
     print(f"❌ Erreur de chargement : {e}")
+    df_prefs = pd.DataFrame(columns=['client_code', 'produit_nom', 'produit_code', 'qte_moyenne'])
 
 @app.route('/api/predict', methods=['POST'])
 def predict_tournee():
@@ -52,21 +57,30 @@ def predict_tournee():
         for _, row in clients_du_jour.iterrows():
             
             raw_code = str(row['client_code']).strip()
+            # Normaliser pour matcher df_prefs (ex: "155.0" -> "155")
+            try:
+                raw_code_norm = str(int(float(raw_code)))
+            except ValueError:
+                raw_code_norm = raw_code
             try:
                 code_str = str(int(float(raw_code))).zfill(5)
             except ValueError:
                 code_str = raw_code
                 
-            # 🔥 NOUVEAU: Extraction des quantités exactes par produit 🔥
-            prefs_client = df_prefs[df_prefs['client_code'] == raw_code]
+            # 🔥 Extraction des quantités (produits si dispo, sinon familles) 🔥
+            prefs_client = df_prefs[df_prefs['client_code'].astype(str).str.strip() == raw_code_norm] if 'client_code' in df_prefs.columns else pd.DataFrame()
             details_qte = {}
             total_qte = 0
             
             if not prefs_client.empty:
                 for _, p_row in prefs_client.iterrows():
-                    famille = str(p_row['famille_code'])
+                    produit = str(p_row.get('produit_nom', '')).strip()
+                    if not produit:
+                        produit = str(p_row.get('produit_code', 'Produit')).strip()
+                    if produit == 'Produit' and 'famille_code' in prefs_client.columns:
+                        produit = str(p_row.get('famille_code', 'Standard')).strip() or 'Standard'
                     qte_moy = int(np.maximum(1, p_row['qte_moyenne'])) if pd.notna(p_row['qte_moyenne']) else 1
-                    details_qte[famille] = qte_moy
+                    details_qte[produit] = qte_moy
                     total_qte += qte_moy
             else:
                 # Si pas d'historique précis, on estime
@@ -77,7 +91,7 @@ def predict_tournee():
                 "score": round(row['Score'], 1),
                 "qte": total_qte, 
                 "chiffre": round(row['Vn_predit'], 2),
-                "details": details_qte # Prêt pour afficher "Chips: 5", "Agro: 3"
+                "details": details_qte # Prêt pour afficher Produit: Quantité
             }
 
         return jsonify({"status": "success", "predictions": result_dict})

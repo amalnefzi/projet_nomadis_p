@@ -89,11 +89,18 @@ app.get('/api/tournees/options', (req, res) => {
 // 4. Route PRINCIPALE : L'algorithme IA DYNAMIQUE + BACKTESTING (Réel)
 app.get('/api/tournees/plan', async (req, res) => {
     const date_precise = req.query.date_precise || new Date().toISOString().split('T')[0];
+    const date_debut = req.query.date_debut;
+    const date_fin = req.query.date_fin;
     const commercial = req.query.commercial;
     const route = req.query.route;
+    const topClients = Math.max(1, parseInt(req.query.top_clients || '25', 10) || 25);
+
+    const useRange = Boolean(date_debut && date_fin);
+    const dateReference = useRange ? date_fin : date_precise;
+    const datePrediction = useRange ? date_debut : date_precise;
 
     // Déterminer si on demande le Passé (Réel) ou le Futur (Prédiction IA)
-    const requestDate = new Date(date_precise);
+    const requestDate = new Date(dateReference);
     requestDate.setHours(0,0,0,0);
     const today = new Date();
     today.setHours(0,0,0,0);
@@ -110,7 +117,7 @@ app.get('/api/tournees/plan', async (req, res) => {
         FROM clients c
         WHERE c.deleted_at IS NULL AND c.isactif = '1'
     `;
-    const params = [date_precise];
+    const params = [dateReference];
     if (route) { sqlClients += ` AND c.routing_code = ?`; params.push(route); }
     if (commercial) { sqlClients += ` AND c.user_code = ?`; params.push(commercial); }
 
@@ -126,7 +133,7 @@ app.get('/api/tournees/plan', async (req, res) => {
             // ==========================================
             // 🕰️ MODE PASSÉ : Chiffres Réels + Détails Familles
             // ==========================================
-            console.log(`🕰️ Mode Historique (Réel) pour le : ${date_precise}`);
+            console.log(`🕰️ Mode Historique (Réel) pour le : ${useRange ? `${date_debut} -> ${date_fin}` : date_precise}`);
             
             // Requête qui ramène la facture ET les familles de produits
             let sqlReel = `
@@ -139,11 +146,11 @@ app.get('/api/tournees/plan', async (req, res) => {
                 FROM entetecommercials e
                 LEFT JOIN lignecommercials l ON e.code = l.entetecommercial_code
                 LEFT JOIN produits p ON l.produit_code = p.code
-                WHERE DATE(e.date) = ? AND e.type IN ('facture', 'bl', 'blf')
+                WHERE DATE(e.date) ${useRange ? 'BETWEEN ? AND ?' : '= ?'} AND e.type IN ('facture', 'bl', 'blf')
                 GROUP BY e.client_code, e.code, e.net_a_payer, p.famille_code
             `;
             
-            db.query(sqlReel, [date_precise], (errVentes, ventes) => {
+            db.query(sqlReel, useRange ? [date_debut, date_fin] : [date_precise], (errVentes, ventes) => {
                 if (errVentes) return res.status(500).json({ error: errVentes.message });
                 
                 let ventesMap = {};
@@ -214,19 +221,19 @@ app.get('/api/tournees/plan', async (req, res) => {
                         nom: c.nom + ' ✅ (Réel)',
                         adresse: c.adresse || 'Adresse non spécifiée'
                     };
-                }).filter(t => t !== null).sort((a, b) => b.score_ia - a.score_ia);
+                }).filter(t => t !== null).sort((a, b) => b.score_ia - a.score_ia).slice(0, topClients);
                 
-                envoyerReponse(res, tourneesFormattees, date_precise, iaAgro, iaChips, iaBur);
+                envoyerReponse(res, tourneesFormattees, dateReference, iaAgro, iaChips, iaBur);
             });
         } else {
             // ==========================================
             // 🔮 MODE FUTUR : Prédictions depuis Python (IA)
             // ==========================================
-            console.log(`🔮 Mode Prédiction (IA) pour le : ${date_precise}`);
+            console.log(`🔮 Mode Prédiction (IA) pour le : ${datePrediction}`);
             let aiPredictions = {};
             
             try {
-                const aiResponse = await axios.post('http://127.0.0.1:5001/api/predict', { date: date_precise });
+                const aiResponse = await axios.post('http://127.0.0.1:5001/api/predict', { date: datePrediction });
                 if (aiResponse.data.status === 'success') {
                     aiPredictions = aiResponse.data.predictions;
                 }
@@ -243,21 +250,27 @@ app.get('/api/tournees/plan', async (req, res) => {
                 const qteRecoIA = iaData ? iaData.qte : 0;
                 const vnPreditIA = iaData ? iaData.chiffre : 0;
 
+                let produits = [];
                 let clientAgro = 0, clientChips = 0, clientBur = 0;
-                
-                if (iaData && iaData.details) {
-                    clientAgro = iaData.details['Agro'] || iaData.details['AGRO'] || Math.floor(qteRecoIA * 0.45);
-                    clientChips = iaData.details['Chips'] || iaData.details['CHIPS'] || Math.floor(qteRecoIA * 0.35);
-                    clientBur = iaData.details['Bur'] || iaData.details['BUR'] || Math.floor(qteRecoIA * 0.20);
+
+                if (iaData && iaData.details && typeof iaData.details === 'object') {
+                    // Nouveau format: details = { "Nom Produit": qte, ... }
+                    produits = Object.entries(iaData.details)
+                        .map(([nom, quantite]) => ({ nom, quantite }))
+                        .sort((a, b) => (b.quantite || 0) - (a.quantite || 0));
+
+                    // Pour garder la boîte "Chargement IA", on fait une répartition simple
+                    clientAgro = Math.floor(qteRecoIA * 0.45);
+                    clientChips = Math.floor(qteRecoIA * 0.35);
+                    clientBur = Math.floor(qteRecoIA * 0.20);
+                    const sommeDetails = clientAgro + clientChips + clientBur;
+                    if (sommeDetails < qteRecoIA) clientAgro += (qteRecoIA - sommeDetails);
+                    else if (sommeDetails > qteRecoIA && clientAgro > 0) clientAgro -= (sommeDetails - qteRecoIA);
                 } else {
                     clientAgro = Math.floor(qteRecoIA * 0.45);
                     clientChips = Math.floor(qteRecoIA * 0.35);
                     clientBur = Math.floor(qteRecoIA * 0.20);
                 }
-
-                const sommeDetails = clientAgro + clientChips + clientBur;
-                if (sommeDetails < qteRecoIA) clientAgro += (qteRecoIA - sommeDetails); 
-                else if (sommeDetails > qteRecoIA && clientAgro > 0) clientAgro -= (sommeDetails - qteRecoIA);
 
                 return {
                     nbr_client: c.nbr_client,
@@ -266,6 +279,7 @@ app.get('/api/tournees/plan', async (req, res) => {
                     score_ia: scoreIA,
                     qte_reco: qteRecoIA,
                     details: { agro: clientAgro, chips: clientChips, bur: clientBur }, 
+                    produits,
                     date_jour: c.date_jour, 
                     commercia_zone: c.commercia_zone,
                     region: c.region === 'GT' ? 'Grand Tunis' : c.region,
@@ -275,8 +289,8 @@ app.get('/api/tournees/plan', async (req, res) => {
                 };
             }).filter(t => t.score_ia > 0).sort((a, b) => b.score_ia - a.score_ia);
 
-            // 🔥 2. FILTRE RÉALISTE : On garde uniquement les TOP 25 clients pour la tournée ! 🔥
-            tourneesFormattees = tousLesClients.slice(0, 25);
+            // 🔥 2. FILTRE RÉALISTE : On garde uniquement les TOP N clients pour la tournée ! 🔥
+            tourneesFormattees = tousLesClients.slice(0, topClients);
 
             // 3. On recalcule les totaux EXACTEMENT pour ces 25 clients
             iaAgro = 0; iaChips = 0; iaBur = 0; totalChiffre = 0;
@@ -288,7 +302,7 @@ app.get('/api/tournees/plan', async (req, res) => {
                 iaBur += t.details.bur;
             });
 
-            envoyerReponse(res, tourneesFormattees, date_precise, iaAgro, iaChips, iaBur);
+            envoyerReponse(res, tourneesFormattees, dateReference, iaAgro, iaChips, iaBur);
         }
     });
 });
