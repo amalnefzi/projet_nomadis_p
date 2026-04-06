@@ -3,17 +3,40 @@ import axios from 'axios'
 
 const API = 'http://localhost:5000' 
 
+function toISODate(d) {
+  const dt = new Date(d)
+  dt.setHours(0, 0, 0, 0)
+  return dt.toISOString().split('T')[0]
+}
+
+function startOfWeekMonday(isoDate) {
+  const d = new Date(isoDate)
+  d.setHours(0, 0, 0, 0)
+  const day = d.getDay() // 0=dimanche ... 6=samedi
+  const diff = day === 0 ? -6 : 1 - day
+  d.setDate(d.getDate() + diff)
+  return d
+}
+
 function App() {
   const [loading, setLoading] = useState(false)
   const [erreur, setErreur] = useState(null)
   
   const [showBacktest, setShowBacktest] = useState(false)
+  const [topClientsInput, setTopClientsInput] = useState('25')
+  const joursSemaine = useMemo(
+    () => ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'],
+    []
+  )
 
   const [filtres, setFiltres] = useState({
     route: '',
     commercial: '',
     date_precise: new Date().toISOString().split('T')[0], // Date d'aujourd'hui par défaut
-    actif: 'Oui'
+    actif: 'Oui',
+    mode_date: 'jour', // 'jour' | 'semaine'
+    top_clients: 25,
+    jour_semaine: '' // '' => Tous, sinon 'Lundi'...'Dimanche'
   })
   const [isTraining, setIsTraining] = useState(false);
   const [options, setOptions] = useState({ routes: [], commerciaux: [] })
@@ -33,13 +56,44 @@ function App() {
 
   const handleChangeFiltre = (champ, valeur) => setFiltres(prev => ({ ...prev, [champ]: valeur }))
 
+  // Sync input text avec la valeur du filtre
+  useEffect(() => {
+    setTopClientsInput(String(filtres.top_clients ?? 25))
+  }, [filtres.top_clients])
+
+  const periode = useMemo(() => {
+    if (filtres.mode_date !== 'semaine') return null
+    const monday = startOfWeekMonday(filtres.date_precise)
+    const saturday = new Date(monday)
+    saturday.setDate(monday.getDate() + 5)
+    return { date_debut: toISODate(monday), date_fin: toISODate(saturday) }
+  }, [filtres.date_precise, filtres.mode_date])
+
   const rechercherTournees = async () => {
     try {
       setLoading(true)
       setErreur(null)
       setShowBacktest(false)
+
+      // Commit "Nombre de clients" (évite les effets de blur qui forcent à 1)
+      const parsedTop = parseInt(topClientsInput, 10)
+      const committedTop = Number.isFinite(parsedTop) ? Math.min(200, Math.max(1, parsedTop)) : (filtres.top_clients ?? 25)
+      if (committedTop !== filtres.top_clients) {
+        setFiltres(prev => ({ ...prev, top_clients: committedTop }))
+      }
+      setTopClientsInput(String(committedTop))
+
       const res = await axios.get(`${API}/api/tournees/plan`, {
-        params: { date_precise: filtres.date_precise, commercial: filtres.commercial, route: filtres.route, actif: filtres.actif, t: Date.now() }
+        params: {
+          date_precise: filtres.date_precise,
+          date_debut: periode?.date_debut,
+          date_fin: periode?.date_fin,
+          commercial: filtres.commercial,
+          route: filtres.route,
+          actif: filtres.actif,
+          top_clients: committedTop,
+          t: Date.now()
+        }
       })
       setDonneesTournee(res.data)
     } catch (err) {
@@ -66,8 +120,37 @@ function App() {
   const backtest = useMemo(() => donneesTournee?.backtest ?? null, [donneesTournee])
   const itineraire = useMemo(() => donneesTournee?.itineraire ?? [], [donneesTournee])
 
-  const chiffreTotal = tournees.reduce((acc, curr) => acc + parseFloat(curr.chiffre) || 0, 0);
-  const totalRecouvrement = tournees.filter(t => t.recouvrement === 1).length;
+  const getJourLabel = (idx) => {
+    if (filtres.mode_date === 'semaine') return joursSemaine[idx % 7]
+    const d = new Date(filtres.date_precise)
+    d.setHours(0, 0, 0, 0)
+    const js = d.getDay() // 0=dimanche ... 6=samedi
+    const map = { 0: 'Dimanche', 1: 'Lundi', 2: 'Mardi', 3: 'Mercredi', 4: 'Jeudi', 5: 'Vendredi', 6: 'Samedi' }
+    return map[js] || '-'
+  }
+
+  const tourneesAffichees = useMemo(() => {
+    const filtered = !filtres.jour_semaine
+      ? tournees
+      : tournees.filter((_, idx) => getJourLabel(idx) === filtres.jour_semaine)
+
+    const maxPossible = filtered.length
+    if (maxPossible === 0) return []
+    const n = Math.min(maxPossible, Math.max(1, Number(filtres.top_clients || 25)))
+    return filtered.slice(0, n)
+  }, [tournees, filtres.jour_semaine, filtres.mode_date, filtres.date_precise, filtres.top_clients])
+
+  // Si l'utilisateur met un nombre > max, on "stoppe" automatiquement
+  useEffect(() => {
+    if (!donneesTournee) return
+    const maxPossible = tournees.length
+    if (maxPossible === 0) return
+    if (Number(filtres.top_clients) > maxPossible) {
+      setFiltres(prev => ({ ...prev, top_clients: maxPossible }))
+    }
+  }, [donneesTournee, tournees.length, filtres.top_clients])
+
+  const chiffreTotal = tourneesAffichees.reduce((acc, curr) => acc + parseFloat(curr.chiffre) || 0, 0);
   const quantiteTotalCamion = chargeTotale.agro + chargeTotale.chips + chargeTotale.bureautique;
 
   return (
@@ -118,12 +201,50 @@ function App() {
 
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: '150px' }}>
           <label style={{ fontSize: '13px', fontWeight: 'bold', color: '#555', marginBottom: '6px' }}>📅 Date Précise</label>
+     
           <input 
             type="date" 
             value={filtres.date_precise} 
             onChange={e => handleChangeFiltre('date_precise', e.target.value)} 
             style={{ padding: '10px', borderRadius: '6px', border: '1px solid #ddd' }} 
           />
+          {periode && (
+            <div style={{ marginTop: '6px', fontSize: '11px', color: '#6c757d' }}>
+              Période: <b>{periode.date_debut}</b> → <b>{periode.date_fin}</b>
+            </div>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: '150px' }}>
+          <label style={{ fontSize: '13px', fontWeight: 'bold', color: '#555', marginBottom: '6px' }}>👥 Nombre de clients </label>
+          <input
+            type="number"
+            min={1}
+            max={tournees.length > 0 ? tournees.length : 200}
+            value={topClientsInput}
+            onChange={e => setTopClientsInput(e.target.value)}
+            onBlur={() => {
+              const parsed = parseInt(topClientsInput, 10)
+              const maxPossible = tournees.length > 0 ? tournees.length : 200
+              const next = Number.isFinite(parsed) ? Math.min(maxPossible, Math.max(1, parsed)) : (filtres.top_clients ?? 25)
+              setTopClientsInput(String(next))
+            }}
+            style={{ padding: '10px', borderRadius: '6px', border: '1px solid #ddd' }}
+          />
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: '170px' }}>
+          <label style={{ fontSize: '13px', fontWeight: 'bold', color: '#555', marginBottom: '6px' }}>🗓️ Jour de la semaine</label>
+          <select
+            value={filtres.jour_semaine}
+            onChange={e => handleChangeFiltre('jour_semaine', e.target.value)}
+            style={{ padding: '10px', borderRadius: '6px', border: '1px solid #ddd' }}
+          >
+            <option value="">-- Tous --</option>
+            {joursSemaine.map(j => (
+              <option key={j} value={j}>{j}</option>
+            ))}
+          </select>
         </div>
 
         <button onClick={rechercherTournees} disabled={loading} style={{ padding: '10px 25px', backgroundColor: loading ? '#6c757d' : '#0d6efd', color: 'white', border: 'none', borderRadius: '6px', cursor: loading ? 'not-allowed' : 'pointer', fontWeight: 'bold', height: '40px', transition: '0.3s' }}>
@@ -157,15 +278,11 @@ function App() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px', marginBottom: '30px' }}>
           <div style={{ backgroundColor: 'white', padding: '20px', borderRadius: '10px', borderLeft: '5px solid #0d6efd', boxShadow: '0 4px 6px rgba(0,0,0,0.05)' }}>
             <p style={{ margin: 0, fontSize: '13px', color: '#6c757d', fontWeight: 'bold', textTransform: 'uppercase' }}>Clients VIP Détectés</p>
-            <h2 style={{ margin: '10px 0 0 0', fontSize: '32px', color: '#1a2b4c' }}>{tournees.length}</h2>
+            <h2 style={{ margin: '10px 0 0 0', fontSize: '32px', color: '#1a2b4c' }}>{tourneesAffichees.length}</h2>
           </div>
           <div style={{ backgroundColor: 'white', padding: '20px', borderRadius: '10px', borderLeft: '5px solid #198754', boxShadow: '0 4px 6px rgba(0,0,0,0.05)' }}>
             <p style={{ margin: 0, fontSize: '13px', color: '#6c757d', fontWeight: 'bold', textTransform: 'uppercase' }}>Vente Prédite (IA)</p>
             <h2 style={{ margin: '10px 0 0 0', fontSize: '32px', color: '#198754' }}>{chiffreTotal.toLocaleString()} <span style={{fontSize:'16px'}}>TND</span></h2>
-          </div>
-          <div style={{ backgroundColor: 'white', padding: '20px', borderRadius: '10px', borderLeft: '5px solid #ffc107', boxShadow: '0 4px 6px rgba(0,0,0,0.05)' }}>
-            <p style={{ margin: 0, fontSize: '13px', color: '#6c757d', fontWeight: 'bold', textTransform: 'uppercase' }}>Urgence Recouvrement</p>
-            <h2 style={{ margin: '10px 0 0 0', fontSize: '32px', color: '#ffc107' }}>{totalRecouvrement} <span style={{fontSize:'16px'}}>Clients</span></h2>
           </div>
           <div style={{ backgroundColor: 'white', padding: '20px', borderRadius: '10px', borderLeft: '5px solid #dc3545', boxShadow: '0 4px 6px rgba(0,0,0,0.05)' }}>
             <p style={{ margin: 0, fontSize: '13px', color: '#6c757d', fontWeight: 'bold', textTransform: 'uppercase' }}>Charge IA Suggérée</p>
@@ -183,9 +300,9 @@ function App() {
                 <tr>
                   <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #dee2e6', color: '#495057' }}>SCORE VIP</th>
                   <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #dee2e6', color: '#495057' }}>QTE. RECO</th>
+                  <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #dee2e6', color: '#495057' }}>JOUR</th>
                   <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #dee2e6', color: '#495057' }}>CLIENT</th>
                   <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #dee2e6', color: '#495057' }}>CHIFFRE PRÉDIT</th>
-                  <th style={{ textAlign: 'center', padding: '12px 8px', borderBottom: '2px solid #dee2e6', color: '#495057' }}>RECOUVREMENT</th>
                   <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #dee2e6', color: '#495057' }}>ZONE COMM.</th>
                 </tr>
               </thead>
@@ -193,11 +310,13 @@ function App() {
                 {tournees.length === 0 ? (
                   <tr><td colSpan={6} style={{ padding: '20px', textAlign: 'center', color: '#888' }}>Aucune donnée. Vérifiez l'IA.</td></tr>
                 ) : (
-                  tournees.map((row, idx) => {
+                  tourneesAffichees.map((row, idx) => {
                     // Couleur du score IA
                     let scoreColor = '#dc3545'; // Rouge (Faible)
                     if (row.score_ia >= 80) scoreColor = '#198754'; // Vert (VIP)
                     else if (row.score_ia >= 50) scoreColor = '#fd7e14'; // Orange (Moyen)
+
+                    const jourLabel = getJourLabel(idx)
 
                     return (
                     <tr key={idx} style={{ backgroundColor: idx % 2 === 0 ? 'white' : '#f8f9fa', transition: '0.2s' }}>
@@ -215,11 +334,11 @@ function App() {
     </div>
   )}
 </td>
+                      <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef', fontWeight: 'bold', color: '#4b5563' }}>
+                        {jourLabel}
+                      </td>
                       <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef' }}>{row.nom} ({row.nbr_client})</td>
                       <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef', color: '#198754', fontWeight: 'bold' }}>{row.chiffre}</td>
-                      <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef', textAlign: 'center' }}>
-                        {row.recouvrement ? <span style={{ backgroundColor: '#ffc107', color: '#fff', padding: '3px 8px', borderRadius: '12px', fontSize: '11px', fontWeight: 'bold' }}>OUI</span> : <span style={{ color: '#aaa' }}>Non</span>}
-                      </td>
                       <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef' }}>{row.commercia_zone}</td>
                     </tr>
                   )})

@@ -79,15 +79,21 @@ df_ml.to_csv('master_dataset_v3.csv', index=False)
 query_prefs = """
     SELECT 
         e.client_code,
-        p.famille_code,
+        p.code as produit_code,
+        p.nom as produit_nom,
         AVG(l.quantite) as qte_moyenne
     FROM lignecommercials l
     JOIN entetecommercials e ON l.entetecommercial_code = e.code
     JOIN produits p ON l.produit_code = p.code
     WHERE e.type IN ('facture', 'bl', 'blf')
-    GROUP BY e.client_code, p.famille_code
+    GROUP BY e.client_code, p.code, p.nom
 """
 df_prefs = pd.read_sql(query_prefs, engine)
-df_prefs.to_csv('preferences_clients.csv', index=False)
+
+# Normaliser client_code pour matcher api_ia.py (sans zfill, juste "155" etc.)
+df_prefs['client_code'] = df_prefs['client_code'].astype(str).str.strip()
+df_prefs['produit_nom'] = df_prefs['produit_nom'].fillna(df_prefs['produit_code']).astype(str).str.strip()
+
+df_prefs.to_csv('preferences_clients_produits.csv', index=False)
 
 print("SUCCES ! L'IA a appris tes vrais prix et les vraies habitudes de tes clients.")
