@@ -23,8 +23,25 @@ db.connect(err => {
         return;
     }
     console.log('Connecté à la base de données dist_utic !');
+    
+    // 🔥 AUTO-ENTRAÎNEMENT IA AU DÉMARRAGE 🔥
+    autoTrainIA();
+    
+    // 🔥 AUTO-ENTRAÎNEMENT TOUTES LES 12 HEURES 🔥
+    setInterval(autoTrainIA, 12 * 60 * 60 * 1000);
 });
 
+// 🧠 FONCTION AUTO-ENTRAÎNEMENT
+function autoTrainIA() {
+    console.log('⏳ Entraînement automatique de l\'IA en cours...');
+    exec('python train_auto.py', (error, stdout, stderr) => {
+        if (error) {
+            console.error(`⚠️ Auto-entraînement échoué: ${error.message}`);
+            return;
+        }
+        console.log(`✅ IA AUTO-ENTRAÎNÉE:\n${stdout}`);
+    });
+}
 
 // ==========================================
 // 🧠 ROUTE POUR ENTRAÎNER L'IA MANUELLEMENT
@@ -131,23 +148,36 @@ app.get('/api/tournees/plan', async (req, res) => {
 
         if (isPast) {
             // ==========================================
-            // 🕰️ MODE PASSÉ : Chiffres Réels + Détails Familles
+            // 🕰️ MODE PASSÉ : Chiffres Réels + Détails Familles + BACKTESTING
             // ==========================================
             console.log(`🕰️ Mode Historique (Réel) pour le : ${useRange ? `${date_debut} -> ${date_fin}` : date_precise}`);
             
-            // Requête qui ramène la facture ET les familles de produits
+            // 🔥 ÉTAPE 1: Obtenir les prédictions IA pour cette date passée (backtesting)
+            let aiPredictions = {};
+            try {
+                const aiResponse = await axios.post('http://127.0.0.1:5001/api/predict', { date: datePrediction });
+                if (aiResponse.data.status === 'success') {
+                    aiPredictions = aiResponse.data.predictions;
+                    console.log(`🤖 IA Prédictions chargées pour backtesting: ${Object.keys(aiPredictions).length} clients`);
+                }
+            } catch (error) {
+                console.error("⚠️ Serveur Python injoignable, backtesting sans IA");
+            }
+            
+            // Requête qui ramène la facture ET les noms réels des produits
             let sqlReel = `
                 SELECT 
                     e.client_code,
                     e.code AS doc_code,
                     e.net_a_payer,
-                    COALESCE(p.famille_code, 'AGRO') AS famille_code,
+                    p.libelle AS produit_nom,
+                    p.famille_code AS famille_code,
                     SUM(l.quantite) AS qte_ligne
                 FROM entetecommercials e
                 LEFT JOIN lignecommercials l ON e.code = l.entetecommercial_code
                 LEFT JOIN produits p ON l.produit_code = p.code
                 WHERE DATE(e.date) ${useRange ? 'BETWEEN ? AND ?' : '= ?'} AND e.type IN ('facture', 'bl', 'blf')
-                GROUP BY e.client_code, e.code, e.net_a_payer, p.famille_code
+                GROUP BY e.client_code, e.code, e.net_a_payer, p.libelle, p.famille_code
             `;
             
             db.query(sqlReel, useRange ? [date_debut, date_fin] : [date_precise], (errVentes, ventes) => {
@@ -163,7 +193,8 @@ app.get('/api/tournees/plan', async (req, res) => {
                     if (!ventesMap[v.client_code]) {
                         ventesMap[v.client_code] = { 
                             chiffre: 0, qte: 0, docs: new Set(), 
-                            details: { agro: 0, chips: 0, bur: 0 } 
+                            details: { agro: 0, chips: 0, bur: 0 },
+                            produitsMap: {} // 🔥 Nouveau: pour stocker les produits individuels
                         };
                     }
                     
@@ -178,11 +209,19 @@ app.get('/api/tournees/plan', async (req, res) => {
                     let qteLigne = v.qte_ligne || 0;
                     cMap.qte += qteLigne;
                     
-                    // 🔥 MAPPING : Trier les produits dans les bonnes cases 🔥
-                    let famille = v.famille_code.toUpperCase();
+                    // 🔥 Stocker le produit individuel avec son vrai nom
+                    if (v.produit_nom) {
+                        if (!cMap.produitsMap[v.produit_nom]) {
+                            cMap.produitsMap[v.produit_nom] = 0;
+                        }
+                        cMap.produitsMap[v.produit_nom] += qteLigne;
+                    }
+                    
+                    // MAPPING : Trier les produits dans les bonnes cases (pour la boîte Chargement IA)
+                    let famille = (v.famille_code || '').toUpperCase();
                     if (famille.includes('CHIPS') || famille.includes('SNACK') || famille.includes('CHAMALLOWS') || famille.includes('BISCUIT')) {
                         cMap.details.chips += qteLigne;
-                        iaChips += qteLigne; // On ajoute au total global (Boîte noire à droite)
+                        iaChips += qteLigne;
                     } else if (famille.includes('BUR') || famille.includes('PAPIER')) {
                         cMap.details.bur += qteLigne;
                         iaBur += qteLigne;
@@ -202,18 +241,34 @@ app.get('/api/tournees/plan', async (req, res) => {
                     const dataReelle = ventesMap[c.nbr_client];
                     if (!dataReelle) return null; 
 
-                    const chiffre = dataReelle.chiffre;
+                    const chiffreReel = dataReelle.chiffre;
                     const qte = dataReelle.qte;
-                    const details = dataReelle.details; // <--- On récupère le détail 
+                    const details = dataReelle.details;
                     
-                    totalChiffre += chiffre;
+                    // 🔥 Convertir produitsMap en tableau trié
+                    let produits = [];
+                    if (dataReelle.produitsMap) {
+                        produits = Object.entries(dataReelle.produitsMap)
+                            .map(([nom, quantite]) => ({ nom, quantite }))
+                            .sort((a, b) => b.quantite - a.quantite);
+                    }
+                    
+                    // 🔥 BACKTESTING: Récupérer la prédiction IA pour ce client
+                    const clientCodeStr = c.nbr_client.toString().padStart(5, '0');
+                    const iaData = aiPredictions[clientCodeStr];
+                    const chiffrePred = iaData ? iaData.chiffre : chiffreReel; // Si pas de prédiction, utiliser le réel
+                    
+                    totalChiffre += chiffreReel;
 
                     return {
                         nbr_client: c.nbr_client,
-                        chiffre: chiffre.toFixed(1) + ' TND',
-                        score_ia: maxChiffreReel > 0 ? (chiffre / maxChiffreReel) * 100 : 0,
-                        qte_reco: qte,
-                        details: details, // <--- On envoie ça à React !
+                        chiffre: chiffrePred.toFixed(1) + ' TND', // Afficher la prédiction IA
+                        chiffre_brut: chiffrePred, // Prédiction IA
+                        vente_reelle: chiffreReel, // Vente réelle pour comparaison
+                        score_ia: iaData ? iaData.score : (chiffreReel > 0 ? 50 : 0),
+                        qte_reco: iaData ? iaData.qte : qte,
+                        details: details,
+                        produits: produits, // 🔥 Tableau des produits réels
                         date_jour: c.date_jour, 
                         commercia_zone: c.commercia_zone,
                         region: c.region === 'GT' ? 'Grand Tunis' : c.region,
@@ -276,6 +331,7 @@ app.get('/api/tournees/plan', async (req, res) => {
                     nbr_client: c.nbr_client,
                     chiffre_brut: vnPreditIA, // Gardé en nombre pour le calcul final
                     chiffre: vnPreditIA.toFixed(1) + ' TND',
+                    vente_reelle: 0, // Pour les dates futures, pas de données réelles
                     score_ia: scoreIA,
                     qte_reco: qteRecoIA,
                     details: { agro: clientAgro, chips: clientChips, bur: clientBur }, 
@@ -292,7 +348,7 @@ app.get('/api/tournees/plan', async (req, res) => {
             // 🔥 2. FILTRE RÉALISTE : On garde uniquement les TOP N clients pour la tournée ! 🔥
             tourneesFormattees = tousLesClients.slice(0, topClients);
 
-            // 3. On recalcule les totaux EXACTEMENT pour ces 25 clients
+            // 3. On recalcule les totaux EXACTEMENT pour ces clients
             iaAgro = 0; iaChips = 0; iaBur = 0; totalChiffre = 0;
             
             tourneesFormattees.forEach(t => {
@@ -301,6 +357,8 @@ app.get('/api/tournees/plan', async (req, res) => {
                 iaChips += t.details.chips;
                 iaBur += t.details.bur;
             });
+            
+            console.log(`📊 Total Backtesting: ${totalChiffre.toFixed(1)} TND prédit vs ${tourneesFormattees.reduce((sum, t) => sum + (t.vente_reelle || 0), 0).toFixed(1)} TND réel`);
 
             envoyerReponse(res, tourneesFormattees, dateReference, iaAgro, iaChips, iaBur);
         }

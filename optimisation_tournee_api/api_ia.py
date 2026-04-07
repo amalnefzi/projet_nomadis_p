@@ -42,9 +42,12 @@ def predict_tournee():
         X = pd.get_dummies(clients_du_jour.drop(columns=['vente_nette', 'client_code'])).astype(int)
         X = X.reindex(columns=cols_ia, fill_value=0)
         
-        # 🧠 VRAIES PRÉDICTIONS (Fini le * 185, l'IA sort de vrais Dinars !)
-        predictions = model.predict(X)
-        clients_du_jour['Vn_predit'] = np.maximum(0, predictions)
+        # 🧠 PRÉDICTIONS (le modèle entraîné en log, on reconvertit) 🧠
+        # Le modèle prédit en espace log(1+x), reconvertir en original
+        predictions_log = model.predict(X)
+        predictions = np.expm1(np.maximum(0, predictions_log))  # Reconvertir et éviter négatif
+        
+        clients_du_jour['Vn_predit'] = np.maximum(1, predictions)  # Min 1 TND
         
         # Calcul des scores VIP
         max_vn = clients_du_jour['Vn_predit'].max()
@@ -56,34 +59,40 @@ def predict_tournee():
         result_dict = {}
         for _, row in clients_du_jour.iterrows():
             
+            # 🔥 CLIENT CODE FORMAT: Direct depuis le CSV (déjà normalisé "00155" par train_auto.py)
             raw_code = str(row['client_code']).strip()
-            # Normaliser pour matcher df_prefs (ex: "155.0" -> "155")
-            try:
-                raw_code_norm = str(int(float(raw_code)))
-            except ValueError:
-                raw_code_norm = raw_code
+            # Si c'est un float comme "155.0", le convertir en "00155"
             try:
                 code_str = str(int(float(raw_code))).zfill(5)
             except ValueError:
-                code_str = raw_code
-                
-            # 🔥 Extraction des quantités (produits si dispo, sinon familles) 🔥
-            prefs_client = df_prefs[df_prefs['client_code'].astype(str).str.strip() == raw_code_norm] if 'client_code' in df_prefs.columns else pd.DataFrame()
+                code_str = raw_code.zfill(5) if len(raw_code) < 5 else raw_code
+            
+            # 🔥 Extraction des quantités par produit 🔥
+            # Chercher avec le format normalisé "00155"
+            if 'client_code' in df_prefs.columns and not df_prefs.empty:
+                df_prefs_filtered = df_prefs[df_prefs['client_code'].astype(str).str.strip() == code_str]
+            else:
+                df_prefs_filtered = pd.DataFrame()
+            
             details_qte = {}
             total_qte = 0
             
-            if not prefs_client.empty:
-                for _, p_row in prefs_client.iterrows():
+            if not df_prefs_filtered.empty:
+                print(f"✅ Client {code_str}: {len(df_prefs_filtered)} produits trouvés")
+                for _, p_row in df_prefs_filtered.iterrows():
                     produit = str(p_row.get('produit_nom', '')).strip()
-                    if not produit:
+                    if not produit or produit == 'nan':
                         produit = str(p_row.get('produit_code', 'Produit')).strip()
-                    if produit == 'Produit' and 'famille_code' in prefs_client.columns:
-                        produit = str(p_row.get('famille_code', 'Standard')).strip() or 'Standard'
+                    if not produit or produit == 'Produit' or produit == 'nan':
+                        produit = 'Standard'
+                    
                     qte_moy = int(np.maximum(1, p_row['qte_moyenne'])) if pd.notna(p_row['qte_moyenne']) else 1
                     details_qte[produit] = qte_moy
                     total_qte += qte_moy
+                print(f"   → Total: {total_qte} unités, Produits: {list(details_qte.keys())[:5]}")
             else:
                 # Si pas d'historique précis, on estime
+                print(f"⚠️ Client {code_str}: Pas de produits dans preferences_clients_produits.csv")
                 total_qte = int(np.maximum(1, row['Vn_predit'] / 50))
                 details_qte = {"Standard": total_qte}
 

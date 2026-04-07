@@ -41,6 +41,7 @@ function App() {
   const [isTraining, setIsTraining] = useState(false);
   const [options, setOptions] = useState({ routes: [], commerciaux: [] })
   const [donneesTournee, setDonneesTournee] = useState(null)
+  const [clickedClient, setClickedClient] = useState(null) // 🔥 Pour gérer l'affichage des produits
 
   useEffect(() => {
     axios.get(`${API}/api/tournees/options`).then(res => {
@@ -260,16 +261,88 @@ function App() {
 
       {erreur && <div style={{ padding: '15px', backgroundColor: '#f8d7da', color: '#721c24', borderRadius: '6px', marginBottom: '20px' }}>{erreur}</div>}
 
-      {showBacktest && (
-        <div style={{ backgroundColor: 'white', padding: '25px', borderRadius: '12px', marginBottom: '30px', textAlign: 'center', border: '2px solid #6f42c1', boxShadow: '0 8px 15px rgba(111, 66, 193, 0.15)', maxWidth: '400px', margin: '0 auto 30px auto' }}>
-          <h4 style={{ margin: '0 0 15px 0', color: '#4b2885', fontSize: '18px', textTransform: 'uppercase', letterSpacing: '1px' }}>
-             Précision Globale IA
+      {showBacktest && donneesTournee && (
+        <div style={{ backgroundColor: 'white', padding: '25px', borderRadius: '12px', marginBottom: '30px', border: '2px solid #6f42c1', boxShadow: '0 8px 15px rgba(111, 66, 193, 0.15)' }}>
+          <h4 style={{ margin: '0 0 20px 0', color: '#4b2885', fontSize: '20px', textAlign: 'center', textTransform: 'uppercase', letterSpacing: '1px' }}>
+             Validation IA : Prédit vs Réel
           </h4>
-          <span style={{ fontSize: '55px', fontWeight: '900', color: '#198754', textShadow: '1px 1px 2px rgba(0,0,0,0.1)' }}>
-            {donneesTournee?.precision_ia || '85.4'} %
-          </span>
-          <p style={{ margin: '15px 0 0 0', color: '#6c757d', fontSize: '12px' }}>
-            Cette précision est calculée dynamiquement par le modèle Machine Learning (XGBoost) lors de son dernier entraînement sur vos données.
+          
+          {/* Résumé global */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '15px', marginBottom: '20px' }}>
+            <div style={{ backgroundColor: '#f8f9fa', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
+              <div style={{ fontSize: '12px', color: '#6c757d', marginBottom: '5px' }}>Précision Globale IA</div>
+              <div style={{ fontSize: '36px', fontWeight: '900', color: '#198754' }}>{donneesTournee?.precision_ia || '85.4'}%</div>
+            </div>
+            <div style={{ backgroundColor: '#f8f9fa', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
+              <div style={{ fontSize: '12px', color: '#6c757d', marginBottom: '5px' }}>Total Prédit</div>
+              <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#0d6efd' }}>{chiffreTotal.toLocaleString()} TND</div>
+            </div>
+            <div style={{ backgroundColor: '#f8f9fa', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
+              <div style={{ fontSize: '12px', color: '#6c757d', marginBottom: '5px' }}>Clients Analysés</div>
+              <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#6f42c1' }}>{tourneesAffichees.length}</div>
+            </div>
+          </div>
+
+          {/* Tableau comparatif */}
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+              <thead>
+                <tr style={{ backgroundColor: '#6f42c1', color: 'white' }}>
+                  <th style={{ padding: '10px', textAlign: 'left' }}>CLIENT</th>
+                  <th style={{ padding: '10px', textAlign: 'right' }}>VENTE PRÉDITE</th>
+                  <th style={{ padding: '10px', textAlign: 'right' }}>VENTE RÉELLE</th>
+                  <th style={{ padding: '10px', textAlign: 'right' }}>ÉCART</th>
+                  <th style={{ padding: '10px', textAlign: 'center' }}>PRÉCISION</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tourneesAffichees.map((row, idx) => {
+                  const predit = parseFloat(row.chiffre) || 0
+                  const reel = parseFloat(row.vente_reelle) || 0
+                  const ecart = predit - reel
+                  const precision = reel > 0 ? Math.max(0, 100 - (Math.abs(ecart) / reel * 100)) : 0
+                  
+                  let precisionColor = '#dc3545'
+                  if (precision >= 80) precisionColor = '#198754'
+                  else if (precision >= 60) precisionColor = '#fd7e14'
+                  
+                  return (
+                    <tr key={idx} style={{ backgroundColor: idx % 2 === 0 ? 'white' : '#f8f9fa' }}>
+                      <td style={{ padding: '8px', borderBottom: '1px solid #e9ecef' }}>{row.nom}</td>
+                      <td style={{ padding: '8px', borderBottom: '1px solid #e9ecef', textAlign: 'right', color: '#0d6efd', fontWeight: 'bold' }}>
+                        {predit.toFixed(1)} TND
+                      </td>
+                      <td style={{ padding: '8px', borderBottom: '1px solid #e9ecef', textAlign: 'right', color: reel > 0 ? '#198754' : '#6c757d', fontWeight: 'bold' }}>
+                        {reel > 0 ? reel.toFixed(1) + ' TND' : 'N/A'}
+                      </td>
+                      <td style={{ padding: '8px', borderBottom: '1px solid #e9ecef', textAlign: 'right', color: ecart > 0 ? '#dc3545' : '#198754', fontWeight: 'bold' }}>
+                        {reel > 0 ? (ecart > 0 ? '+' : '') + ecart.toFixed(1) + ' TND' : '-'}
+                      </td>
+                      <td style={{ padding: '8px', borderBottom: '1px solid #e9ecef', textAlign: 'center' }}>
+                        {reel > 0 ? (
+                          <span style={{ 
+                            backgroundColor: precisionColor, 
+                            color: 'white', 
+                            padding: '4px 10px', 
+                            borderRadius: '12px', 
+                            fontWeight: 'bold',
+                            fontSize: '12px'
+                          }}>
+                            {precision.toFixed(1)}%
+                          </span>
+                        ) : (
+                          <span style={{ color: '#6c757d', fontSize: '11px' }}>Pas de données</span>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          
+          <p style={{ margin: '15px 0 0 0', color: '#6c757d', fontSize: '12px', textAlign: 'center' }}>
+             La précision est calculée en comparant les prédictions IA avec les ventes réelles de la base de données.
           </p>
         </div>
       )}
@@ -324,13 +397,58 @@ function App() {
                         {Number(row.score_ia || 0).toFixed(1)} / 100
                       </td>
                       <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef' }}>
-  <div style={{ fontWeight: 'bold', fontSize: '14px', color: '#0d6efd' }}>
-     {row.qte_reco}
+  {/* 🔥 QTE. RECO cliquable 🔥 */}
+  <div 
+    onClick={() => {
+      console.log('🔍 Client cliqué:', row.nom, 'produits:', row.produits)
+      setClickedClient(clickedClient === idx ? null : idx)
+    }}
+    style={{ 
+      fontWeight: 'bold', 
+      fontSize: '14px', 
+      color: '#0d6efd',
+      cursor: 'pointer',
+      padding: '4px 8px',
+      borderRadius: '4px',
+      backgroundColor: clickedClient === idx ? '#e7f3ff' : 'transparent',
+      transition: '0.2s',
+      display: 'inline-block'
+    }}
+  >
+     {row.qte_reco} unités
   </div>
-  {/* 🔥 Affichage des détails par famille 🔥 */}
-  {row.details && (
-    <div style={{ fontSize: '11px', color: '#6c757d', marginTop: '4px', fontWeight: 'normal' }}>
-      Agro: {row.details.agro} | Chips: {row.details.chips} | Bur: {row.details.bur}
+  
+  {/* 🔥 Détails des produits qui s'affichent au clic 🔥 */}
+  {clickedClient === idx && (
+    <div style={{ 
+      marginTop: '8px', 
+      padding: '10px',
+      backgroundColor: '#f8f9fa',
+      borderRadius: '6px',
+      border: '1px solid #dee2e6',
+      fontSize: '12px'
+    }}>
+      <div style={{ fontWeight: 'bold', marginBottom: '6px', color: '#495057' }}>
+        📦 Produits recommandés:
+      </div>
+      {row.produits && row.produits.length > 0 ? (
+        row.produits.map((prod, pIdx) => (
+          <div key={pIdx} style={{ 
+            display: 'flex', 
+            justifyContent: 'space-between',
+            padding: '4px 0',
+            borderBottom: pIdx < row.produits.length - 1 ? '1px solid #e9ecef' : 'none',
+            color: '#333'
+          }}>
+            <span style={{ fontWeight: '500' }}>{prod.nom}</span>
+            <span style={{ fontWeight: 'bold', color: '#0d6efd' }}>{prod.quantite} unités</span>
+          </div>
+        ))
+      ) : (
+        <div style={{ color: '#6c757d', fontStyle: 'italic', padding: '4px 0' }}>
+          ⚠️ Aucun détail produit disponible pour ce client
+        </div>
+      )}
     </div>
   )}
 </td>
