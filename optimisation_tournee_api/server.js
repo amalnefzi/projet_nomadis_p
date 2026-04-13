@@ -130,7 +130,8 @@ app.get('/api/tournees/plan', async (req, res) => {
             ? AS date_jour, CONCAT('Comm ', COALESCE(c.user_code, '-'), ' - ', COALESCE(c.delegation, 'Zone inconnue')) AS commercia_zone,
             COALESCE(c.region, 'Non Définie') AS region, 
             (CASE WHEN CAST(COALESCE(c.encours_actuelement, '0') AS DECIMAL) > 0 THEN 1 ELSE 0 END) AS recouvrement_reel,
-            c.nom, c.adresse_facturation AS adresse
+            c.nom, c.adresse_facturation AS adresse,
+            c.latitude AS latitude, c.longitude AS longitude
         FROM clients c
         WHERE c.deleted_at IS NULL AND c.isactif = '1'
     `;
@@ -170,14 +171,14 @@ app.get('/api/tournees/plan', async (req, res) => {
                     e.client_code,
                     e.code AS doc_code,
                     e.net_a_payer,
-                    p.libelle AS produit_nom,
+                    COALESCE(p.sousfamille_code, 'Divers') AS produit_nom,
                     p.famille_code AS famille_code,
                     SUM(l.quantite) AS qte_ligne
                 FROM entetecommercials e
                 LEFT JOIN lignecommercials l ON e.code = l.entetecommercial_code
                 LEFT JOIN produits p ON l.produit_code = p.code
                 WHERE DATE(e.date) ${useRange ? 'BETWEEN ? AND ?' : '= ?'} AND e.type IN ('facture', 'bl', 'blf')
-                GROUP BY e.client_code, e.code, e.net_a_payer, p.libelle, p.famille_code
+                GROUP BY e.client_code, e.code, e.net_a_payer, p.sousfamille_code, p.famille_code
             `;
             
             db.query(sqlReel, useRange ? [date_debut, date_fin] : [date_precise], (errVentes, ventes) => {
@@ -274,7 +275,9 @@ app.get('/api/tournees/plan', async (req, res) => {
                         region: c.region === 'GT' ? 'Grand Tunis' : c.region,
                         recouvrement: c.recouvrement_reel,
                         nom: c.nom + ' ✅ (Réel)',
-                        adresse: c.adresse || 'Adresse non spécifiée'
+                        adresse: c.adresse || 'Adresse non spécifiée',
+                        latitude: c.latitude,
+                        longitude: c.longitude
                     };
                 }).filter(t => t !== null).sort((a, b) => b.score_ia - a.score_ia).slice(0, topClients);
                 
@@ -301,7 +304,7 @@ app.get('/api/tournees/plan', async (req, res) => {
                 const clientCodeStr = c.nbr_client.toString().padStart(5, '0');
                 const iaData = aiPredictions[clientCodeStr];
 
-                const scoreIA = iaData ? iaData.score : 0;
+                const scoreIA = iaData ? iaData.confidence ?? iaData.score : 0;
                 const qteRecoIA = iaData ? iaData.qte : 0;
                 const vnPreditIA = iaData ? iaData.chiffre : 0;
 
@@ -341,12 +344,16 @@ app.get('/api/tournees/plan', async (req, res) => {
                     region: c.region === 'GT' ? 'Grand Tunis' : c.region,
                     recouvrement: c.recouvrement_reel,
                     nom: c.nom,
-                    adresse: c.adresse || 'Adresse non spécifiée'
+                    adresse: c.adresse || 'Adresse non spécifiée',
+                    latitude: c.latitude,
+                    longitude: c.longitude
                 };
-            }).filter(t => t.score_ia > 0).sort((a, b) => b.score_ia - a.score_ia);
+            }).filter(t => t.chiffre_brut > 0);
 
             // 🔥 2. FILTRE RÉALISTE : On garde uniquement les TOP N clients pour la tournée ! 🔥
-            tourneesFormattees = tousLesClients.slice(0, topClients);
+            tourneesFormattees = tousLesClients
+                .sort((a, b) => b.chiffre_brut - a.chiffre_brut)
+                .slice(0, topClients);
 
             // 3. On recalcule les totaux EXACTEMENT pour ces clients
             iaAgro = 0; iaChips = 0; iaBur = 0; totalChiffre = 0;
@@ -368,10 +375,32 @@ app.get('/api/tournees/plan', async (req, res) => {
 // Petite fonction pour envoyer la réponse proprement et éviter de répéter le code
 // Petite fonction pour envoyer la réponse proprement
 function envoyerReponse(res, tournees, date_precise, agro, chips, bur) {
-    const chargeTotale = { agro, chips, bureautique: bur };
+    let produitsTotaux = {};
+    tournees.forEach(t => {
+        if (t.produits && t.produits.length > 0) {
+            t.produits.forEach(p => {
+                if (!produitsTotaux[p.nom]) {
+                    produitsTotaux[p.nom] = 0;
+                }
+                produitsTotaux[p.nom] += p.quantite;
+            });
+        }
+    });
+
+    // convert to sorted array
+    let produitsMappes = Object.entries(produitsTotaux)
+        .map(([nom, quantite]) => ({ nom, quantite }))
+        .sort((a, b) => b.quantite - a.quantite);
+
+    const chargeTotale = { 
+        agro, 
+        chips, 
+        bureautique: bur,
+        detailsProduits: produitsMappes
+    };
     
     // 🔥 LECTURE DE LA VRAIE PRÉCISION DEPUIS PYTHON 🔥
-    let vraiePrecision = 85.4; // Valeur par défaut
+    let vraiePrecision = 0; // Valeur par défaut
     try {
         const precisionLue = fs.readFileSync('precision.txt', 'utf8');
         if (precisionLue && !isNaN(parseFloat(precisionLue))) {
@@ -381,13 +410,26 @@ function envoyerReponse(res, tournees, date_precise, agro, chips, bur) {
         // Fichier pas encore créé, on garde la valeur par défaut
     }
 
+    const itineraire = tournees.map((r, idx) => `${idx + 1}. ${r.nom} (${r.nbr_client}) - ${r.adresse || 'Adresse non spécifiée'}`);
+    const itineraire_geo = tournees.map((r, idx) => ({
+        step: idx + 1,
+        client_code: r.nbr_client,
+        nom: r.nom,
+        adresse: r.adresse || 'Adresse non spécifiée',
+        latitude: r.latitude !== undefined && r.latitude !== null ? Number(r.latitude) : null,
+        longitude: r.longitude !== undefined && r.longitude !== null ? Number(r.longitude) : null,
+        score_ia: r.score_ia,
+        qte_reco: r.qte_reco
+    }));
+
     res.json({
         tournees: tournees,
         total: tournees.length,
         jourSelectionne: date_precise,
         chargeTotale,
         precision_ia: vraiePrecision, // <--- On envoie la vraie précision à React !
-        itineraire: tournees.map(r => r.nom + (r.score_ia >= 80 ? ' (VIP)' : ''))
+        itineraire,
+        itineraire_geo
     });
 }
 

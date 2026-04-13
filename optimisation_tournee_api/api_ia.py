@@ -7,8 +7,8 @@ app = Flask(__name__)
 
 print("⏳ Chargement de l'IA et des VRAIES données...")
 try:
-    model = joblib.load('modele_nomadis.pkl')
-    cols_ia = joblib.load('colonnes_ia.pkl')
+    # Charger le modèle baseline au lieu de XGBoost 
+    df_stats = joblib.load('model_baseline.pkl')
     df_master = pd.read_csv('master_dataset_v3.csv')
     
     # 🔥 Préférences produits clients (noms comme en base) 🔥
@@ -38,19 +38,68 @@ def predict_tournee():
         if clients_du_jour.empty:
             return jsonify({"status": "error", "message": "Pas d'historique pour ce jour."})
 
-        # Préparation pour XGBoost
-        X = pd.get_dummies(clients_du_jour.drop(columns=['vente_nette', 'client_code'])).astype(int)
-        X = X.reindex(columns=cols_ia, fill_value=0)
+        # 🧠 PRÉDICTIONS BASELINE STATISTIQUE 🧠
+        # Chercher la prédiction dans les statistiques précalculées
+        predictions = []
+        for _, row in clients_du_jour.iterrows():
+            client = str(row['client_code']).strip()
+            jour = row['jour_semaine']
+            
+            # Chercher dans df_stats
+            row_match = df_stats[(df_stats['client_code'] == client) & (df_stats['jour_semaine'] == jour)]
+            
+            if not row_match.empty:
+                row_match = row_match.iloc[0]
+                if row_match['vente_count'] >= 3:
+                    pred = float(row_match['vente_median'])
+                elif row_match['client_count'] >= 3:
+                    pred = 0.7 * float(row_match['client_median']) + 0.3 * float(row_match['global_median'])
+                else:
+                    pred = float(row_match['client_mean']) if row_match['client_count'] >= 1 else float(row_match['global_median'])
+            else:
+                # Fallback global
+                pred = float(df_master[df_master['jour_semaine'] == jour]['vente_nette'].median()) if jour in df_master['jour_semaine'].values else float(df_master['vente_nette'].median())
+            
+            predictions.append(max(1, pred))  # Min 1 TND
         
-        # 🧠 PRÉDICTIONS (le modèle entraîné en log, on reconvertit) 🧠
-        # Le modèle prédit en espace log(1+x), reconvertir en original
-        predictions_log = model.predict(X)
-        predictions = np.expm1(np.maximum(0, predictions_log))  # Reconvertir et éviter négatif
+        clients_du_jour['Vn_predit'] = predictions
         
-        clients_du_jour['Vn_predit'] = np.maximum(1, predictions)  # Min 1 TND
-        
-        # Calcul des scores VIP
+        # Calcul des scores VIP (importance relative) et confiance dynamique
         max_vn = clients_du_jour['Vn_predit'].max()
+        max_visites = clients_du_jour['nbr_visites'].max() if 'nbr_visites' in clients_du_jour.columns else 1
+        
+        def build_confidence(row):
+            visites = int(row.get('nbr_visites', 0)) if pd.notna(row.get('nbr_visites')) else 0
+            base = 20
+            if visites >= 1:
+                base = 35
+            if visites >= 2:
+                base = 45
+            if visites >= 4:
+                base = 55
+            if visites >= 8:
+                base = 65
+            if visites >= 16:
+                base = 75
+            if visites >= 32:
+                base = 82
+            if visites >= 64:
+                base = 88
+            if visites >= 128:
+                base = 92
+            
+            # ajouter un bonus si le client fait partie des plus grosses prévisions
+            if max_vn > 0:
+                volume_ratio = row['Vn_predit'] / max_vn
+                bonus = min(15, int(volume_ratio * 15))
+            else:
+                bonus = 0
+            
+            score = min(100, base + bonus)
+            return round(score, 1)
+
+        clients_du_jour['Confidence'] = clients_du_jour.apply(build_confidence, axis=1)
+        clients_du_jour['VIP'] = clients_du_jour.apply(lambda row: int((row['Vn_predit'] / max_vn) * 100) if max_vn > 0 else 0, axis=1)
         if max_vn > 0:
             clients_du_jour['Score'] = (clients_du_jour['Vn_predit'] / max_vn) * 100
         else:
@@ -98,7 +147,9 @@ def predict_tournee():
 
             result_dict[code_str] = {
                 "score": round(row['Score'], 1),
-                "qte": total_qte, 
+                "confidence": round(row.get('Confidence', row['Score']), 1),
+                "vip": int(row.get('VIP', round(row['Score'], 0))),
+                "qte": total_qte,
                 "chiffre": round(row['Vn_predit'], 2),
                 "details": details_qte # Prêt pour afficher Produit: Quantité
             }

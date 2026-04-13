@@ -1,5 +1,7 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import axios from 'axios'
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
 
 const API = 'http://localhost:5000' 
 
@@ -42,6 +44,9 @@ function App() {
   const [options, setOptions] = useState({ routes: [], commerciaux: [] })
   const [donneesTournee, setDonneesTournee] = useState(null)
   const [clickedClient, setClickedClient] = useState(null) // 🔥 Pour gérer l'affichage des produits
+  const mapRef = useRef(null)
+  const leafletMapRef = useRef(null)
+  const routeLayerRef = useRef(null)
 
   useEffect(() => {
     axios.get(`${API}/api/tournees/options`).then(res => {
@@ -117,9 +122,25 @@ function App() {
     }
   };
   const tournees = useMemo(() => donneesTournee?.tournees ?? [], [donneesTournee])
-  const chargeTotale = useMemo(() => donneesTournee?.chargeTotale ?? { agro: 0, chips: 0, bureautique: 0 }, [donneesTournee])
+  const chargeTotale = useMemo(() => donneesTournee?.chargeTotale ?? { agro: 0, chips: 0, bureautique: 0, detailsProduits: [] }, [donneesTournee])
   const backtest = useMemo(() => donneesTournee?.backtest ?? null, [donneesTournee])
   const itineraire = useMemo(() => donneesTournee?.itineraire ?? [], [donneesTournee])
+  const itineraireGeo = useMemo(() => {
+    const fromApi = (donneesTournee?.itineraire_geo || []).filter(pt => pt.latitude != null && pt.longitude != null)
+    if (fromApi.length) return fromApi
+    return (donneesTournee?.tournees || [])
+      .map((row, idx) => ({
+        step: idx + 1,
+        client_code: row.nbr_client,
+        nom: row.nom,
+        adresse: row.adresse || 'Adresse non spécifiée',
+        latitude: row.latitude,
+        longitude: row.longitude,
+        score_ia: row.score_ia,
+        qte_reco: row.qte_reco
+      }))
+      .filter(pt => pt.latitude != null && pt.longitude != null)
+  }, [donneesTournee])
 
   const getJourLabel = (idx) => {
     if (filtres.mode_date === 'semaine') return joursSemaine[idx % 7]
@@ -150,6 +171,57 @@ function App() {
       setFiltres(prev => ({ ...prev, top_clients: maxPossible }))
     }
   }, [donneesTournee, tournees.length, filtres.top_clients])
+
+  useEffect(() => {
+    if (!mapRef.current) return
+    if (!L) return
+
+    if (!leafletMapRef.current) {
+      leafletMapRef.current = L.map(mapRef.current, {
+        zoomControl: true,
+        attributionControl: false
+      })
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors'
+      }).addTo(leafletMapRef.current)
+    }
+
+    const map = leafletMapRef.current
+    if (!routeLayerRef.current) {
+      routeLayerRef.current = L.layerGroup().addTo(map)
+    }
+    routeLayerRef.current.clearLayers()
+
+    const points = itineraireGeo
+    if (points.length === 0) {
+      map.setView([36.8, 10.1], 6)
+      return
+    }
+
+    const latlngs = points.map(pt => [pt.latitude, pt.longitude])
+    const polyline = L.polyline(latlngs, { color: '#0d6efd', weight: 4, opacity: 0.85 })
+    polyline.addTo(routeLayerRef.current)
+
+    points.forEach((pt, index) => {
+      const marker = L.circleMarker([pt.latitude, pt.longitude], {
+        radius: index === 0 ? 8 : 6,
+        color: index === 0 ? '#198754' : '#0d6efd',
+        fillColor: index === 0 ? '#198754' : '#0d6efd',
+        fillOpacity: 0.9,
+        weight: 1
+      }).addTo(routeLayerRef.current)
+
+      marker.bindPopup(`<strong>${index + 1}. ${pt.nom}</strong><br/>${pt.adresse}`)
+    })
+
+    try {
+      const bounds = L.latLngBounds(latlngs)
+      map.fitBounds(bounds, { padding: [40, 40] })
+      setTimeout(() => map.invalidateSize(), 200)
+    } catch (e) {
+      console.warn("Impossible d'ajuster les limites de la carte", e)
+    }
+  }, [itineraireGeo])
 
   const chiffreTotal = tourneesAffichees.reduce((acc, curr) => acc + parseFloat(curr.chiffre) || 0, 0);
   const quantiteTotalCamion = chargeTotale.agro + chargeTotale.chips + chargeTotale.bureautique;
@@ -271,7 +343,9 @@ function App() {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '15px', marginBottom: '20px' }}>
             <div style={{ backgroundColor: '#f8f9fa', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
               <div style={{ fontSize: '12px', color: '#6c757d', marginBottom: '5px' }}>Précision Globale IA</div>
-              <div style={{ fontSize: '36px', fontWeight: '900', color: '#198754' }}>{donneesTournee?.precision_ia || '85.4'}%</div>
+              <div style={{ fontSize: '36px', fontWeight: '900', color: '#198754' }}>
+            {donneesTournee?.precision_ia ?? '85.4'}%
+          </div>
             </div>
             <div style={{ backgroundColor: '#f8f9fa', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
               <div style={{ fontSize: '12px', color: '#6c757d', marginBottom: '5px' }}>Total Prédit</div>
@@ -469,30 +543,64 @@ function App() {
         {donneesTournee && (
           <div style={{ flex: '1', minWidth: '350px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
             <div style={{ backgroundColor: '#1a2b4c', color: 'white', padding: '20px', borderRadius: '10px', boxShadow: '0 4px 6px rgba(0,0,0,0.1)' }}>
-              <h3 style={{ marginTop: 0, color: '#0d6efd', borderBottom: '1px solid #334466', paddingBottom: '10px' }}> Prédiction Chargement IA</h3>
-              <p style={{ fontSize: '13px', color: '#adb5bd' }}>L'IA suggère ce chargement pour éviter les retours :</p>
+              <h3 style={{ marginTop: 0, color: '#0d6efd', borderBottom: '1px solid #334466', paddingBottom: '10px' }}>📦 Prédiction Chargement IA</h3>
+              <p style={{ fontSize: '13px', color: '#adb5bd' }}>L'IA suggère ce chargement détaillé par produit :</p>
               
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#2c3e5d', padding: '10px 15px', borderRadius: '8px', marginBottom: '10px' }}>
-                <span style={{ fontWeight: 'bold' }}> Agro-Alimentaire</span>
-                <span style={{ fontSize: '18px', fontWeight: 'bold', color: '#fff' }}>{chargeTotale.agro}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#2c3e5d', padding: '10px 15px', borderRadius: '8px', marginBottom: '10px' }}>
-                <span style={{ fontWeight: 'bold' }}> Chips & Snacks</span>
-                <span style={{ fontSize: '18px', fontWeight: 'bold', color: '#fff' }}>{chargeTotale.chips}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#2c3e5d', padding: '10px 15px', borderRadius: '8px' }}>
-                <span style={{ fontWeight: 'bold' }}> Bureautique</span>
-                <span style={{ fontSize: '18px', fontWeight: 'bold', color: '#fff' }}>{chargeTotale.bureautique}</span>
+              <div style={{ maxHeight: '250px', overflowY: 'auto', paddingRight: '5px' }}>
+                {chargeTotale.detailsProduits && chargeTotale.detailsProduits.length > 0 ? (
+                  chargeTotale.detailsProduits.map((prod, idx) => (
+                    <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#2c3e5d', padding: '10px 15px', borderRadius: '8px', marginBottom: '8px' }}>
+                      <span style={{ fontWeight: 'bold', fontSize: '14px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '70%' }} title={prod.nom}>🛒 {prod.nom}</span>
+                      <span style={{ fontSize: '16px', fontWeight: 'bold', color: '#20c997' }}>{prod.quantite}</span>
+                    </div>
+                  ))
+                ) : (
+                  <>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#2c3e5d', padding: '10px 15px', borderRadius: '8px', marginBottom: '10px' }}>
+                      <span style={{ fontWeight: 'bold' }}>🍊 Agro-Alimentaire</span>
+                      <span style={{ fontSize: '18px', fontWeight: 'bold', color: '#fff' }}>{chargeTotale.agro}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#2c3e5d', padding: '10px 15px', borderRadius: '8px', marginBottom: '10px' }}>
+                      <span style={{ fontWeight: 'bold' }}>🥔 Chips & Snacks</span>
+                      <span style={{ fontSize: '18px', fontWeight: 'bold', color: '#fff' }}>{chargeTotale.chips}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#2c3e5d', padding: '10px 15px', borderRadius: '8px' }}>
+                      <span style={{ fontWeight: 'bold' }}>📚 Bureautique</span>
+                      <span style={{ fontSize: '18px', fontWeight: 'bold', color: '#fff' }}>{chargeTotale.bureautique}</span>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
 
             <div style={{ backgroundColor: 'white', padding: '20px', borderRadius: '10px', boxShadow: '0 4px 6px rgba(0,0,0,0.05)', flex: 1 }}>
               <h3 style={{ marginTop: 0, color: '#1a2b4c', borderBottom: '2px solid #f1f3f5', paddingBottom: '10px' }}> Itinéraire Optimisé (Top 15)</h3>
-              <ul style={{ paddingLeft: '20px', fontSize: '14px', color: '#555', maxHeight: '250px', overflowY: 'auto' }}>
-                {itineraire.map((etape, i) => (
-                  <li key={i} style={{ marginBottom: '8px' }}>{etape}</li>
-                ))}
-              </ul>
+              <div style={{ width: '100%', height: '300px', borderRadius: '12px', overflow: 'hidden', marginBottom: '20px', position: 'relative', backgroundColor: '#e9ecef' }}>
+                <div ref={mapRef} style={{ width: '100%', height: '100%' }} />
+                {!itineraireGeo.length && (
+                  <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#495057', fontSize: '14px', fontWeight: '600', backgroundColor: 'rgba(255,255,255,0.8)' }}>
+                    Pas de données géographiques disponibles pour le tracé.
+                  </div>
+                )}
+              </div>
+              <div style={{ maxHeight: '180px', overflowY: 'auto', paddingRight: '8px' }}>
+                {itineraireGeo.length ? (
+                  <ol style={{ paddingLeft: '18px', fontSize: '14px', color: '#555' }}>
+                    {itineraireGeo.map((etape, i) => (
+                      <li key={i} style={{ marginBottom: '10px' }}>
+                        <strong>{etape.step}. {etape.nom}</strong><br />
+                        <span style={{ color: '#6c757d', fontSize: '13px' }}>{etape.adresse}</span>
+                      </li>
+                    ))}
+                  </ol>
+                ) : (
+                  <ul style={{ paddingLeft: '20px', fontSize: '14px', color: '#555', maxHeight: '250px', overflowY: 'auto' }}>
+                    {itineraire.map((etape, i) => (
+                      <li key={i} style={{ marginBottom: '8px' }}>{etape}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
               <button style={{ width: '100%', marginTop: '15px', padding: '12px', backgroundColor: '#198754', color: 'white', border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer', transition: '0.2s' }}>
                 ✅ Valider le Plan de Route
               </button>

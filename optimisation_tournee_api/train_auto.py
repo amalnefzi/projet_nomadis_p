@@ -44,7 +44,7 @@ df_ml = df_ml[df_ml['vente_nette'] > 0].copy()
 seuil_haut = df_ml['vente_nette'].quantile(0.99)
 df_ml = df_ml[df_ml['vente_nette'] <= seuil_haut].copy()
 
-print(f"   ✅ Après filtrage: {len(df_ml)} lignes (ventes entre {df_ml['vente_nette'].min():.2f} et {df_ml['vente_nette'].max():.2f})")
+print(f"   [OK] Après filtrage: {len(df_ml)} lignes (ventes entre {df_ml['vente_nette'].min():.2f} et {df_ml['vente_nette'].max():.2f})")
 
 print("Entrainement du modele en cours (ca peut prendre quelques secondes)...")
 X_raw = df_ml.drop(columns=['vente_nette', 'client_code'])
@@ -98,12 +98,12 @@ confiance_pourcentage = round(max(0, min(100, r2 * 100)), 1)
 try:
     mape = mean_absolute_percentage_error(y_test, y_pred)
     mape_pct = round(mape * 100, 1)
-    print(f"📊 R² Score: {r2:.4f}")
-    print(f"📊 MAPE (Erreur %): {mape_pct}%")
+    print(f"[INFO] R² Score: {r2:.4f}")
+    print(f"[INFO] MAPE (Erreur %): {mape_pct}%")
 except:
     mape_pct = 0
 
-print(f"✅ TAUX DE CONFIANCE (ACCURACY) : {confiance_pourcentage} %")
+print(f"[OK] TAUX DE CONFIANCE (ACCURACY) : {confiance_pourcentage} %")
 
 # 🔥 SAUVEGARDE DU VRAI SCORE POUR LE REACT 🔥
 with open('precision.txt', 'w') as f:
@@ -117,14 +117,14 @@ df_ml.to_csv('master_dataset_v3.csv', index=False)
 query_prefs = """
     SELECT 
         LPAD(e.client_code, 5, '0') as client_code,
-        p.code as produit_code,
-        p.libelle as produit_nom,
-        AVG(l.quantite) as qte_moyenne
+        COALESCE(p.sousfamille_code, 'Divers') as produit_code,
+        COALESCE(p.sousfamille_code, 'Divers') as produit_nom,
+        SUM(l.quantite) / NULLIF(COUNT(DISTINCT e.code), 0) as qte_moyenne
     FROM lignecommercials l
     JOIN entetecommercials e ON l.entetecommercial_code = e.code
     JOIN produits p ON l.produit_code = p.code
     WHERE e.type IN ('facture', 'bl', 'blf')
-    GROUP BY e.client_code, p.code, p.libelle
+    GROUP BY e.client_code, p.sousfamille_code
 """
 df_prefs = pd.read_sql(query_prefs, engine)
 
