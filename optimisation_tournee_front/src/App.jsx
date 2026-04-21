@@ -5,19 +5,64 @@ import 'leaflet/dist/leaflet.css'
 
 const API = 'http://localhost:5000'
 
+const JOURS_TO_INDEX = {
+  Dimanche: 0,
+  Lundi: 1,
+  Mardi: 2,
+  Mercredi: 3,
+  Jeudi: 4,
+  Vendredi: 5,
+  Samedi: 6
+}
+
 function toISODate(d) {
-  const dt = new Date(d)
+  const dt = d instanceof Date ? new Date(d) : parseISODateLocal(d)
   dt.setHours(0, 0, 0, 0)
-  return dt.toISOString().split('T')[0]
+  return formatLocalISODate(dt)
+}
+
+function formatLocalISODate(date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function parseISODateLocal(value) {
+  if (!value) {
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    return today
+  }
+
+  const [year, month, day] = String(value).split('-').map(Number)
+  const parsed = new Date(year, (month || 1) - 1, day || 1)
+  parsed.setHours(0, 0, 0, 0)
+  return parsed
 }
 
 function startOfWeekMonday(isoDate) {
-  const d = new Date(isoDate)
+  const d = parseISODateLocal(isoDate)
   d.setHours(0, 0, 0, 0)
   const day = d.getDay()
   const diff = day === 0 ? -6 : 1 - day
   d.setDate(d.getDate() + diff)
   return d
+}
+
+function resolveEffectiveDate(datePrecise, jourSemaine) {
+  if (datePrecise) return datePrecise
+  if (!jourSemaine) return formatLocalISODate(new Date())
+
+  const targetDay = JOURS_TO_INDEX[jourSemaine]
+  if (targetDay == null) return formatLocalISODate(new Date())
+
+  const d = new Date()
+  d.setHours(0, 0, 0, 0)
+  const currentDay = d.getDay()
+  const diff = (targetDay - currentDay + 7) % 7
+  d.setDate(d.getDate() + diff)
+  return formatLocalISODate(d)
 }
 
 function formatDuration(seconds) {
@@ -68,7 +113,7 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [erreur, setErreur] = useState(null)
   const [showBacktest, setShowBacktest] = useState(false)
-  const [topClientsInput, setTopClientsInput] = useState('25')
+  const [topClientsInput, setTopClientsInput] = useState('')
   const [targetChiffreInput, setTargetChiffreInput] = useState('')
   const [isTraining, setIsTraining] = useState(false)
   const [options, setOptions] = useState({ routes: [], commerciaux: [] })
@@ -93,10 +138,10 @@ function App() {
   const [filtres, setFiltres] = useState({
     route: '',
     commercial: '',
-    date_precise: new Date().toISOString().split('T')[0],
+    date_precise: '',
     actif: 'Oui',
     mode_date: 'jour',
-    top_clients: 25,
+    top_clients: '',
     target_chiffre: '',
     jour_semaine: ''
   })
@@ -139,16 +184,21 @@ function App() {
   const handleChangeFiltre = (champ, valeur) => setFiltres(prev => ({ ...prev, [champ]: valeur }))
 
   useEffect(() => {
-    setTopClientsInput(String(filtres.top_clients ?? 25))
+    setTopClientsInput(filtres.top_clients === '' || filtres.top_clients == null ? '' : String(filtres.top_clients))
   }, [filtres.top_clients])
+
+  const effectiveDatePrecise = useMemo(
+    () => resolveEffectiveDate(filtres.date_precise, filtres.jour_semaine),
+    [filtres.date_precise, filtres.jour_semaine]
+  )
 
   const periode = useMemo(() => {
     if (filtres.mode_date !== 'semaine') return null
-    const monday = startOfWeekMonday(filtres.date_precise)
+    const monday = startOfWeekMonday(effectiveDatePrecise)
     const saturday = new Date(monday)
     saturday.setDate(monday.getDate() + 5)
     return { date_debut: toISODate(monday), date_fin: toISODate(saturday) }
-  }, [filtres.date_precise, filtres.mode_date])
+  }, [effectiveDatePrecise, filtres.mode_date])
 
   const rechercherTournees = async () => {
     try {
@@ -157,7 +207,7 @@ function App() {
       setShowBacktest(false)
 
       const parsedTop = parseInt(topClientsInput, 10)
-      const committedTop = Number.isFinite(parsedTop) ? Math.min(200, Math.max(1, parsedTop)) : (filtres.top_clients ?? 25)
+      const committedTop = Number.isFinite(parsedTop) ? Math.min(200, Math.max(1, parsedTop)) : ''
       const parsedTarget = parseFloat(String(targetChiffreInput || '').replace(',', '.'))
       const committedTarget = Number.isFinite(parsedTarget) && parsedTarget > 0 ? parsedTarget : ''
       if (committedTop !== filtres.top_clients) {
@@ -166,18 +216,18 @@ function App() {
       if (committedTarget !== filtres.target_chiffre) {
         setFiltres(prev => ({ ...prev, target_chiffre: committedTarget }))
       }
-      setTopClientsInput(String(committedTop))
+      setTopClientsInput(committedTop === '' ? '' : String(committedTop))
       setTargetChiffreInput(committedTarget === '' ? '' : String(committedTarget))
 
       const res = await axios.get(`${API}/api/tournees/plan`, {
         params: {
-          date_precise: filtres.date_precise,
+          date_precise: effectiveDatePrecise,
           date_debut: periode?.date_debut,
           date_fin: periode?.date_fin,
           commercial: filtres.commercial,
           route: filtres.route,
           actif: filtres.actif,
-          top_clients: committedTop,
+          top_clients: committedTop || undefined,
           target_chiffre: committedTarget || undefined,
           t: Date.now()
         }
@@ -242,7 +292,7 @@ function App() {
 
   const getJourLabel = (idx) => {
     if (filtres.mode_date === 'semaine') return joursSemaine[idx % 7]
-    const d = new Date(filtres.date_precise)
+    const d = parseISODateLocal(effectiveDatePrecise)
     d.setHours(0, 0, 0, 0)
     const js = d.getDay()
     const map = { 0: 'Dimanche', 1: 'Lundi', 2: 'Mardi', 3: 'Mercredi', 4: 'Jeudi', 5: 'Vendredi', 6: 'Samedi' }
@@ -250,15 +300,13 @@ function App() {
   }
 
   const tourneesAffichees = useMemo(() => {
-    const filtered = !filtres.jour_semaine
-      ? tournees
-      : tournees.filter((_, idx) => getJourLabel(idx) === filtres.jour_semaine)
-
+    const filtered = tournees
     const maxPossible = filtered.length
     if (maxPossible === 0) return []
-    const n = Math.min(maxPossible, Math.max(1, Number(filtres.top_clients || 25)))
+    if (filtres.top_clients === '' || filtres.top_clients == null) return filtered
+    const n = Math.min(maxPossible, Math.max(1, Number(filtres.top_clients)))
     return filtered.slice(0, n)
-  }, [tournees, filtres.jour_semaine, filtres.mode_date, filtres.date_precise, filtres.top_clients])
+  }, [tournees, filtres.top_clients])
 
   const routingCandidates = useMemo(() => {
     return tourneesAffichees
@@ -529,9 +577,14 @@ function App() {
             value={topClientsInput}
             onChange={e => setTopClientsInput(e.target.value)}
             onBlur={() => {
-              const parsed = parseInt(topClientsInput, 10)
-              const next = Number.isFinite(parsed) ? Math.min(200, Math.max(1, parsed)) : (filtres.top_clients ?? 25)
-              setTopClientsInput(String(next))
+              const trimmed = String(topClientsInput ?? '').trim()
+              if (trimmed === '') {
+                setTopClientsInput('')
+                return
+              }
+              const parsed = parseInt(trimmed, 10)
+              const next = Number.isFinite(parsed) ? Math.min(200, Math.max(1, parsed)) : ''
+              setTopClientsInput(next === '' ? '' : String(next))
             }}
             style={{ padding: '10px', borderRadius: '6px', border: '1px solid #ddd' }}
           />

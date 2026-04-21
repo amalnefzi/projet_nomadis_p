@@ -13,6 +13,11 @@ warnings.filterwarnings('ignore')
 
 FEATURE_COLUMNS_BASE = [
     'jour_semaine',
+    'day_of_month',
+    'week_of_month',
+    'days_to_month_end',
+    'is_month_start',
+    'is_month_end',
     'potentiel',
     'nbr_visites_hist',
     'nbr_visites_jour',
@@ -121,6 +126,12 @@ def build_dense_training_panel(df_base):
     panel['qte_totale'] = pd.to_numeric(panel['qte_totale'], errors='coerce').fillna(0)
     panel['achat_target'] = (panel['vente_nette'] > 0).astype(int)
     panel['jour_semaine'] = ((panel['date'].dt.weekday + 1) % 7).astype(int)
+    panel['day_of_month'] = panel['date'].dt.day.astype(int)
+    panel['week_of_month'] = (((panel['date'].dt.day - 1) // 7) + 1).astype(int)
+    month_end = panel['date'] + pd.offsets.MonthEnd(0)
+    panel['days_to_month_end'] = (month_end.dt.day - panel['date'].dt.day).astype(int)
+    panel['is_month_start'] = (panel['date'].dt.day <= 7).astype(int)
+    panel['is_month_end'] = (panel['days_to_month_end'] <= 6).astype(int)
     panel['month'] = panel['date'].dt.month.astype(int)
     return panel.sort_values(['client_code', 'date']).reset_index(drop=True)
 
@@ -219,6 +230,11 @@ def fill_feature_defaults(df):
 
     df['potentiel'] = pd.to_numeric(df['potentiel'], errors='coerce').fillna(0)
     df['jour_semaine'] = pd.to_numeric(df['jour_semaine'], errors='coerce').fillna(0).astype(int)
+    df['day_of_month'] = pd.to_numeric(df['day_of_month'], errors='coerce').fillna(1).astype(int)
+    df['week_of_month'] = pd.to_numeric(df['week_of_month'], errors='coerce').fillna(1).astype(int)
+    df['days_to_month_end'] = pd.to_numeric(df['days_to_month_end'], errors='coerce').fillna(0).astype(int)
+    df['is_month_start'] = pd.to_numeric(df['is_month_start'], errors='coerce').fillna(0).astype(int)
+    df['is_month_end'] = pd.to_numeric(df['is_month_end'], errors='coerce').fillna(0).astype(int)
     df['month'] = pd.to_numeric(df['month'], errors='coerce').fillna(1).astype(int)
     return df
 
@@ -450,7 +466,8 @@ with open('precision.txt', 'w', encoding='utf8') as f:
 
 print("Preparation de la base de prediction par client et jour...")
 candidate_cols = [
-    'client_code', 'region', 'potentiel', 'jour_semaine', 'month',
+    'client_code', 'region', 'potentiel', 'jour_semaine', 'day_of_month', 'week_of_month',
+    'days_to_month_end', 'is_month_start', 'is_month_end', 'month',
     'nbr_visites_hist', 'nbr_visites_jour', 'days_since_last_order', 'vente_last', 'qte_last',
     'vente_avg_3', 'qte_avg_3',
     'ca_last_30d', 'ca_last_60d', 'ca_last_90d',

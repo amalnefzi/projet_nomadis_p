@@ -174,7 +174,8 @@ async function resolveDepotOrigin(route, commercial) {
 }
 
 function applyClientObjective(sortedClients, maxClients, targetChiffre) {
-  const cappedClients = sortedClients.slice(0, maxClients)
+  const hasMaxClients = Number.isFinite(maxClients) && maxClients > 0
+  const cappedClients = hasMaxClients ? sortedClients.slice(0, maxClients) : [...sortedClients]
   if (!targetChiffre || targetChiffre <= 0) {
     return cappedClients
   }
@@ -240,7 +241,10 @@ app.get('/api/tournees/plan', async (req, res) => {
   const date_fin = req.query.date_fin
   const commercial = req.query.commercial
   const route = req.query.route
-  const topClients = Math.max(1, parseInt(req.query.top_clients || '25', 10) || 25)
+  const parsedTopClients = parseInt(req.query.top_clients, 10)
+  const topClients = Number.isFinite(parsedTopClients) && parsedTopClients > 0
+    ? Math.max(1, parsedTopClients)
+    : null
   const targetChiffre = Math.max(0, parseFloat(req.query.target_chiffre || '0') || 0)
 
   const useRange = Boolean(date_debut && date_fin)
@@ -444,8 +448,12 @@ app.get('/api/tournees/plan', async (req, res) => {
         const recencyScore = iaData ? (iaData.recency_score || 0) : 0
         const qteRecoIA = iaData ? iaData.qte : 0
         const vnPreditIA = iaData ? iaData.chiffre : 0
+        const caIfBuyIA = iaData ? (iaData.ca_if_buy || 0) : 0
         const distanceKm = distanceMap.get(String(c.nbr_client)) || 0
         const scoreIA = iaData ? computePriorityScore(vnPreditIA, maxPredFuture, probAchat, habitScore, recencyScore, distanceKm, maxDistance) : 0
+        const isViable = iaData
+          ? (probAchat >= 8 || vnPreditIA >= 8 || caIfBuyIA >= 35 || qteRecoIA >= 1)
+          : false
 
         let produits = []
         let clientAgro = 0
@@ -479,6 +487,7 @@ app.get('/api/tournees/plan', async (req, res) => {
           details: { agro: clientAgro, chips: clientChips, bur: clientBur },
           produits,
           prob_achat: probAchat,
+          ca_if_buy: caIfBuyIA,
           habit_score: habitScore,
           recency_score: recencyScore,
           distance_km: roundScore(distanceKm),
@@ -489,9 +498,10 @@ app.get('/api/tournees/plan', async (req, res) => {
           nom: c.nom,
           adresse: c.adresse || 'Adresse non specifiee',
           latitude: c.latitude,
-          longitude: c.longitude
+          longitude: c.longitude,
+          is_viable: isViable
         }
-      }).filter(t => t.chiffre_brut > 0)
+      }).filter(t => t.chiffre_brut > 0 && t.is_viable)
 
       tourneesFormattees = tousLesClients
         .sort((a, b) => b.score_ia - a.score_ia)

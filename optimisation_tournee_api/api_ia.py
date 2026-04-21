@@ -8,6 +8,11 @@ app = Flask(__name__)
 
 FEATURE_COLUMNS_BASE = [
     'jour_semaine',
+    'day_of_month',
+    'week_of_month',
+    'days_to_month_end',
+    'is_month_start',
+    'is_month_end',
     'potentiel',
     'nbr_visites_hist',
     'nbr_visites_jour',
@@ -132,6 +137,30 @@ def build_purchase_probability(row):
     return round(prob * 100, 1)
 
 
+def stabilize_purchase_probability(model_prob_pct, hist_prob_pct, habit_score, recency_score, ca_if_buy):
+    model_prob_pct = float(model_prob_pct) if pd.notna(model_prob_pct) else 0.0
+    hist_prob_pct = float(hist_prob_pct) if pd.notna(hist_prob_pct) else 0.0
+    habit_score = float(habit_score) if pd.notna(habit_score) else 0.0
+    recency_score = float(recency_score) if pd.notna(recency_score) else 0.0
+    ca_if_buy = float(ca_if_buy) if pd.notna(ca_if_buy) else 0.0
+
+    blended = (
+        (0.50 * model_prob_pct) +
+        (0.25 * hist_prob_pct) +
+        (0.15 * habit_score) +
+        (0.10 * recency_score)
+    )
+
+    # Avoid collapsing expected value too aggressively for clients with decent
+    # historical behavior and commercially relevant predicted CA.
+    if ca_if_buy >= 80 and (hist_prob_pct >= 18 or habit_score >= 25):
+        blended = max(blended, min(45.0, (0.60 * hist_prob_pct) + (0.40 * habit_score)))
+    elif ca_if_buy >= 30 and (hist_prob_pct >= 10 or recency_score >= 20):
+        blended = max(blended, min(28.0, (0.65 * hist_prob_pct) + (0.35 * recency_score)))
+
+    return round(float(np.clip(blended, 0, 95)), 1)
+
+
 def compute_habit_score(row):
     weekday_rate = max(0.0, float(row.get('weekday_purchase_rate', 0) or 0))
     recent_ca_trend = max(0.0, float(row.get('recent_ca_trend', 0) or 0))
@@ -195,12 +224,22 @@ def predict_tournee():
         target_date = pd.to_datetime(date_str)
         # MySQL DAYOFWEEK()-1 scale: Sunday=0, Monday=1, ..., Saturday=6
         jour_semaine = (target_date.weekday() + 1) % 7
+        day_of_month = int(target_date.day)
+        week_of_month = int(((target_date.day - 1) // 7) + 1)
+        days_to_month_end = int((target_date + pd.offsets.MonthEnd(0)).day - target_date.day)
+        is_month_start = int(target_date.day <= 7)
+        is_month_end = int(days_to_month_end <= 6)
         month = target_date.month
 
         print(f"Prediction demandee pour le jour : {jour_semaine} (Date: {date_str})")
 
         clients_du_jour = df_master[df_master['jour_semaine'] == jour_semaine].copy()
         clients_du_jour = clients_du_jour.drop_duplicates(subset=['client_code'])
+        clients_du_jour['day_of_month'] = day_of_month
+        clients_du_jour['week_of_month'] = week_of_month
+        clients_du_jour['days_to_month_end'] = days_to_month_end
+        clients_du_jour['is_month_start'] = is_month_start
+        clients_du_jour['is_month_end'] = is_month_end
         clients_du_jour['month'] = month
 
         if clients_du_jour.empty:
@@ -212,11 +251,28 @@ def predict_tournee():
         pred_qte_if_buy = np.maximum(1, np.expm1(model_qte.predict(X_pred)))
         pred_price_if_buy = np.maximum(0.5, np.expm1(model_price.predict(X_pred)))
 
-        clients_du_jour['Prob_achat'] = np.round(achat_prob * 100, 1)
+        clients_du_jour['Prob_modele'] = np.round(achat_prob * 100, 1)
         clients_du_jour['Pred_ca_if_buy'] = pred_ca_if_buy
         clients_du_jour['Pred_qte_if_buy'] = pred_qte_if_buy
         clients_du_jour['Prix_pred'] = pred_price_if_buy
-        clients_du_jour['Vn_predit'] = clients_du_jour['Pred_ca_if_buy'] * achat_prob
+        clients_du_jour['Habit_score'] = clients_du_jour.apply(compute_habit_score, axis=1)
+        clients_du_jour['Recency_score'] = clients_du_jour.apply(compute_recency_score, axis=1)
+        clients_du_jour['Prob_hist'] = clients_du_jour.apply(build_purchase_probability, axis=1)
+        clients_du_jour['Prob_achat'] = clients_du_jour.apply(
+            lambda row: stabilize_purchase_probability(
+                row['Prob_modele'],
+                row['Prob_hist'],
+                row['Habit_score'],
+                row['Recency_score'],
+                row['Pred_ca_if_buy']
+            ),
+            axis=1
+        )
+        fallback_mask = ~np.isfinite(clients_du_jour['Prob_achat'])
+        if fallback_mask.any():
+            clients_du_jour.loc[fallback_mask, 'Prob_achat'] = clients_du_jour.loc[fallback_mask, 'Prob_hist']
+
+        clients_du_jour['Vn_predit'] = clients_du_jour['Pred_ca_if_buy'] * (clients_du_jour['Prob_achat'] / 100.0)
         clients_du_jour['Qte_predite'] = clients_du_jour.apply(
             lambda row: blend_expected_quantity(
                 row['Prob_achat'] / 100.0,
@@ -227,11 +283,6 @@ def predict_tournee():
             ),
             axis=1
         )
-        clients_du_jour['Habit_score'] = clients_du_jour.apply(compute_habit_score, axis=1)
-        clients_du_jour['Recency_score'] = clients_du_jour.apply(compute_recency_score, axis=1)
-        fallback_mask = ~np.isfinite(clients_du_jour['Prob_achat'])
-        if fallback_mask.any():
-            clients_du_jour.loc[fallback_mask, 'Prob_achat'] = clients_du_jour.loc[fallback_mask].apply(build_purchase_probability, axis=1)
 
         max_vn = clients_du_jour['Vn_predit'].max()
 
@@ -288,7 +339,11 @@ def predict_tournee():
                         produit = 'Standard'
                     product_weights[produit] = float(p_row.get('qte_moyenne', 1) or 1)
 
-            details_qte, total_qte = rebalance_quantities(row['Qte_predite'], product_weights)
+            qte_predite = float(row['Qte_predite'])
+            if qte_predite < 1 and float(row['Prob_achat']) >= 12 and float(row['Vn_predit']) >= 8:
+                qte_predite = 1
+
+            details_qte, total_qte = rebalance_quantities(qte_predite, product_weights)
             prix_moyen = float(row['Vn_predit']) / max(1, total_qte)
 
             result_dict[code_str] = {
@@ -297,6 +352,8 @@ def predict_tournee():
                 "vip": int(row['VIP']),
                 "qte": int(total_qte),
                 "chiffre": round(float(row['Vn_predit']), 2),
+                "ca_if_buy": round(float(row['Pred_ca_if_buy']), 2),
+                "qte_if_buy": round(float(row['Pred_qte_if_buy']), 2),
                 "details": details_qte,
                 "prix_moyen": round(prix_moyen, 2),
                 "prob_achat": round(float(row['Prob_achat']), 1),
