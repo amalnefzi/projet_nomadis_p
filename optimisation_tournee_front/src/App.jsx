@@ -2,6 +2,8 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import axios from 'axios'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import './App.css'
+import CoveragePlanner from './CoveragePlanner'
 
 const API = 'http://localhost:5000'
 
@@ -110,6 +112,7 @@ function buildGoogleMapsUrl(origin, stops) {
 }
 
 function App() {
+  const [activeModule, setActiveModule] = useState('dashboard')
   const [loading, setLoading] = useState(false)
   const [erreur, setErreur] = useState(null)
   const [showBacktest, setShowBacktest] = useState(false)
@@ -140,6 +143,7 @@ function App() {
     commercial: '',
     date_precise: '',
     actif: 'Oui',
+    mode_tournee: 'vente',
     mode_date: 'jour',
     top_clients: '',
     target_chiffre: '',
@@ -204,7 +208,9 @@ function App() {
     try {
       setLoading(true)
       setErreur(null)
-      setShowBacktest(false)
+      if (filtres.mode_tournee !== 'vente') {
+        setShowBacktest(false)
+      }
 
       const parsedTop = parseInt(topClientsInput, 10)
       const committedTop = Number.isFinite(parsedTop) ? Math.min(200, Math.max(1, parsedTop)) : ''
@@ -227,6 +233,7 @@ function App() {
           commercial: filtres.commercial,
           route: filtres.route,
           actif: filtres.actif,
+          mode_tournee: filtres.mode_tournee,
           top_clients: committedTop || undefined,
           target_chiffre: committedTarget || undefined,
           t: Date.now()
@@ -257,6 +264,8 @@ function App() {
   const tournees = useMemo(() => donneesTournee?.tournees ?? [], [donneesTournee])
   const chargeTotale = useMemo(() => donneesTournee?.chargeTotale ?? { agro: 0, chips: 0, bureautique: 0, detailsProduits: [] }, [donneesTournee])
   const itineraire = useMemo(() => donneesTournee?.itineraire ?? [], [donneesTournee])
+  const modeTournee = donneesTournee?.mode || filtres.mode_tournee || 'vente'
+  const isRecouvrementMode = modeTournee === 'recouvrement'
 
   const itineraireGeo = useMemo(() => {
     const fromApi = (donneesTournee?.itineraire_geo || []).filter(pt => pt.latitude != null && pt.longitude != null)
@@ -502,6 +511,20 @@ function App() {
 
   const chiffreTotal = tourneesAffichees.reduce((acc, curr) => acc + parseFloat(curr.chiffre || 0), 0)
   const quantiteTotalCamion = chargeTotale.agro + chargeTotale.chips + chargeTotale.bureautique
+  const plafondTotal = tourneesAffichees.reduce((acc, curr) => acc + (Number(curr.plafond_credit) || 0), 0)
+  const encoursTotalRecouvrement = tourneesAffichees.reduce((acc, curr) => acc + (Number(curr.encours_credit) || 0), 0)
+  const montantMoyenRecouvrement = tourneesAffichees.length ? encoursTotalRecouvrement / tourneesAffichees.length : 0
+  const recouvrementList = useMemo(
+    () => tourneesAffichees
+      .map(row => ({
+        nom: row.nom,
+        collecte: Number(row.collecte_prevue || row.chiffre_brut || 0),
+        encours: Number(row.encours_credit || 0),
+        isDueToday: Number(row.is_due_today || 0)
+      }))
+      .sort((a, b) => (b.collecte - a.collecte) || (b.encours - a.encours)),
+    [tourneesAffichees]
+  )
   const routeNavigationUrl = useMemo(
     () => buildGoogleMapsUrl(routePlan.origin, routePlan.orderedStops),
     [routePlan.origin, routePlan.orderedStops]
@@ -509,6 +532,39 @@ function App() {
 
   return (
     <div style={{ padding: '20px 40px', fontFamily: '"Segoe UI", Roboto, Helvetica, Arial, sans-serif', backgroundColor: '#f4f7fa', minHeight: '100vh', color: '#333' }}>
+      <div style={{ display: 'flex', gap: '12px', marginBottom: '24px', flexWrap: 'wrap' }}>
+        <button
+          onClick={() => setActiveModule('dashboard')}
+          style={{
+            padding: '11px 18px',
+            borderRadius: '999px',
+            border: activeModule === 'dashboard' ? 'none' : '1px solid #cbd5e1',
+            backgroundColor: activeModule === 'dashboard' ? '#1a2b4c' : 'white',
+            color: activeModule === 'dashboard' ? 'white' : '#334155',
+            fontWeight: '700'
+          }}
+        >
+          Dashboard actuel
+        </button>
+        <button
+          onClick={() => setActiveModule('coverage')}
+          style={{
+            padding: '11px 18px',
+            borderRadius: '999px',
+            border: activeModule === 'coverage' ? 'none' : '1px solid #cbd5e1',
+            backgroundColor: activeModule === 'coverage' ? '#1c6dd0' : 'white',
+            color: activeModule === 'coverage' ? 'white' : '#334155',
+            fontWeight: '700'
+          }}
+        >
+          Plan couverture
+        </button>
+      </div>
+
+      {activeModule === 'coverage' ? (
+        <CoveragePlanner api={API} />
+      ) : (
+        <>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '30px' }}>
         <div>
           <h1 style={{ margin: 0, color: '#1a2b4c', fontSize: '28px' }}>Dashboard Optimisation - IA Nomadis</h1>
@@ -591,7 +647,9 @@ function App() {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: '170px' }}>
-          <label style={{ fontSize: '13px', fontWeight: 'bold', color: '#555', marginBottom: '6px' }}>Objectif CA (TND)</label>
+          <label style={{ fontSize: '13px', fontWeight: 'bold', color: '#555', marginBottom: '6px' }}>
+            {filtres.mode_tournee === 'recouvrement' ? 'Seuil encours (TND)' : 'Objectif CA (TND)'}
+          </label>
           <input
             type="number"
             min={0}
@@ -603,9 +661,24 @@ function App() {
               const next = Number.isFinite(parsed) && parsed > 0 ? String(parsed) : ''
               setTargetChiffreInput(next)
             }}
-            placeholder="Ex: 10000000"
+            placeholder={filtres.mode_tournee === 'recouvrement' ? 'Ex: 5000 encours' : 'Ex: 10000000'}
             style={{ padding: '10px', borderRadius: '6px', border: '1px solid #ddd' }}
           />
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: '170px' }}>
+          <label style={{ fontSize: '13px', fontWeight: 'bold', color: '#555', marginBottom: '6px' }}>Type de tournee</label>
+          <select
+            value={filtres.mode_tournee}
+            onChange={e => {
+              setShowBacktest(false)
+              handleChangeFiltre('mode_tournee', e.target.value)
+            }}
+            style={{ padding: '10px', borderRadius: '6px', border: '1px solid #ddd' }}
+          >
+            <option value="vente">Prediction de vente</option>
+            <option value="recouvrement">Tournee de recouvrement</option>
+          </select>
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: '170px' }}>
@@ -626,7 +699,7 @@ function App() {
           {loading ? 'Recherche IA...' : "Analyser avec l'IA"}
         </button>
 
-        {donneesTournee && (
+        {donneesTournee && !isRecouvrementMode && (
           <button onClick={() => setShowBacktest(!showBacktest)} style={{ padding: '10px 25px', backgroundColor: '#6f42c1', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', height: '40px', marginLeft: 'auto' }}>
             {showBacktest ? 'Cacher Backtest' : 'Voir Precision'}
           </button>
@@ -717,38 +790,53 @@ function App() {
       {donneesTournee && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px', marginBottom: '30px' }}>
           <div style={{ backgroundColor: 'white', padding: '20px', borderRadius: '10px', borderLeft: '5px solid #0d6efd', boxShadow: '0 4px 6px rgba(0,0,0,0.05)' }}>
-            <p style={{ margin: 0, fontSize: '13px', color: '#6c757d', fontWeight: 'bold', textTransform: 'uppercase' }}>Clients VIP Detectes</p>
+            <p style={{ margin: 0, fontSize: '13px', color: '#6c757d', fontWeight: 'bold', textTransform: 'uppercase' }}>
+              {isRecouvrementMode ? 'Clients a visiter' : 'Clients VIP Detectes'}
+            </p>
             <h2 style={{ margin: '10px 0 0 0', fontSize: '32px', color: '#1a2b4c' }}>{tourneesAffichees.length}</h2>
           </div>
           <div style={{ backgroundColor: 'white', padding: '20px', borderRadius: '10px', borderLeft: '5px solid #198754', boxShadow: '0 4px 6px rgba(0,0,0,0.05)' }}>
-            <p style={{ margin: 0, fontSize: '13px', color: '#6c757d', fontWeight: 'bold', textTransform: 'uppercase' }}>Vente Predite (IA)</p>
+            <p style={{ margin: 0, fontSize: '13px', color: '#6c757d', fontWeight: 'bold', textTransform: 'uppercase' }}>
+              {isRecouvrementMode ? "Montant prevu a recuperer aujourd'hui" : 'Vente Predite (IA)'}
+            </p>
             <h2 style={{ margin: '10px 0 0 0', fontSize: '32px', color: '#198754' }}>{chiffreTotal.toLocaleString()} <span style={{ fontSize: '16px' }}>TND</span></h2>
           </div>
           <div style={{ backgroundColor: 'white', padding: '20px', borderRadius: '10px', borderLeft: '5px solid #dc3545', boxShadow: '0 4px 6px rgba(0,0,0,0.05)' }}>
-            <p style={{ margin: 0, fontSize: '13px', color: '#6c757d', fontWeight: 'bold', textTransform: 'uppercase' }}>Charge IA Suggeree</p>
-            <h2 style={{ margin: '10px 0 0 0', fontSize: '32px', color: '#dc3545' }}>{quantiteTotalCamion} <span style={{ fontSize: '16px' }}>Unites</span></h2>
+            <p style={{ margin: 0, fontSize: '13px', color: '#6c757d', fontWeight: 'bold', textTransform: 'uppercase' }}>
+              {isRecouvrementMode ? 'Encours moyen / client' : 'Charge IA Suggeree'}
+            </p>
+            <h2 style={{ margin: '10px 0 0 0', fontSize: '32px', color: '#dc3545' }}>
+              {isRecouvrementMode
+                ? `${montantMoyenRecouvrement.toLocaleString(undefined, { maximumFractionDigits: 1 })} `
+                : `${quantiteTotalCamion} `}
+              <span style={{ fontSize: '16px' }}>{isRecouvrementMode ? 'TND' : 'Unites'}</span>
+            </h2>
           </div>
         </div>
       )}
 
       <div style={{ display: 'flex', gap: '30px', flexWrap: 'wrap' }}>
         <div style={{ flex: '2', minWidth: '600px', backgroundColor: 'white', borderRadius: '10px', padding: '20px', boxShadow: '0 4px 6px rgba(0,0,0,0.05)' }}>
-          <h3 style={{ marginTop: 0, color: '#1a2b4c', borderBottom: '2px solid #f1f3f5', paddingBottom: '10px' }}>Liste des clients (tries par Intelligence IA)</h3>
+          <h3 style={{ marginTop: 0, color: '#1a2b4c', borderBottom: '2px solid #f1f3f5', paddingBottom: '10px' }}>
+            {isRecouvrementMode ? 'Liste des clients (tries par priorite de recouvrement)' : 'Liste des clients (tries par Intelligence IA)'}
+          </h3>
           <div style={{ overflowX: 'auto', maxHeight: '380px' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
               <thead style={{ position: 'sticky', top: 0, backgroundColor: '#f8f9fa' }}>
                 <tr>
-                  <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #dee2e6', color: '#495057' }}>SCORE VIP</th>
-                  <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #dee2e6', color: '#495057' }}>QTE. RECO</th>
+                  <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #dee2e6', color: '#495057' }}>{isRecouvrementMode ? 'PRIORITE' : 'SCORE VIP'}</th>
+                  <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #dee2e6', color: '#495057' }}>{isRecouvrementMode ? 'A RECUPERER' : 'QTE. RECO'}</th>
                   <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #dee2e6', color: '#495057' }}>JOUR</th>
                   <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #dee2e6', color: '#495057' }}>CLIENT</th>
-                  <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #dee2e6', color: '#495057' }}>CHIFFRE PREDIT</th>
+                  {!isRecouvrementMode && (
+                    <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #dee2e6', color: '#495057' }}>CHIFFRE PREDIT</th>
+                  )}
                   <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #dee2e6', color: '#495057' }}>ZONE COMM.</th>
                 </tr>
               </thead>
               <tbody>
                 {tournees.length === 0 ? (
-                  <tr><td colSpan={6} style={{ padding: '20px', textAlign: 'center', color: '#888' }}>Aucune donnee. Verifiez l'IA.</td></tr>
+                  <tr><td colSpan={isRecouvrementMode ? 5 : 6} style={{ padding: '20px', textAlign: 'center', color: '#888' }}>Aucune donnee. Verifiez l'IA.</td></tr>
                 ) : (
                   tourneesAffichees.map((row, idx) => {
                     let scoreColor = '#dc3545'
@@ -763,46 +851,64 @@ function App() {
                           {Number(row.score_ia || 0).toFixed(1)} / 100
                         </td>
                         <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef' }}>
-                          <div
-                            onClick={() => setClickedClient(clickedClient === idx ? null : idx)}
-                            style={{
-                              fontWeight: 'bold',
-                              fontSize: '14px',
-                              color: '#0d6efd',
-                              cursor: 'pointer',
-                              padding: '4px 8px',
-                              borderRadius: '4px',
-                              backgroundColor: clickedClient === idx ? '#e7f3ff' : 'transparent',
-                              transition: '0.2s',
-                              display: 'inline-block'
-                            }}
-                          >
-                            {row.qte_reco} unites
-                          </div>
-
-                          {clickedClient === idx && (
-                            <div style={{ marginTop: '8px', padding: '10px', backgroundColor: '#f8f9fa', borderRadius: '6px', border: '1px solid #dee2e6', fontSize: '12px' }}>
-                              <div style={{ fontWeight: 'bold', marginBottom: '6px', color: '#495057' }}>
-                                Produits recommandes:
+                          {isRecouvrementMode ? (
+                            <div>
+                              <div style={{ fontWeight: 'bold', fontSize: '14px', color: '#0d6efd', display: 'inline-block' }}>
+                                {(Number(row.collecte_prevue || row.chiffre_brut || row.qte_reco || 0)).toFixed(1)} TND
                               </div>
-                              {row.produits && row.produits.length > 0 ? (
-                                row.produits.map((prod, pIdx) => (
-                                  <div key={pIdx} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: pIdx < row.produits.length - 1 ? '1px solid #e9ecef' : 'none', color: '#333' }}>
-                                    <span style={{ fontWeight: '500' }}>{prod.nom}</span>
-                                    <span style={{ fontWeight: 'bold', color: '#0d6efd' }}>{prod.quantite} unites</span>
+                              <div style={{ fontSize: '11px', color: '#6c757d', marginTop: '4px' }}>
+                                Encours: {(Number(row.encours_credit || 0)).toFixed(1)} TND
+                                {Number(row.is_due_today || 0) === 1 ? ' - Echeance atteinte' : ''}
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <div
+                                onClick={() => setClickedClient(clickedClient === idx ? null : idx)}
+                                style={{
+                                  fontWeight: 'bold',
+                                  fontSize: '14px',
+                                  color: '#0d6efd',
+                                  cursor: 'pointer',
+                                  padding: '4px 8px',
+                                  borderRadius: '4px',
+                                  backgroundColor: clickedClient === idx ? '#e7f3ff' : 'transparent',
+                                  transition: '0.2s',
+                                  display: 'inline-block'
+                                }}
+                              >
+                                {row.qte_reco} unites
+                              </div>
+
+                              {clickedClient === idx && (
+                                <div style={{ marginTop: '8px', padding: '10px', backgroundColor: '#f8f9fa', borderRadius: '6px', border: '1px solid #dee2e6', fontSize: '12px' }}>
+                                  <div style={{ fontWeight: 'bold', marginBottom: '6px', color: '#495057' }}>
+                                    Produits recommandes:
                                   </div>
-                                ))
-                              ) : (
-                                <div style={{ color: '#6c757d', fontStyle: 'italic', padding: '4px 0' }}>
-                                  Aucun detail produit disponible pour ce client
+                                  {row.produits && row.produits.length > 0 ? (
+                                    row.produits.map((prod, pIdx) => (
+                                      <div key={pIdx} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: pIdx < row.produits.length - 1 ? '1px solid #e9ecef' : 'none', color: '#333' }}>
+                                        <span style={{ fontWeight: '500' }}>{prod.nom}</span>
+                                        <span style={{ fontWeight: 'bold', color: '#0d6efd' }}>{prod.quantite} unites</span>
+                                      </div>
+                                    ))
+                                  ) : (
+                                    <div style={{ color: '#6c757d', fontStyle: 'italic', padding: '4px 0' }}>
+                                      Aucun detail produit disponible pour ce client
+                                    </div>
+                                  )}
                                 </div>
                               )}
-                            </div>
+                            </>
                           )}
                         </td>
                         <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef', fontWeight: 'bold', color: '#4b5563' }}>{jourLabel}</td>
                         <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef' }}>{row.nom} ({row.nbr_client})</td>
-                        <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef', color: '#198754', fontWeight: 'bold' }}>{row.chiffre}</td>
+                        {!isRecouvrementMode && (
+                          <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef', color: '#198754', fontWeight: 'bold' }}>
+                            {row.chiffre}
+                          </td>
+                        )}
                         <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef' }}>{row.commercia_zone}</td>
                       </tr>
                     )
@@ -817,11 +923,31 @@ function App() {
         {donneesTournee && (
           <div style={{ flex: '1', minWidth: '350px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
             <div style={{ backgroundColor: '#1a2b4c', color: 'white', padding: '20px', borderRadius: '10px', boxShadow: '0 4px 6px rgba(0,0,0,0.1)' }}>
-              <h3 style={{ marginTop: 0, color: '#0d6efd', borderBottom: '1px solid #334466', paddingBottom: '10px' }}>Prediction Chargement IA</h3>
-              <p style={{ fontSize: '13px', color: '#adb5bd' }}>L'IA suggere ce chargement detaille par produit :</p>
+              <h3 style={{ marginTop: 0, color: '#0d6efd', borderBottom: '1px solid #334466', paddingBottom: '10px' }}>
+                {isRecouvrementMode ? 'Recouvrement a traiter' : 'Prediction Chargement IA'}
+              </h3>
+              <p style={{ fontSize: '13px', color: '#adb5bd' }}>
+                {isRecouvrementMode
+                  ? "Clients a visiter aujourd'hui (montant prevu):"
+                  : "L'IA suggere ce chargement detaille par produit :"}
+              </p>
 
               <div style={{ maxHeight: '250px', overflowY: 'auto', paddingRight: '5px' }}>
-                {chargeTotale.detailsProduits && chargeTotale.detailsProduits.length > 0 ? (
+                {isRecouvrementMode ? (
+                  recouvrementList.length > 0 ? recouvrementList.map((item, idx) => (
+                    <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#2c3e5d', padding: '10px 15px', borderRadius: '8px', marginBottom: '8px', gap: '12px' }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 'bold', fontSize: '14px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={item.nom}>{item.nom}</div>
+                        <div style={{ fontSize: '11px', color: '#9fb3c8' }}>
+                          Encours: {item.encours.toFixed(1)} TND{item.isDueToday ? ' - due' : ''}
+                        </div>
+                      </div>
+                      <span style={{ fontSize: '16px', fontWeight: 'bold', color: '#20c997', whiteSpace: 'nowrap' }}>{item.collecte.toFixed(1)} TND</span>
+                    </div>
+                  )) : (
+                    <div style={{ color: '#adb5bd', fontSize: '13px' }}>Aucun encours de recouvrement pour cette selection.</div>
+                  )
+                ) : chargeTotale.detailsProduits && chargeTotale.detailsProduits.length > 0 ? (
                   chargeTotale.detailsProduits.map((prod, idx) => (
                     <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#2c3e5d', padding: '10px 15px', borderRadius: '8px', marginBottom: '8px' }}>
                       <span style={{ fontWeight: 'bold', fontSize: '14px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '70%' }} title={prod.nom}>{prod.nom}</span>
@@ -932,6 +1058,8 @@ function App() {
           </div>
         )}
       </div>
+        </>
+      )}
     </div>
   )
 }

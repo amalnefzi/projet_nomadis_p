@@ -222,6 +222,21 @@ def predict_tournee():
         data = request.json or {}
         date_str = data.get('date', '2026-03-15')
         target_date = pd.to_datetime(date_str)
+        min_prob_achat = float(data.get('min_prob_achat', 20))
+        min_vn_predit = float(data.get('min_vn_predit', 12))
+        min_ca_if_buy = float(data.get('min_ca_if_buy', 40))
+        selection_multiplier = float(data.get('selection_multiplier', 1.1))
+        min_clients_floor = int(data.get('min_clients_floor', 20))
+        max_clients_cap = int(data.get('max_clients_cap', 250))
+        max_clients_req = int(data.get('max_clients', 0))
+
+        min_prob_achat = float(np.clip(min_prob_achat, 0, 100))
+        min_vn_predit = max(0.0, min_vn_predit)
+        min_ca_if_buy = max(0.0, min_ca_if_buy)
+        selection_multiplier = float(np.clip(selection_multiplier, 1.0, 3.0))
+        min_clients_floor = int(np.clip(min_clients_floor, 1, 300))
+        max_clients_cap = int(np.clip(max_clients_cap, min_clients_floor, 2000))
+        max_clients_req = max(0, max_clients_req)
         # MySQL DAYOFWEEK()-1 scale: Sunday=0, Monday=1, ..., Saturday=6
         jour_semaine = (target_date.weekday() + 1) % 7
         day_of_month = int(target_date.day)
@@ -316,8 +331,31 @@ def predict_tournee():
             axis=1
         )
 
+        # Keep only clients with a credible buy signal for the requested date.
+        base_filter = (
+            (clients_du_jour['Prob_achat'] >= min_prob_achat) &
+            (
+                (clients_du_jour['Vn_predit'] >= min_vn_predit) |
+                (clients_du_jour['Pred_ca_if_buy'] >= min_ca_if_buy)
+            )
+        )
+        filtered_clients = clients_du_jour[base_filter].copy()
+
+        if filtered_clients.empty:
+            filtered_clients = clients_du_jour.copy()
+
+        expected_buyers = int(np.ceil((clients_du_jour['Prob_achat'].clip(0, 100) / 100.0).sum()))
+        dynamic_limit = int(np.clip(np.ceil(expected_buyers * selection_multiplier), min_clients_floor, max_clients_cap))
+        selected_limit = max_clients_req if max_clients_req > 0 else dynamic_limit
+        selected_limit = int(np.clip(selected_limit, 1, max_clients_cap))
+
+        filtered_clients = filtered_clients.sort_values(
+            ['Prob_achat', 'Vn_predit', 'Score', 'Habit_score', 'Recency_score'],
+            ascending=False
+        ).head(selected_limit)
+
         result_dict = {}
-        for _, row in clients_du_jour.iterrows():
+        for _, row in filtered_clients.iterrows():
             raw_code = str(row['client_code']).strip()
             try:
                 code_str = str(int(float(raw_code))).zfill(5)
@@ -361,7 +399,20 @@ def predict_tournee():
                 "recency_score": round(float(row['Recency_score']), 1)
             }
 
-        return jsonify({"status": "success", "predictions": result_dict})
+        return jsonify({
+            "status": "success",
+            "predictions": result_dict,
+            "meta": {
+                "date": date_str,
+                "total_candidates": int(len(clients_du_jour)),
+                "selected_clients": int(len(filtered_clients)),
+                "expected_buyers_estimate": int(expected_buyers),
+                "min_prob_achat": float(min_prob_achat),
+                "min_vn_predit": float(min_vn_predit),
+                "min_ca_if_buy": float(min_ca_if_buy),
+                "selection_limit": int(selected_limit)
+            }
+        })
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
