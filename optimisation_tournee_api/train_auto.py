@@ -45,6 +45,14 @@ FEATURE_COLUMNS_BASE = [
     'month'
 ]
 
+ASSIGNMENT_CATEGORICAL_COLUMNS = [
+    'client_code',
+    'region',
+    'delegation',
+    'routing_code',
+    'home_commercial'
+]
+
 
 def get_mysql_url():
     host = os.getenv('DB_HOST', 'localhost')
@@ -61,6 +69,16 @@ def build_feature_frame(df):
     return features
 
 
+def build_assignment_feature_frame(df):
+    features = df[FEATURE_COLUMNS_BASE + ASSIGNMENT_CATEGORICAL_COLUMNS].copy()
+    for col in FEATURE_COLUMNS_BASE:
+        features[col] = pd.to_numeric(features[col], errors='coerce').fillna(0)
+    for col in ASSIGNMENT_CATEGORICAL_COLUMNS:
+        features[col] = features[col].fillna('Inconnu').astype(str).str.strip()
+    features = pd.get_dummies(features, columns=ASSIGNMENT_CATEGORICAL_COLUMNS, dummy_na=False)
+    return features
+
+
 def get_base_dataset_query():
     return """
         SELECT
@@ -68,6 +86,9 @@ def get_base_dataset_query():
             DATE(t.date_valide) AS date_doc,
             DAYOFWEEK(t.date_valide) - 1 AS jour_semaine,
             t.region,
+            t.delegation,
+            t.routing_code,
+            t.home_commercial,
             t.potentiel,
             SUM(t.net_a_payer) AS ca_jour,
             SUM(t.quantite) AS qte_jour
@@ -82,6 +103,9 @@ def get_base_dataset_query():
                     ELSE NULL
                 END AS date_valide,
                 COALESCE(c.region, 'Inconnu') AS region,
+                COALESCE(c.delegation, 'Inconnue') AS delegation,
+                COALESCE(c.routing_code, 'Inconnue') AS routing_code,
+                COALESCE(NULLIF(TRIM(c.user_code), ''), 'Inconnu') AS home_commercial,
                 COALESCE(c.potentiel, 0) AS potentiel,
                 e.net_a_payer,
                 COALESCE(l.quantite, 0) AS quantite
@@ -101,7 +125,53 @@ def get_base_dataset_query():
             DATE(t.date_valide),
             DAYOFWEEK(t.date_valide) - 1,
             t.region,
+            t.delegation,
+            t.routing_code,
+            t.home_commercial,
             t.potentiel
+        ORDER BY t.client_code, date_doc
+    """
+
+
+def get_assignment_dataset_query():
+    return """
+        SELECT
+            t.client_code,
+            DATE(t.date_valide) AS date_doc,
+            DAYOFWEEK(t.date_valide) - 1 AS jour_semaine,
+            t.commercial_code
+        FROM (
+            SELECT
+                LPAD(e.client_code, 5, '0') AS client_code,
+                CASE
+                    WHEN e.date REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$'
+                         AND e.date <> '0000-00-00 00:00:00'
+                         AND e.date <> '0000-00-00'
+                    THEN STR_TO_DATE(e.date, '%%Y-%%m-%%d %%H:%%i:%%s')
+                    ELSE NULL
+                END AS date_valide,
+                COALESCE(
+                    NULLIF(TRIM(e.commercial_code), ''),
+                    NULLIF(TRIM(e.user_code), ''),
+                    NULLIF(TRIM(c.user_code), ''),
+                    'Inconnu'
+                ) AS commercial_code
+            FROM entetecommercials e
+            JOIN clients c ON e.client_code = c.code
+            WHERE e.type IN ('facture', 'bl', 'blf')
+              AND e.net_a_payer > 0
+              AND e.client_code IS NOT NULL
+              AND e.client_code <> ''
+              AND LPAD(e.client_code, 5, '0') <> '00000'
+        ) t
+        WHERE t.date_valide IS NOT NULL
+          AND YEAR(t.date_valide) >= 2001
+          AND t.commercial_code <> 'Inconnu'
+        GROUP BY
+            t.client_code,
+            DATE(t.date_valide),
+            DAYOFWEEK(t.date_valide) - 1,
+            t.commercial_code
         ORDER BY t.client_code, date_doc
     """
 
@@ -111,7 +181,13 @@ def build_dense_training_panel(df_base):
     clients = (
         df_base.sort_values('date')
         .groupby('client_code', as_index=False)
-        .agg({'region': 'last', 'potentiel': 'last'})
+        .agg({
+            'region': 'last',
+            'delegation': 'last',
+            'routing_code': 'last',
+            'home_commercial': 'last',
+            'potentiel': 'last'
+        })
     )
 
     panel = clients[['client_code']].merge(calendar, how='cross')
@@ -298,6 +374,9 @@ df_base['date_doc'] = pd.to_datetime(df_base['date_doc'], errors='coerce')
 df_base = df_base.dropna(subset=['date_doc']).copy()
 df_base['client_code'] = df_base['client_code'].astype(str).str.strip()
 df_base['region'] = df_base['region'].fillna('Inconnu').astype(str).str.strip()
+df_base['delegation'] = df_base['delegation'].fillna('Inconnue').astype(str).str.strip()
+df_base['routing_code'] = df_base['routing_code'].fillna('Inconnue').astype(str).str.strip()
+df_base['home_commercial'] = df_base['home_commercial'].fillna('Inconnu').astype(str).str.strip()
 df_base['potentiel'] = pd.to_numeric(df_base['potentiel'], errors='coerce').fillna(0)
 df_base['ca_jour'] = pd.to_numeric(df_base['ca_jour'], errors='coerce').fillna(0)
 df_base['qte_jour'] = pd.to_numeric(df_base['qte_jour'], errors='coerce').fillna(0)
@@ -321,6 +400,9 @@ df_raw = df_base.rename(columns={
 
 df_raw['client_code'] = df_raw['client_code'].astype(str).str.strip()
 df_raw['region'] = df_raw['region'].fillna('Inconnu').astype(str).str.strip()
+df_raw['delegation'] = df_raw['delegation'].fillna('Inconnue').astype(str).str.strip()
+df_raw['routing_code'] = df_raw['routing_code'].fillna('Inconnue').astype(str).str.strip()
+df_raw['home_commercial'] = df_raw['home_commercial'].fillna('Inconnu').astype(str).str.strip()
 df_raw['potentiel'] = pd.to_numeric(df_raw['potentiel'], errors='coerce').fillna(0)
 df_raw['vente_nette'] = pd.to_numeric(df_raw['vente_nette'], errors='coerce').fillna(0)
 df_raw['qte_totale'] = pd.to_numeric(df_raw['qte_totale'], errors='coerce').fillna(0)
@@ -461,12 +543,81 @@ joblib.dump(model_ca, 'modele_nomadis_ca.pkl')
 joblib.dump(model_qte, 'modele_nomadis_qte.pkl')
 joblib.dump(model_price, 'modele_nomadis_price.pkl')
 
+print("Preparation du modele XGBoost d'affectation commerciale...")
+df_assignment_docs = pd.read_sql(get_assignment_dataset_query(), engine)
+df_assignment_docs['date_doc'] = pd.to_datetime(df_assignment_docs['date_doc'], errors='coerce')
+df_assignment_docs = df_assignment_docs.dropna(subset=['date_doc']).copy()
+df_assignment_docs['client_code'] = df_assignment_docs['client_code'].astype(str).str.strip()
+df_assignment_docs['commercial_code'] = df_assignment_docs['commercial_code'].fillna('Inconnu').astype(str).str.strip()
+df_assignment_docs = df_assignment_docs[df_assignment_docs['commercial_code'] != 'Inconnu'].copy()
+df_assignment_docs = df_assignment_docs.rename(columns={'date_doc': 'date'})
+
+df_assignment_train = df_ml.merge(
+    df_assignment_docs[['client_code', 'date', 'commercial_code']],
+    on=['client_code', 'date'],
+    how='inner'
+).copy()
+df_assignment_train = df_assignment_train[df_assignment_train['commercial_code'].notna()].copy()
+df_assignment_train['commercial_code'] = df_assignment_train['commercial_code'].astype(str).str.strip()
+df_assignment_train = df_assignment_train[df_assignment_train['commercial_code'] != ''].copy()
+
+if df_assignment_train['commercial_code'].nunique() >= 2:
+    assignment_feature_frame = build_assignment_feature_frame(df_assignment_train)
+    assignment_columns = list(assignment_feature_frame.columns)
+    assignment_classes = sorted(df_assignment_train['commercial_code'].unique().tolist())
+    assignment_label_to_id = {label: idx for idx, label in enumerate(assignment_classes)}
+
+    joblib.dump(assignment_columns, 'colonnes_affectation.pkl')
+    joblib.dump(assignment_classes, 'classes_affectation.pkl')
+
+    df_assignment_model = pd.concat([
+        df_assignment_train[['date', 'commercial_code']].reset_index(drop=True),
+        assignment_feature_frame.reset_index(drop=True)
+    ], axis=1)
+    df_assignment_model = df_assignment_model.loc[:, ~df_assignment_model.columns.duplicated()].copy()
+    df_assignment_model = df_assignment_model.sort_values('date').reset_index(drop=True)
+
+    split_index_assignment = max(1, int(len(df_assignment_model) * 0.8))
+    train_assignment_df = df_assignment_model.iloc[:split_index_assignment].copy()
+    test_assignment_df = df_assignment_model.iloc[split_index_assignment:].copy()
+
+    X_assignment_train = train_assignment_df[assignment_columns].loc[:, ~train_assignment_df[assignment_columns].columns.duplicated()].copy()
+    X_assignment_test = test_assignment_df[assignment_columns].loc[:, ~test_assignment_df[assignment_columns].columns.duplicated()].copy()
+    y_assignment_train = train_assignment_df['commercial_code'].map(assignment_label_to_id).astype(int)
+    y_assignment_test = test_assignment_df['commercial_code'].map(assignment_label_to_id).astype(int)
+    assignment_train_weights = build_recency_weights(train_assignment_df['date'])
+
+    model_affectation = XGBClassifier(
+        n_estimators=260,
+        learning_rate=0.05,
+        max_depth=6,
+        subsample=0.85,
+        colsample_bytree=0.85,
+        min_child_weight=2,
+        objective='multi:softprob',
+        eval_metric='mlogloss',
+        num_class=len(assignment_classes),
+        random_state=42,
+        verbosity=0
+    )
+    model_affectation.fit(X_assignment_train, y_assignment_train, sample_weight=assignment_train_weights)
+    joblib.dump(model_affectation, 'modele_nomadis_affectation.pkl')
+
+    if not test_assignment_df.empty:
+        pred_assignment = model_affectation.predict(X_assignment_test)
+        assignment_accuracy = accuracy_score(y_assignment_test, pred_assignment)
+        print(f"[INFO] AFFECTATION -> Accuracy: {round(assignment_accuracy * 100, 1)}% | Classes: {len(assignment_classes)}")
+    else:
+        print(f"[INFO] AFFECTATION -> modele entraine avec {len(assignment_classes)} classes.")
+else:
+    print("[INFO] AFFECTATION -> ignoree, moins de deux commerciaux exploitables.")
+
 with open('precision.txt', 'w', encoding='utf8') as f:
     f.write(str(quality_score))
 
 print("Preparation de la base de prediction par client et jour...")
 candidate_cols = [
-    'client_code', 'region', 'potentiel', 'jour_semaine', 'day_of_month', 'week_of_month',
+    'client_code', 'region', 'delegation', 'routing_code', 'home_commercial', 'potentiel', 'jour_semaine', 'day_of_month', 'week_of_month',
     'days_to_month_end', 'is_month_start', 'is_month_end', 'month',
     'nbr_visites_hist', 'nbr_visites_jour', 'days_since_last_order', 'vente_last', 'qte_last',
     'vente_avg_3', 'qte_avg_3',

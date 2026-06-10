@@ -44,6 +44,13 @@ db.connect(err => {
   console.log('Le reentrainement automatique est desactive dans server.js. Utilisez le scheduler systeme.')
 })
 
+const COMMERCIAL_OPTIONS_CACHE_TTL_MS = 5 * 60 * 1000
+let commercialOptionsCache = {
+  data: null,
+  expiresAt: 0,
+  pending: null
+}
+
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value))
 }
@@ -246,6 +253,74 @@ function queryAsync(sql, params = []) {
       else resolve(rows)
     })
   })
+}
+
+async function fetchCommercialOptions() {
+  const now = Date.now()
+  if (commercialOptionsCache.data !== null && commercialOptionsCache.expiresAt > now) {
+    return commercialOptionsCache.data
+  }
+
+  if (commercialOptionsCache.pending) {
+    return commercialOptionsCache.pending
+  }
+
+  commercialOptionsCache.pending = (async () => {
+    const rows = await queryAsync(`
+      SELECT
+        u.code AS commercial,
+        NULLIF(TRIM(CONCAT(COALESCE(u.prenom, ''), ' ', COALESCE(u.nom, ''))), '') AS full_name
+      FROM users u
+      WHERE u.isactif = 1
+        AND COALESCE(u.isadmin, 0) = 0
+        AND u.deleted_at IS NULL
+        AND u.role_code = 'commercial'
+        AND u.type IN ('prevendeur', 'cashvan', 'cashvan_livreur')
+        AND u.code IS NOT NULL
+        AND u.code <> ''
+        AND EXISTS (
+          SELECT 1
+          FROM clients c
+          WHERE c.user_code = u.code
+            AND c.deleted_at IS NULL
+            AND c.isactif = '1'
+            AND EXISTS (
+              SELECT 1
+              FROM entetecommercials e
+              WHERE e.client_code = c.code
+                AND e.deleted_at IS NULL
+                AND e.type IN ('facture', 'bl', 'blf')
+                AND (
+                  e.commercial_code = u.code
+                  OR e.user_code = u.code
+                )
+            )
+        )
+      ORDER BY COALESCE(u.ordre, 999999), u.code
+    `)
+
+    const data = (rows || [])
+      .map(row => {
+        const value = String(row.commercial || '').trim()
+        const fullName = String(row.full_name || '').trim()
+        return {
+          value,
+          label: fullName ? `${fullName} (${value})` : `Commercial ${value}`
+        }
+      })
+      .filter(item => item.value)
+
+    commercialOptionsCache.data = data
+    commercialOptionsCache.expiresAt = Date.now() + COMMERCIAL_OPTIONS_CACHE_TTL_MS
+
+    return data
+  })()
+
+  try {
+    return await commercialOptionsCache.pending
+  } finally {
+    commercialOptionsCache.pending = null
+  }
 }
 
 async function resolveDepotOrigin(route, commercial) {
@@ -485,14 +560,19 @@ function pickBestSlotForVisit(slots, visit, cursorRef) {
 
   const totalSlots = slots.length
   const preferredCommercial = String(visit.proposed_commercial || '').trim()
+  const preferredSlotId = String(visit.recommended_slot_id || '').trim()
   const clientKey = visit.canonical_client_key
 
   const scoreSlot = (slot, index) => {
-    const sameCommercial = preferredCommercial && slot.proposed_commercial === preferredCommercial ? 15 : 0
+    const slotSignal = visit.slot_predictions?.[slot.id] || null
+    const mlAffinity = clamp(Number(slotSignal?.assignment_prob || 0), 0, 100)
+    const mlPredictedCa = Math.max(0, Number(slotSignal?.weighted_predicted_ca || slotSignal?.predicted_ca || 0))
+    const sameCommercial = preferredCommercial && slot.proposed_commercial === preferredCommercial ? 6 : 0
+    const recommendedSlotBonus = preferredSlotId && slot.id === preferredSlotId ? 12 : 0
     const remainingCapacity = Math.max(0, slot.target_size - slot.tournees.length)
     const loadPenalty = slot.tournees.length * 2
     const cursorBonus = ((index - cursorRef.current + totalSlots) % totalSlots) === 0 ? 4 : 0
-    return sameCommercial + (remainingCapacity * 3) - loadPenalty + cursorBonus
+    return (mlAffinity * 0.45) + (mlPredictedCa * 0.02) + sameCommercial + recommendedSlotBonus + (remainingCapacity * 3) - loadPenalty + cursorBonus
   }
 
   let bestIndex = -1
@@ -527,11 +607,29 @@ function finalizeCoverageBlock(slot, depotOrigin) {
       ordre_theorique: index + 1
     }))
 
+  const produitsTotaux = {}
+  tournees.forEach(row => {
+    if (row.produits && row.produits.length > 0) {
+      row.produits.forEach(produit => {
+        const nom = String(produit.nom || '').trim()
+        if (!nom) return
+        if (!produitsTotaux[nom]) {
+          produitsTotaux[nom] = 0
+        }
+        produitsTotaux[nom] += Number(produit.quantite || 0)
+      })
+    }
+  })
+
+  const detailsProduits = Object.entries(produitsTotaux)
+    .map(([nom, quantite]) => ({ nom, quantite: roundScore(quantite) }))
+    .sort((a, b) => b.quantite - a.quantite)
+
   const chargeTotale = {
     agro: tournees.reduce((sum, row) => sum + Number(row.details?.agro || 0), 0),
     chips: tournees.reduce((sum, row) => sum + Number(row.details?.chips || 0), 0),
     bureautique: tournees.reduce((sum, row) => sum + Number(row.details?.bur || 0), 0),
-    detailsProduits: []
+    detailsProduits
   }
 
   const itineraire = tournees.map((row, index) => `${index + 1}. ${row.nom} (${row.nbr_client}) - ${row.adresse || 'Adresse non specifiee'}`)
@@ -569,7 +667,7 @@ function finalizeCoverageBlock(slot, depotOrigin) {
 
 function runManualTraining(res) {
   const scriptPath = path.join(apiDir, 'train_auto.py')
-  execFile('python', [scriptPath], { cwd: apiDir }, (error, stdout, stderr) => {
+  execFile('python', [scriptPath], { cwd: apiDir }, async (error, stdout, stderr) => {
     if (error) {
       console.error(`Erreur d'execution Python: ${error.message}`)
       if (stderr) {
@@ -582,10 +680,20 @@ function runManualTraining(res) {
     }
 
     console.log(`Resultat Python:\n${stdout}`)
+    let reloadStatus = 'Reload IA non tente.'
+    try {
+      const reloadResponse = await axios.post('http://127.0.0.1:5001/api/reload-models')
+      reloadStatus = reloadResponse.data?.message || 'Modeles IA recharges.'
+    } catch (reloadError) {
+      reloadStatus = `Reload IA indisponible: ${reloadError.message}`
+      console.warn(reloadStatus)
+    }
+
     return res.json({
       status: 'success',
       message: 'Reentrainement termine. Le dernier modele IA est maintenant disponible.',
-      details: stdout
+      details: stdout,
+      reload_status: reloadStatus
     })
   })
 }
@@ -595,17 +703,21 @@ app.post('/api/train-ia', (req, res) => {
   runManualTraining(res)
 })
 
-app.get('/api/tournees/options', (req, res) => {
-  db.query(`SELECT DISTINCT routing_code AS route FROM clients WHERE routing_code IS NOT NULL AND routing_code != '' ORDER BY routing_code`, (err, routes) => {
-    if (err) return res.status(500).json({ error: 'Erreur SQL routes' })
-    db.query(`SELECT DISTINCT user_code AS commercial FROM clients WHERE user_code IS NOT NULL AND user_code != '' ORDER BY user_code`, (err2, comm) => {
-      if (err2) return res.status(500).json({ error: 'Erreur SQL commerciaux' })
-      res.json({
-        routes: (routes || []).map(r => ({ value: r.route, label: `Route ${r.route}` })),
-        commerciaux: (comm || []).map(c => ({ value: c.commercial, label: `Commercial ${c.commercial}` }))
-      })
+app.get('/api/tournees/options', async (req, res) => {
+  try {
+    const [routes, commerciaux] = await Promise.all([
+      queryAsync(`SELECT DISTINCT routing_code AS route FROM clients WHERE routing_code IS NOT NULL AND routing_code != '' ORDER BY routing_code`),
+      fetchCommercialOptions()
+    ])
+
+    res.json({
+      routes: (routes || []).map(r => ({ value: r.route, label: `Route ${r.route}` })),
+      commerciaux
     })
-  })
+  } catch (error) {
+    console.error('Erreur SQL options tournees:', error.message)
+    res.status(500).json({ error: 'Erreur SQL options tournees' })
+  }
 })
 
 app.get('/api/tournees/coverage-plan', async (req, res) => {
@@ -620,16 +732,7 @@ app.get('/api/tournees/coverage-plan', async (req, res) => {
     return res.status(400).json({ error: 'Aucun jour ouvrable disponible sur la periode selectionnee.' })
   }
 
-  const allCommercialRows = await queryAsync(
-    `SELECT DISTINCT user_code AS commercial
-     FROM clients
-     WHERE user_code IS NOT NULL AND user_code != ''
-     ORDER BY user_code`
-  )
-  const allCommercials = (allCommercialRows || []).map(row => ({
-    value: String(row.commercial),
-    label: `Commercial ${row.commercial}`
-  }))
+  const allCommercials = await fetchCommercialOptions()
 
   const activeCommercials = selectedCommercials.length
     ? allCommercials.filter(item => selectedCommercials.includes(item.value))
@@ -706,7 +809,10 @@ app.get('/api/tournees/coverage-plan', async (req, res) => {
     const aiPredictionByDate = new Map()
     for (const workingDay of workingDays) {
       try {
-        const aiResponse = await axios.post('http://127.0.0.1:5001/api/predict', { date: workingDay.date })
+        const aiResponse = await axios.post('http://127.0.0.1:5001/api/predict', {
+          date: workingDay.date,
+          commercials: activeCommercials.map(item => item.value)
+        })
         if (aiResponse.data?.status === 'success' && aiResponse.data?.predictions) {
           aiPredictionByDate.set(workingDay.date, aiResponse.data.predictions)
         } else {
@@ -729,6 +835,7 @@ app.get('/api/tournees/coverage-plan', async (req, res) => {
       const daysSinceLastVisit = diffDays(hist.last_visit_date, startDate) ?? periodDays
       const fallbackBaseCa = Math.max(25, avgCaHist, ca90d > 0 ? ca90d / 6 : 0)
       let bestAiSignal = null
+      const slotPredictions = {}
 
       workingDays.forEach(day => {
         const predictions = aiPredictionByDate.get(day.date) || {}
@@ -738,16 +845,57 @@ app.get('/api/tournees/coverage-plan', async (req, res) => {
 
         if (!aiData) return
 
-        if (!bestAiSignal || Number(aiData.chiffre || 0) > Number(bestAiSignal.chiffre || 0)) {
-          bestAiSignal = { ...aiData, date: day.date, day_label: day.label }
-        }
+        const commercialScores = aiData.commercial_scores && typeof aiData.commercial_scores === 'object'
+          ? aiData.commercial_scores
+          : {}
+
+        activeCommercials.forEach(commercial => {
+          const commercialCode = String(commercial.value || '').trim()
+          const slotId = `${day.date}::${commercialCode}`
+          const fallbackAssignmentProb = commercialCode === String(client.user_code || '').trim() ? 75 : 35
+          const assignmentProb = clamp(Number(commercialScores[commercialCode] ?? fallbackAssignmentProb), 0, 100)
+          const mlWeight = 0.7 + ((assignmentProb / 100) * 0.3)
+          const weightedPredictedCa = roundScore(Math.max(1, Number(aiData.chiffre || 0) * mlWeight))
+          const weightedQte = Math.max(1, Math.round(Math.max(1, Number(aiData.qte || 1)) * mlWeight))
+
+          slotPredictions[slotId] = {
+            slot_id: slotId,
+            date: day.date,
+            day_label: day.label,
+            commercial: commercialCode,
+            commercial_label: commercial.label,
+            assignment_prob: assignmentProb,
+            weighted_predicted_ca: weightedPredictedCa,
+            weighted_qte: weightedQte,
+            predicted_ca: Number(aiData.chiffre || 0),
+            qte: Number(aiData.qte || 0),
+            probability: Number(aiData.prob_achat || 0),
+            habit_score: Number(aiData.habit_score || 0),
+            recency_score: Number(aiData.recency_score || 0),
+            details: aiData.details || {}
+          }
+
+          if (!bestAiSignal || weightedPredictedCa > Number(bestAiSignal.weighted_predicted_ca || 0)) {
+            bestAiSignal = {
+              ...aiData,
+              date: day.date,
+              day_label: day.label,
+              commercial: commercialCode,
+              commercial_label: commercial.label,
+              assignment_prob: assignmentProb,
+              weighted_predicted_ca: weightedPredictedCa,
+              weighted_qte: weightedQte,
+              slot_id: slotId
+            }
+          }
+        })
       })
 
-      const predictedCa = Math.max(1, Number(bestAiSignal?.chiffre || 0), fallbackBaseCa)
+      const predictedCa = Math.max(1, Number(bestAiSignal?.weighted_predicted_ca || bestAiSignal?.chiffre || 0), fallbackBaseCa)
       const probability = Number(bestAiSignal?.prob_achat || deriveFallbackProbability(visitsHist, daysSinceLastVisit, periodDays))
       const habitScore = Number(bestAiSignal?.habit_score || deriveFallbackHabitScore(visitsHist))
       const recencyScore = Number(bestAiSignal?.recency_score || deriveFallbackRecencyScore(daysSinceLastVisit, periodDays))
-      const qteReco = Math.max(1, Number(bestAiSignal?.qte || Math.round(predictedCa / 80)))
+      const qteReco = Math.max(1, Number(bestAiSignal?.weighted_qte || bestAiSignal?.qte || Math.round(predictedCa / 80)))
       const details = bestAiSignal?.details && typeof bestAiSignal.details === 'object'
         ? Object.entries(bestAiSignal.details)
             .map(([nom, quantite]) => ({ nom, quantite }))
@@ -772,6 +920,11 @@ app.get('/api/tournees/coverage-plan', async (req, res) => {
         avg_ca_hist: avgCaHist,
         ca_90d: ca90d,
         days_since_last_visit: daysSinceLastVisit,
+        recommended_slot_id: bestAiSignal?.slot_id || null,
+        recommended_commercial: bestAiSignal?.commercial || client.user_code || activeCommercials[0].value,
+        recommended_commercial_label: bestAiSignal?.commercial_label || `Commercial ${bestAiSignal?.commercial || client.user_code || activeCommercials[0].value}`,
+        commercial_affinity_score: Number(bestAiSignal?.assignment_prob || 0),
+        slot_predictions: slotPredictions,
         probability,
         habit_score: habitScore,
         recency_score: recencyScore,
@@ -811,7 +964,7 @@ app.get('/api/tournees/coverage-plan', async (req, res) => {
           qte_reco: qteReco,
           score_ia: scoreIa,
           repetition_index: repetitionIndex,
-          proposed_commercial: profile.user_code || activeCommercials[0].value
+          proposed_commercial: profile.recommended_commercial || profile.user_code || activeCommercials[0].value
         })
       }
     })
@@ -848,7 +1001,7 @@ app.get('/api/tournees/coverage-plan', async (req, res) => {
           qte_reco: qteReco,
           score_ia: scoreIa,
           repetition_index: repetitionIndex,
-          proposed_commercial: profile.user_code || activeCommercials[0].value
+          proposed_commercial: profile.recommended_commercial || profile.user_code || activeCommercials[0].value
         })
         totalPredictedCa += predictedCa
         boosterIndex += 1
@@ -866,24 +1019,47 @@ app.get('/api/tournees/coverage-plan', async (req, res) => {
     visitEntries.forEach(entry => {
       const slot = pickBestSlotForVisit(slots, entry, cursorRef)
       if (!slot) return
+      const slotSignal = entry.slot_predictions?.[slot.id] || null
+      const assignedPredictedCa = roundScore(Number(slotSignal?.weighted_predicted_ca || entry.predicted_ca || 0))
+      const assignedQteReco = Math.max(1, Math.round(Number(slotSignal?.weighted_qte || entry.qte_reco || 1)))
+      const assignedProducts = slotSignal?.details && typeof slotSignal.details === 'object'
+        ? Object.entries(slotSignal.details)
+            .map(([nom, quantite]) => ({ nom, quantite }))
+            .sort((a, b) => Number(b.quantite || 0) - Number(a.quantite || 0))
+        : entry.produits
+      const assignedScoreIa = slotSignal
+        ? computeCoveragePriorityScore({
+            predictedCa: assignedPredictedCa,
+            maxPredictedCa,
+            probability: slotSignal.probability ?? entry.probability,
+            habitScore: slotSignal.habit_score ?? entry.habit_score,
+            recencyScore: slotSignal.recency_score ?? entry.recency_score,
+            distanceKm: entry.distance_km,
+            maxDistanceKm: maxDistance,
+            daysSinceLastVisit: entry.days_since_last_visit,
+            periodDays,
+            repetitionIndex: entry.repetition_index
+          })
+        : entry.score_ia
 
       const clientRow = {
         nbr_client: entry.nbr_client,
         canonical_client_key: entry.canonical_client_key,
-        chiffre_brut: entry.predicted_ca,
-        chiffre: `${Number(entry.predicted_ca || 0).toFixed(1)} TND`,
-        score_ia: entry.score_ia,
-        qte_reco: entry.qte_reco,
+        chiffre_brut: assignedPredictedCa,
+        chiffre: `${Number(assignedPredictedCa || 0).toFixed(1)} TND`,
+        score_ia: assignedScoreIa,
+        qte_reco: assignedQteReco,
         vente_reelle: 0,
         details: {
-          agro: Math.max(0, Math.round(entry.qte_reco * 0.45)),
-          chips: Math.max(0, Math.round(entry.qte_reco * 0.35)),
-          bur: Math.max(0, Math.round(entry.qte_reco * 0.20))
+          agro: Math.max(0, Math.round(assignedQteReco * 0.45)),
+          chips: Math.max(0, Math.round(assignedQteReco * 0.35)),
+          bur: Math.max(0, Math.round(assignedQteReco * 0.20))
         },
-        produits: entry.produits,
-        prob_achat: entry.probability,
-        habit_score: entry.habit_score,
-        recency_score: entry.recency_score,
+        produits: assignedProducts,
+        prob_achat: Number(slotSignal?.probability ?? entry.probability),
+        habit_score: Number(slotSignal?.habit_score ?? entry.habit_score),
+        recency_score: Number(slotSignal?.recency_score ?? entry.recency_score),
+        commercial_affinity_score: Number(slotSignal?.assignment_prob || entry.commercial_affinity_score || 0),
         distance_km: entry.distance_km,
         date_jour: slot.date,
         commercia_zone: entry.commercia_zone,
@@ -899,8 +1075,8 @@ app.get('/api/tournees/coverage-plan', async (req, res) => {
 
       slot.tournees.push(clientRow)
       slot.uniqueClients.add(entry.canonical_client_key)
-      slot.total_predicted_ca += Number(entry.predicted_ca || 0)
-      slot.total_score += Number(entry.score_ia || 0)
+      slot.total_predicted_ca += Number(assignedPredictedCa || 0)
+      slot.total_score += Number(assignedScoreIa || 0)
     })
 
     const blocks = slots

@@ -55,12 +55,38 @@ function todayIsoDate() {
   return `${year}-${month}-${day}`
 }
 
+function buildApiCandidates(api) {
+  const candidates = []
+  const seen = new Set()
+  const pushCandidate = value => {
+    const normalized = String(value || '').trim()
+    if (!normalized || seen.has(normalized)) return
+    seen.add(normalized)
+    candidates.push(normalized)
+  }
+
+  pushCandidate(api)
+  pushCandidate('http://localhost:5000')
+  pushCandidate('http://127.0.0.1:5000')
+
+  if (typeof window !== 'undefined' && window.location?.hostname) {
+    pushCandidate(`http://${window.location.hostname}:5000`)
+  }
+
+  return candidates
+}
+
+const OPTIONS_REQUEST_TIMEOUT_MS = 20000
+
 export default function CoveragePlanner({ api }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [clickedClient, setClickedClient] = useState(null)
   const [options, setOptions] = useState({ commerciaux: [] })
+  const [optionsLoading, setOptionsLoading] = useState(true)
+  const [optionsError, setOptionsError] = useState(null)
   const [selectedCommercials, setSelectedCommercials] = useState([])
-  const [selectAllCommercials, setSelectAllCommercials] = useState(true)
+  const [resolvedApiBase, setResolvedApiBase] = useState(api)
   const [filters, setFilters] = useState({
     start_date: todayIsoDate(),
     period_days: '14',
@@ -83,23 +109,38 @@ export default function CoveragePlanner({ api }) {
   const leafletMapRef = useRef(null)
   const routeLayerRef = useRef(null)
 
-  useEffect(() => {
-    axios.get(`${api}/api/tournees/options`)
-      .then(response => {
+  const loadOptions = async () => {
+    setOptionsLoading(true)
+    setOptionsError(null)
+    const apiCandidates = buildApiCandidates(api)
+    let lastError = null
+
+    for (const candidate of apiCandidates) {
+      try {
+        const response = await axios.get(`${candidate}/api/tournees/options`, {
+          timeout: OPTIONS_REQUEST_TIMEOUT_MS,
+          params: { t: Date.now() }
+        })
         const commerciaux = response.data?.commerciaux || []
+        setResolvedApiBase(candidate)
         setOptions({ commerciaux })
         setSelectedCommercials(commerciaux.map(item => item.value))
-      })
-      .catch(() => {
-        setOptions({ commerciaux: [] })
-      })
-  }, [api])
+        setOptionsLoading(false)
+        return
+      } catch (loadError) {
+        lastError = loadError
+      }
+    }
+
+    setOptions({ commerciaux: [] })
+    setSelectedCommercials([])
+    setOptionsError(`Impossible de charger la liste des commerciaux pour le moment.${lastError?.message ? ` (${lastError.message})` : ''}`)
+    setOptionsLoading(false)
+  }
 
   useEffect(() => {
-    if (selectAllCommercials) {
-      setSelectedCommercials(options.commerciaux.map(item => item.value))
-    }
-  }, [options.commerciaux, selectAllCommercials])
+    loadOptions()
+  }, [api])
 
   const blocks = useMemo(() => planData?.blocks || [], [planData])
   const selectedBlock = useMemo(
@@ -112,6 +153,10 @@ export default function CoveragePlanner({ api }) {
       setSelectedBlockId(blocks[0].id)
     }
   }, [blocks, selectedBlockId])
+
+  useEffect(() => {
+    setClickedClient(null)
+  }, [selectedBlockId])
 
   useEffect(() => {
     if (!selectedBlock) {
@@ -308,7 +353,6 @@ export default function CoveragePlanner({ api }) {
   }, [selectedBlock, routePlan])
 
   const toggleCommercial = value => {
-    setSelectAllCommercials(false)
     setSelectedCommercials(current =>
       current.includes(value)
         ? current.filter(item => item !== value)
@@ -316,19 +360,51 @@ export default function CoveragePlanner({ api }) {
     )
   }
 
+  const toggleAllCommercials = () => {
+    const allValues = options.commerciaux.map(item => item.value)
+    setSelectedCommercials(current => (
+      current.length === allValues.length ? [] : allValues
+    ))
+  }
+
   const runPlanner = async () => {
     try {
+      if (!selectedCommercials.length) {
+        setError('Selectionne au moins un commercial.')
+        return
+      }
       setLoading(true)
       setError(null)
+      const allCommercialsSelected = selectedCommercials.length === options.commerciaux.length
       const params = {
         start_date: filters.start_date,
         period_days: filters.period_days,
         min_visits: filters.min_visits,
         min_total_ca: filters.min_total_ca || undefined,
-        commercials: selectAllCommercials ? undefined : selectedCommercials
+        commercials: allCommercialsSelected ? undefined : selectedCommercials
       }
 
-      const response = await axios.get(`${api}/api/tournees/coverage-plan`, { params })
+      const apiCandidates = buildApiCandidates(resolvedApiBase || api)
+      let response = null
+      let lastError = null
+
+      for (const candidate of apiCandidates) {
+        try {
+          response = await axios.get(`${candidate}/api/tournees/coverage-plan`, {
+            params,
+            timeout: 20000
+          })
+          setResolvedApiBase(candidate)
+          break
+        } catch (plannerError) {
+          lastError = plannerError
+        }
+      }
+
+      if (!response) {
+        throw lastError || new Error('Impossible de joindre le serveur API.')
+      }
+
       setPlanData(response.data)
       const firstBlock = response.data?.blocks?.[0]
       setSelectedBlockId(firstBlock ? firstBlock.id : null)
@@ -341,6 +417,14 @@ export default function CoveragePlanner({ api }) {
 
   const summary = planData?.summary || null
   const selectedRows = selectedBlock?.detail?.tournees || []
+  const chargeTotale = selectedBlock?.detail?.chargeTotale || { agro: 0, chips: 0, bureautique: 0, detailsProduits: [] }
+  const quantiteTotalCamion = Number(chargeTotale.agro || 0) + Number(chargeTotale.chips || 0) + Number(chargeTotale.bureautique || 0)
+  const allCommercialsSelected = options.commerciaux.length > 0 && selectedCommercials.length === options.commerciaux.length
+  const selectedCommercialsLabel = allCommercialsSelected
+    ? `Tous les commerciaux (${options.commerciaux.length})`
+    : selectedCommercials.length > 0
+      ? `${selectedCommercials.length} commerciaux selectionnes`
+      : 'Aucun commercial selectionne'
   const navigationUrl = useMemo(
     () => buildGoogleMapsUrl(routePlan.origin, routePlan.orderedStops),
     [routePlan.origin, routePlan.orderedStops]
@@ -412,53 +496,98 @@ export default function CoveragePlanner({ api }) {
               <div style={{ fontSize: '12px', fontWeight: '700', color: '#475467' }}>Commerciaux</div>
               <div style={{ fontSize: '12px', color: '#667085' }}>Selectionne ceux que tu veux utiliser pour les blocks.</div>
             </div>
-            <label style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', fontSize: '13px', fontWeight: '700', color: '#1d2939' }}>
-              <input
-                type="checkbox"
-                checked={selectAllCommercials}
-                onChange={event => {
-                  const checked = event.target.checked
-                  setSelectAllCommercials(checked)
-                  if (checked) {
-                    setSelectedCommercials(options.commerciaux.map(item => item.value))
-                  }
+            {optionsError && (
+              <button
+                type="button"
+                onClick={loadOptions}
+                style={{
+                  border: '1px solid #d0d5dd',
+                  backgroundColor: 'white',
+                  color: '#1d2939',
+                  borderRadius: '10px',
+                  padding: '8px 12px',
+                  fontSize: '12px',
+                  fontWeight: '700',
+                  cursor: 'pointer'
                 }}
-              />
-              Selectionner tous
-            </label>
+              >
+                Recharger
+              </button>
+            )}
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px', marginBottom: '16px' }}>
-            {options.commerciaux.map(item => {
-              const checked = selectAllCommercials || selectedCommercials.includes(item.value)
-              return (
-                <label
-                  key={item.value}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px',
-                    padding: '10px 12px',
-                    borderRadius: '10px',
-                    border: checked ? '1px solid #1c6dd0' : '1px solid #d0d5dd',
-                    backgroundColor: checked ? '#eef5ff' : '#fff',
-                    cursor: 'pointer',
-                    fontSize: '13px',
-                    fontWeight: '600',
-                    color: '#1d2939'
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => toggleCommercial(item.value)}
-                    disabled={selectAllCommercials}
-                  />
-                  {item.label}
-                </label>
-              )
-            })}
-          </div>
+          <details style={{ marginBottom: '16px', border: '1px solid #d0d5dd', borderRadius: '12px', backgroundColor: '#fff' }}>
+            <summary
+              style={{
+                listStyle: 'none',
+                cursor: 'pointer',
+                padding: '12px 14px',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: '12px',
+                fontSize: '13px',
+                fontWeight: '700',
+                color: '#1d2939'
+              }}
+            >
+              <span>{selectedCommercialsLabel}</span>
+              <span style={{ color: '#667085', fontWeight: '600' }}>Multi-select</span>
+            </summary>
+
+            <div style={{ borderTop: '1px solid #eef2f7', padding: '12px', display: 'grid', gap: '10px' }}>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', fontSize: '13px', fontWeight: '700', color: '#1d2939' }}>
+                <input
+                  type="checkbox"
+                  checked={allCommercialsSelected}
+                  onChange={toggleAllCommercials}
+                  disabled={optionsLoading || options.commerciaux.length === 0}
+                />
+                Selectionner tous
+              </label>
+
+              {optionsLoading ? (
+                <div style={{ fontSize: '13px', color: '#667085', fontWeight: '600' }}>
+                  Chargement des commerciaux...
+                </div>
+              ) : options.commerciaux.length > 0 ? (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '10px' }}>
+                  {options.commerciaux.map(item => {
+                    const checked = selectedCommercials.includes(item.value)
+                    return (
+                      <label
+                        key={item.value}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          padding: '10px 12px',
+                          borderRadius: '10px',
+                          border: checked ? '1px solid #1c6dd0' : '1px solid #d0d5dd',
+                          backgroundColor: checked ? '#eef5ff' : '#fff',
+                          cursor: 'pointer',
+                          fontSize: '13px',
+                          fontWeight: '600',
+                          color: '#1d2939'
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleCommercial(item.value)}
+                        />
+                        {item.label}
+                      </label>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div style={{ fontSize: '13px', color: optionsError ? '#b42318' : '#667085', fontWeight: '600' }}>
+                  {optionsError || 'Aucun commercial disponible pour le moment.'}
+                </div>
+              )}
+            </div>
+          </details>
         </div>
 
         <button
@@ -511,7 +640,7 @@ export default function CoveragePlanner({ api }) {
             <h3 style={{ margin: 0, color: '#1a2b4c' }}>Blocks de tournee</h3>
             {summary && (
               <span style={{ fontSize: '12px', color: '#667085', fontWeight: '700' }}>
-                {summary.start_date} -> {summary.end_date}
+                {summary.start_date} {'->'} {summary.end_date}
               </span>
             )}
           </div>
@@ -615,13 +744,57 @@ export default function CoveragePlanner({ api }) {
                       if (row.score_ia >= 80) scoreColor = '#198754'
                       else if (row.score_ia >= 50) scoreColor = '#f79009'
 
+                      const isExpanded = clickedClient === `${row.nbr_client}-${index}`
+
                       return (
                         <tr key={`${row.nbr_client}-${index}`} style={{ backgroundColor: index % 2 === 0 ? 'white' : '#f8fafc' }}>
                           <td style={{ padding: '10px 8px', borderBottom: '1px solid #eaecf0', fontWeight: '800', color: scoreColor }}>
                             {Number(row.score_ia || 0).toFixed(1)} / 100
                           </td>
-                          <td style={{ padding: '10px 8px', borderBottom: '1px solid #eaecf0', color: '#1c6dd0', fontWeight: '700' }}>
-                            {row.qte_reco} unites
+                          <td style={{ padding: '10px 8px', borderBottom: '1px solid #eaecf0' }}>
+                            <div
+                              onClick={() => setClickedClient(isExpanded ? null : `${row.nbr_client}-${index}`)}
+                              style={{
+                                display: 'inline-block',
+                                padding: '4px 8px',
+                                borderRadius: '6px',
+                                backgroundColor: isExpanded ? '#e7f0ff' : '#eef5ff',
+                                color: '#1c6dd0',
+                                fontWeight: '800',
+                                cursor: 'pointer'
+                              }}
+                            >
+                              {row.qte_reco} unites
+                            </div>
+                            {isExpanded && (
+                              <div style={{ marginTop: '8px', padding: '10px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #d8e9ff', fontSize: '12px' }}>
+                                <div style={{ fontWeight: '800', marginBottom: '6px', color: '#344054' }}>
+                                  Produits recommandes:
+                                </div>
+                                {row.produits && row.produits.length > 0 ? (
+                                  row.produits.map((produit, produitIndex) => (
+                                    <div
+                                      key={`${produit.nom}-${produitIndex}`}
+                                      style={{
+                                        display: 'flex',
+                                        justifyContent: 'space-between',
+                                        gap: '12px',
+                                        padding: '4px 0',
+                                        borderBottom: produitIndex < row.produits.length - 1 ? '1px solid #eaecf0' : 'none',
+                                        color: '#101828'
+                                      }}
+                                    >
+                                      <span style={{ fontWeight: '600' }}>{produit.nom}</span>
+                                      <span style={{ fontWeight: '800', color: '#1c6dd0' }}>{produit.quantite} unites</span>
+                                    </div>
+                                  ))
+                                ) : (
+                                  <div style={{ color: '#667085', fontStyle: 'italic' }}>
+                                    Aucun detail produit disponible pour ce client.
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </td>
                           <td style={{ padding: '10px 8px', borderBottom: '1px solid #eaecf0', color: '#344054', fontWeight: '700' }}>
                             {selectedBlock.day_label}
@@ -640,6 +813,62 @@ export default function CoveragePlanner({ api }) {
                     })}
                   </tbody>
                 </table>
+              </div>
+            </div>
+
+            <div style={{ backgroundColor: '#1a2b4c', color: 'white', borderRadius: '16px', padding: '20px', boxShadow: '0 10px 25px rgba(15, 23, 42, 0.12)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px', flexWrap: 'wrap', marginBottom: '14px' }}>
+                <div>
+                  <h3 style={{ margin: 0, color: '#60a5fa' }}>Prediction Chargement IA</h3>
+                  <p style={{ margin: '8px 0 0 0', fontSize: '13px', color: '#c5d3e3' }}>
+                    L'IA suggere ce chargement detaille par produit pour ce block.
+                  </p>
+                </div>
+                <div style={{ padding: '8px 12px', borderRadius: '10px', backgroundColor: '#2c3e5d', color: '#20c997', fontSize: '12px', fontWeight: '800' }}>
+                  {quantiteTotalCamion.toFixed(1)} unites
+                </div>
+              </div>
+
+              <div style={{ maxHeight: '260px', overflowY: 'auto', paddingRight: '5px' }}>
+                {chargeTotale.detailsProduits && chargeTotale.detailsProduits.length > 0 ? (
+                  chargeTotale.detailsProduits.map((produit, index) => (
+                    <div
+                      key={`${produit.nom}-${index}`}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        backgroundColor: '#2c3e5d',
+                        padding: '10px 15px',
+                        borderRadius: '8px',
+                        marginBottom: '8px',
+                        gap: '12px'
+                      }}
+                    >
+                      <span style={{ fontWeight: '800', fontSize: '14px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '70%' }} title={produit.nom}>
+                        {produit.nom}
+                      </span>
+                      <span style={{ fontSize: '16px', fontWeight: '800', color: '#20c997', whiteSpace: 'nowrap' }}>
+                        {Number(produit.quantite || 0).toFixed(1)}
+                      </span>
+                    </div>
+                  ))
+                ) : (
+                  <>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#2c3e5d', padding: '10px 15px', borderRadius: '8px', marginBottom: '10px' }}>
+                      <span style={{ fontWeight: '700' }}>Agro-Alimentaire</span>
+                      <span style={{ fontSize: '18px', fontWeight: '800', color: '#fff' }}>{Number(chargeTotale.agro || 0).toFixed(1)}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#2c3e5d', padding: '10px 15px', borderRadius: '8px', marginBottom: '10px' }}>
+                      <span style={{ fontWeight: '700' }}>Chips & Snacks</span>
+                      <span style={{ fontSize: '18px', fontWeight: '800', color: '#fff' }}>{Number(chargeTotale.chips || 0).toFixed(1)}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#2c3e5d', padding: '10px 15px', borderRadius: '8px' }}>
+                      <span style={{ fontWeight: '700' }}>Bureautique</span>
+                      <span style={{ fontSize: '18px', fontWeight: '800', color: '#fff' }}>{Number(chargeTotale.bureautique || 0).toFixed(1)}</span>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
 

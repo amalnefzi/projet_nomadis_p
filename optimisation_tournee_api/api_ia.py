@@ -40,11 +40,22 @@ FEATURE_COLUMNS_BASE = [
     'month'
 ]
 
+ASSIGNMENT_CATEGORICAL_COLUMNS = [
+    'client_code',
+    'region',
+    'delegation',
+    'routing_code',
+    'home_commercial'
+]
+
 model_achat = None
 model_ca = None
 model_qte = None
 model_price = None
+model_affectation = None
 feature_columns = []
+assignment_feature_columns = []
+assignment_classes = []
 df_master = pd.DataFrame()
 df_prefs = pd.DataFrame(columns=['client_code', 'produit_nom', 'produit_code', 'qte_moyenne'])
 
@@ -62,6 +73,18 @@ def build_features(df):
     features = pd.get_dummies(features, columns=['region'], dummy_na=False)
     if feature_columns:
         features = features.reindex(columns=feature_columns, fill_value=0)
+    return features
+
+
+def build_assignment_features(df):
+    features = df[FEATURE_COLUMNS_BASE + ASSIGNMENT_CATEGORICAL_COLUMNS].copy()
+    for col in FEATURE_COLUMNS_BASE:
+        features[col] = pd.to_numeric(features[col], errors='coerce').fillna(0)
+    for col in ASSIGNMENT_CATEGORICAL_COLUMNS:
+        features[col] = features[col].fillna('Inconnu').astype(str).str.strip()
+    features = pd.get_dummies(features, columns=ASSIGNMENT_CATEGORICAL_COLUMNS, dummy_na=False)
+    if assignment_feature_columns:
+        features = features.reindex(columns=assignment_feature_columns, fill_value=0)
     return features
 
 
@@ -180,34 +203,67 @@ def compute_recency_score(row):
     return round(((0.6 * recency_general) + (0.4 * recency_weekday)) * 100, 1)
 
 
-print("Chargement des trois modeles XGBoost et des donnees...")
-try:
-    model_achat = joblib.load('modele_nomadis_achat.pkl')
-    model_ca = joblib.load('modele_nomadis_ca.pkl')
-    model_qte = joblib.load('modele_nomadis_qte.pkl')
-    model_price = joblib.load('modele_nomadis_price.pkl')
-    feature_columns = joblib.load('colonnes_ia.pkl')
-    df_master = pd.read_csv('master_dataset_v3.csv')
-    df_master['client_code'] = df_master['client_code'].astype(str).str.strip()
-    df_master['region'] = df_master['region'].fillna('Inconnu').astype(str).str.strip()
-    df_master['potentiel'] = pd.to_numeric(df_master['potentiel'], errors='coerce').fillna(0)
-    for col in FEATURE_COLUMNS_BASE:
-        if col in df_master.columns:
-            df_master[col] = pd.to_numeric(df_master[col], errors='coerce').fillna(0)
+def load_artifacts():
+    global model_achat, model_ca, model_qte, model_price
+    global model_affectation, feature_columns, assignment_feature_columns, assignment_classes
+    global df_master, df_prefs
 
+    print("Chargement des modeles XGBoost et des donnees...")
     try:
-        df_prefs = pd.read_csv('preferences_clients_produits.csv')
-    except Exception:
-        df_prefs = pd.read_csv('preferences_clients.csv')
+        model_achat = joblib.load('modele_nomadis_achat.pkl')
+        model_ca = joblib.load('modele_nomadis_ca.pkl')
+        model_qte = joblib.load('modele_nomadis_qte.pkl')
+        model_price = joblib.load('modele_nomadis_price.pkl')
+        feature_columns = joblib.load('colonnes_ia.pkl')
+        df_master = pd.read_csv('master_dataset_v3.csv')
+        df_master['client_code'] = df_master['client_code'].astype(str).str.strip()
+        df_master['region'] = df_master['region'].fillna('Inconnu').astype(str).str.strip()
+        df_master['delegation'] = df_master['delegation'].fillna('Inconnue').astype(str).str.strip() if 'delegation' in df_master.columns else 'Inconnue'
+        df_master['routing_code'] = df_master['routing_code'].fillna('Inconnue').astype(str).str.strip() if 'routing_code' in df_master.columns else 'Inconnue'
+        df_master['home_commercial'] = df_master['home_commercial'].fillna('Inconnu').astype(str).str.strip() if 'home_commercial' in df_master.columns else 'Inconnu'
+        df_master['potentiel'] = pd.to_numeric(df_master['potentiel'], errors='coerce').fillna(0)
+        for col in FEATURE_COLUMNS_BASE:
+            if col in df_master.columns:
+                df_master[col] = pd.to_numeric(df_master[col], errors='coerce').fillna(0)
 
-    if 'client_code' in df_prefs.columns:
-        df_prefs['client_code'] = df_prefs['client_code'].astype(str).str.strip()
-    if 'qte_moyenne' in df_prefs.columns:
-        df_prefs['qte_moyenne'] = pd.to_numeric(df_prefs['qte_moyenne'], errors='coerce').fillna(1)
+        try:
+            df_prefs = pd.read_csv('preferences_clients_produits.csv')
+        except Exception:
+            df_prefs = pd.read_csv('preferences_clients.csv')
 
-    print("IA prete avec les modeles XGBoost Achat + CA + Quantite.")
-except Exception as e:
-    print(f"Erreur de chargement : {e}")
+        if 'client_code' in df_prefs.columns:
+            df_prefs['client_code'] = df_prefs['client_code'].astype(str).str.strip()
+        if 'qte_moyenne' in df_prefs.columns:
+            df_prefs['qte_moyenne'] = pd.to_numeric(df_prefs['qte_moyenne'], errors='coerce').fillna(1)
+
+        try:
+            model_affectation = joblib.load('modele_nomadis_affectation.pkl')
+            assignment_feature_columns = joblib.load('colonnes_affectation.pkl')
+            assignment_classes = joblib.load('classes_affectation.pkl')
+            assignment_classes = [str(code).strip() for code in assignment_classes]
+        except Exception as assign_error:
+            model_affectation = None
+            assignment_feature_columns = []
+            assignment_classes = []
+            print(f"Modele d'affectation non charge : {assign_error}")
+
+        print("IA prete avec les modeles XGBoost Achat + CA + Quantite.")
+        return True, "Modeles IA recharges avec succes."
+    except Exception as e:
+        print(f"Erreur de chargement : {e}")
+        return False, str(e)
+
+
+load_artifacts()
+
+
+@app.route('/api/reload-models', methods=['POST'])
+def reload_models():
+    success, message = load_artifacts()
+    return jsonify({
+        "status": "success" if success else "error",
+        "message": message
+    }), (200 if success else 500)
 
 
 @app.route('/api/predict', methods=['POST'])
@@ -229,6 +285,14 @@ def predict_tournee():
         min_clients_floor = int(data.get('min_clients_floor', 20))
         max_clients_cap = int(data.get('max_clients_cap', 250))
         max_clients_req = int(data.get('max_clients', 0))
+        selected_commercials_raw = data.get('commercials', [])
+
+        if isinstance(selected_commercials_raw, str):
+            selected_commercials = [item.strip() for item in selected_commercials_raw.split(',') if str(item).strip()]
+        elif isinstance(selected_commercials_raw, list):
+            selected_commercials = [str(item).strip() for item in selected_commercials_raw if str(item).strip()]
+        else:
+            selected_commercials = []
 
         min_prob_achat = float(np.clip(min_prob_achat, 0, 100))
         min_vn_predit = max(0.0, min_vn_predit)
@@ -354,6 +418,37 @@ def predict_tournee():
             ascending=False
         ).head(selected_limit)
 
+        commercial_scores_by_client = {}
+        if model_affectation is not None and assignment_feature_columns and assignment_classes:
+            X_assignment = build_assignment_features(filtered_clients)
+            assignment_probabilities = np.clip(model_affectation.predict_proba(X_assignment), 0, 1)
+
+            for row_index, (_, row) in enumerate(filtered_clients.iterrows()):
+                raw_code = str(row['client_code']).strip()
+                try:
+                    code_str = str(int(float(raw_code))).zfill(5)
+                except ValueError:
+                    code_str = raw_code.zfill(5) if len(raw_code) < 5 else raw_code
+
+                score_map = {
+                    assignment_classes[class_index]: round(float(assignment_probabilities[row_index][class_index]) * 100, 1)
+                    for class_index in range(min(len(assignment_classes), assignment_probabilities.shape[1]))
+                }
+
+                if selected_commercials:
+                    home_code = str(row.get('home_commercial', '')).strip()
+                    filtered_score_map = {}
+                    for commercial_code in selected_commercials:
+                        if commercial_code in score_map:
+                            filtered_score_map[commercial_code] = score_map[commercial_code]
+                        else:
+                            filtered_score_map[commercial_code] = 75.0 if commercial_code == home_code else 0.0
+                    score_map = filtered_score_map
+
+                commercial_scores_by_client[code_str] = dict(
+                    sorted(score_map.items(), key=lambda item: item[1], reverse=True)
+                )
+
         result_dict = {}
         for _, row in filtered_clients.iterrows():
             raw_code = str(row['client_code']).strip()
@@ -383,6 +478,8 @@ def predict_tournee():
 
             details_qte, total_qte = rebalance_quantities(qte_predite, product_weights)
             prix_moyen = float(row['Vn_predit']) / max(1, total_qte)
+            commercial_scores = commercial_scores_by_client.get(code_str, {})
+            best_commercial = next(iter(commercial_scores), str(row.get('home_commercial', '')).strip())
 
             result_dict[code_str] = {
                 "score": round(row['Score'], 1),
@@ -396,7 +493,9 @@ def predict_tournee():
                 "prix_moyen": round(prix_moyen, 2),
                 "prob_achat": round(float(row['Prob_achat']), 1),
                 "habit_score": round(float(row['Habit_score']), 1),
-                "recency_score": round(float(row['Recency_score']), 1)
+                "recency_score": round(float(row['Recency_score']), 1),
+                "commercial_scores": commercial_scores,
+                "best_commercial": best_commercial
             }
 
         return jsonify({
