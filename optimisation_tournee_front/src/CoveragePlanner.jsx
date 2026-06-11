@@ -55,6 +55,21 @@ function todayIsoDate() {
   return `${year}-${month}-${day}`
 }
 
+function normalizeGeoStop(stop, index = 0) {
+  const latitude = Number(stop?.latitude)
+  const longitude = Number(stop?.longitude)
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return null
+  }
+
+  return {
+    ...stop,
+    latitude,
+    longitude,
+    step: index + 1
+  }
+}
+
 function buildApiCandidates(api) {
   const candidates = []
   const seen = new Set()
@@ -82,6 +97,8 @@ export default function CoveragePlanner({ api }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [clickedClient, setClickedClient] = useState(null)
+  const [validationFeedback, setValidationFeedback] = useState(null)
+  const [validationLoading, setValidationLoading] = useState(false)
   const [options, setOptions] = useState({ commerciaux: [] })
   const [optionsLoading, setOptionsLoading] = useState(true)
   const [optionsError, setOptionsError] = useState(null)
@@ -156,6 +173,7 @@ export default function CoveragePlanner({ api }) {
 
   useEffect(() => {
     setClickedClient(null)
+    setValidationFeedback(null)
   }, [selectedBlockId])
 
   useEffect(() => {
@@ -173,13 +191,8 @@ export default function CoveragePlanner({ api }) {
     }
 
     const candidates = (selectedBlock.detail?.itineraire_geo || [])
-      .filter(stop => stop.latitude != null && stop.longitude != null)
-      .map((stop, index) => ({
-        ...stop,
-        latitude: Number(stop.latitude),
-        longitude: Number(stop.longitude),
-        step: index + 1
-      }))
+      .map((stop, index) => normalizeGeoStop(stop, index))
+      .filter(Boolean)
 
     let cancelled = false
 
@@ -199,7 +212,20 @@ export default function CoveragePlanner({ api }) {
 
       setRoutePlan(prev => ({ ...prev, loading: true, error: null }))
 
-      const origin = selectedBlock.detail?.depot_origin || null
+      const origin = normalizeGeoStop(selectedBlock.detail?.depot_origin, -1)
+
+      if ((origin ? candidates.length + 1 : candidates.length) < 2) {
+        setRoutePlan({
+          loading: false,
+          error: null,
+          origin,
+          orderedStops: candidates,
+          geometry: [],
+          steps: [],
+          summary: null
+        })
+        return
+      }
 
       try {
         const inputStops = origin ? [origin, ...candidates] : candidates
@@ -375,6 +401,7 @@ export default function CoveragePlanner({ api }) {
       }
       setLoading(true)
       setError(null)
+      setValidationFeedback(null)
       const allCommercialsSelected = selectedCommercials.length === options.commerciaux.length
       const params = {
         start_date: filters.start_date,
@@ -429,6 +456,108 @@ export default function CoveragePlanner({ api }) {
     () => buildGoogleMapsUrl(routePlan.origin, routePlan.orderedStops),
     [routePlan.origin, routePlan.orderedStops]
   )
+  const validationDisabledReason = validationLoading
+    ? 'Validation en cours...'
+    : !selectedRows.length
+      ? 'Ce block ne contient aucun client exploitable a enregistrer.'
+      : null
+
+  const buildValidationStops = () => {
+    const routeStops = routePlan.orderedStops.length
+      ? routePlan.orderedStops
+      : (selectedBlock?.detail?.itineraire_geo || [])
+
+    return routeStops
+      .map((stop, index) => ({
+        client_code: String(stop.client_code || stop.nbr_client || '').trim(),
+        client_name: stop.nom || '',
+        adresse: stop.adresse || '',
+        latitude: stop.latitude,
+        longitude: stop.longitude,
+        rang: index + 1
+      }))
+      .filter(stop => stop.client_code)
+  }
+
+  const validateRoutePlan = async () => {
+    if (!selectedBlock) {
+      const errorMessage = 'Aucun block selectionne a valider.'
+      setValidationFeedback({ type: 'error', message: errorMessage })
+      window.alert(errorMessage)
+      return
+    }
+
+    const stops = buildValidationStops()
+    if (!stops.length) {
+      const errorMessage = 'Aucun client exploitable a enregistrer pour cette tournee.'
+      setValidationFeedback({ type: 'error', message: errorMessage })
+      window.alert(errorMessage)
+      return
+    }
+
+    const confirmMessage = `Valider la tournee finale du ${selectedBlock.date} pour ${selectedBlock.proposed_commercial_label} ?\n\nL'ancienne version enregistree pour cette date et ce commercial sera remplacee.`
+    if (!window.confirm(confirmMessage)) {
+      return
+    }
+
+    setValidationLoading(true)
+    setValidationFeedback(null)
+
+    try {
+      const payload = {
+        date: selectedBlock.date,
+        day_label: selectedBlock.day_label,
+        commercial_code: selectedBlock.proposed_commercial,
+        commercial_label: selectedBlock.proposed_commercial_label,
+        route_code: selectedBlock.detail?.depot_origin?.route || '',
+        depot_code: selectedBlock.detail?.depot_origin?.depot_code || '',
+        depot_name: selectedBlock.detail?.depot_origin?.nom || '',
+        stops
+      }
+
+      const apiCandidates = buildApiCandidates(resolvedApiBase || api)
+      let response = null
+      let lastError = null
+
+      for (const candidate of apiCandidates) {
+        try {
+          response = await axios.post(`${candidate}/api/tournees/coverage-plan/validate`, payload, {
+            timeout: 20000
+          })
+          setResolvedApiBase(candidate)
+          break
+        } catch (saveError) {
+          lastError = saveError
+        }
+      }
+
+      if (!response) {
+        const errorMessage = lastError?.response?.data?.error || "Impossible d'enregistrer la tournee finale."
+        setValidationFeedback({
+          type: 'error',
+          message: errorMessage
+        })
+        window.alert(errorMessage)
+        return
+      }
+
+      const successMessage = response.data?.message || 'La tournee finale a ete enregistree.'
+      setValidationFeedback({
+        type: 'success',
+        message: successMessage
+      })
+      window.alert(successMessage)
+    } catch (unexpectedError) {
+      const errorMessage = unexpectedError?.message || "Impossible d'enregistrer la tournee finale."
+      setValidationFeedback({
+        type: 'error',
+        message: errorMessage
+      })
+      window.alert(errorMessage)
+    } finally {
+      setValidationLoading(false)
+    }
+  }
 
   return (
     <div>
@@ -905,6 +1034,22 @@ export default function CoveragePlanner({ api }) {
                 </div>
               )}
 
+              {validationFeedback && (
+                <div
+                  style={{
+                    marginBottom: '14px',
+                    padding: '10px 12px',
+                    borderRadius: '10px',
+                    backgroundColor: validationFeedback.type === 'success' ? '#ecfdf3' : '#fef3f2',
+                    color: validationFeedback.type === 'success' ? '#027a48' : '#b42318',
+                    fontSize: '12px',
+                    fontWeight: '700'
+                  }}
+                >
+                  {validationFeedback.message}
+                </div>
+              )}
+
               <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 1fr) minmax(260px, 1fr)', gap: '16px' }}>
                 <div style={{ maxHeight: '220px', overflowY: 'auto', paddingRight: '6px' }}>
                   {routePlan.orderedStops.length ? (
@@ -941,22 +1086,50 @@ export default function CoveragePlanner({ api }) {
               </div>
 
               <div style={{ marginTop: '16px' }}>
-                <a
-                  href={navigationUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={{
-                    display: 'inline-block',
-                    padding: '12px 18px',
-                    borderRadius: '10px',
-                    backgroundColor: '#198754',
-                    color: 'white',
-                    fontWeight: '800',
-                    textDecoration: 'none'
-                  }}
-                >
-                  Ouvrir la navigation
-                </a>
+                <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                  <a
+                    href={navigationUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      display: 'inline-block',
+                      padding: '12px 18px',
+                      borderRadius: '10px',
+                      backgroundColor: '#198754',
+                      color: 'white',
+                      fontWeight: '800',
+                      textDecoration: 'none'
+                    }}
+                  >
+                    Ouvrir la navigation
+                  </a>
+
+                  <button
+                    type="button"
+                    onClick={validateRoutePlan}
+                    disabled={validationLoading}
+                    title={validationDisabledReason || 'Enregistrer cette tournee finale dans la base'}
+                    style={{
+                      display: 'inline-block',
+                      padding: '12px 18px',
+                      borderRadius: '10px',
+                      border: 'none',
+                      backgroundColor: validationLoading ? '#94a3b8' : '#1c6dd0',
+                      color: 'white',
+                      fontWeight: '800',
+                      cursor: validationLoading ? 'not-allowed' : 'pointer',
+                      opacity: validationDisabledReason && !validationLoading ? 0.8 : 1
+                    }}
+                  >
+                    {validationLoading ? 'Validation en cours...' : 'Valider le Plan de Route'}
+                  </button>
+                </div>
+
+                {validationDisabledReason && (
+                  <div style={{ marginTop: '10px', fontSize: '12px', color: '#667085', fontWeight: '600' }}>
+                    {validationDisabledReason}
+                  </div>
+                )}
               </div>
             </div>
           </div>

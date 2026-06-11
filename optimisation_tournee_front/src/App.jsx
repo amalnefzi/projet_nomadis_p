@@ -111,6 +111,16 @@ function buildGoogleMapsUrl(origin, stops) {
   return `https://www.google.com/maps/dir/?api=1&${originParam}destination=${destination.latitude},${destination.longitude}&travelmode=driving${waypoints ? `&waypoints=${encodeURIComponent(waypoints)}` : ''}`
 }
 
+function buildQuantitySplit(totalQuantity) {
+  const qte = Math.max(0, Number(totalQuantity || 0))
+  let agro = Math.floor(qte * 0.45)
+  let chips = Math.floor(qte * 0.35)
+  let bur = Math.floor(qte * 0.20)
+  const diff = Math.round(qte - (agro + chips + bur))
+  if (diff > 0) agro += diff
+  return { agro, chips, bur }
+}
+
 function App() {
   const [activeModule, setActiveModule] = useState('dashboard')
   const [loading, setLoading] = useState(false)
@@ -121,8 +131,12 @@ function App() {
   const [isTraining, setIsTraining] = useState(false)
   const [options, setOptions] = useState({ routes: [], commerciaux: [] })
   const [donneesTournee, setDonneesTournee] = useState(null)
+  const [editableTournees, setEditableTournees] = useState([])
   const [clickedClient, setClickedClient] = useState(null)
   const [userLocation, setUserLocation] = useState(null)
+  const [validationFeedback, setValidationFeedback] = useState(null)
+  const [validationLoading, setValidationLoading] = useState(false)
+  const [manualOrderLocked, setManualOrderLocked] = useState(false)
   const [routePlan, setRoutePlan] = useState({
     loading: false,
     error: null,
@@ -208,6 +222,7 @@ function App() {
     try {
       setLoading(true)
       setErreur(null)
+      setValidationFeedback(null)
       if (filtres.mode_tournee !== 'vente') {
         setShowBacktest(false)
       }
@@ -240,6 +255,9 @@ function App() {
         }
       })
       setDonneesTournee(res.data)
+      setEditableTournees(Array.isArray(res.data?.tournees) ? res.data.tournees : [])
+      setManualOrderLocked(false)
+      setClickedClient(null)
     } catch {
       setErreur("Erreur connexion. Verifiez MySQL et l'API.")
     } finally {
@@ -261,8 +279,30 @@ function App() {
     }
   }
 
-  const tournees = useMemo(() => donneesTournee?.tournees ?? [], [donneesTournee])
-  const chargeTotale = useMemo(() => donneesTournee?.chargeTotale ?? { agro: 0, chips: 0, bureautique: 0, detailsProduits: [] }, [donneesTournee])
+  const tournees = useMemo(() => editableTournees, [editableTournees])
+  const chargeTotale = useMemo(() => {
+    if (!tournees.length) {
+      return donneesTournee?.chargeTotale ?? { agro: 0, chips: 0, bureautique: 0, detailsProduits: [] }
+    }
+
+    const detailsProduitsMap = {}
+    tournees.forEach(row => {
+      ;(row.produits || []).forEach(produit => {
+        const nom = String(produit.nom || '').trim()
+        if (!nom) return
+        detailsProduitsMap[nom] = (detailsProduitsMap[nom] || 0) + Number(produit.quantite || 0)
+      })
+    })
+
+    return {
+      agro: tournees.reduce((sum, row) => sum + Number(row.details?.agro || 0), 0),
+      chips: tournees.reduce((sum, row) => sum + Number(row.details?.chips || 0), 0),
+      bureautique: tournees.reduce((sum, row) => sum + Number(row.details?.bur || 0), 0),
+      detailsProduits: Object.entries(detailsProduitsMap)
+        .map(([nom, quantite]) => ({ nom, quantite: Number(quantite.toFixed(1)) }))
+        .sort((a, b) => b.quantite - a.quantite)
+    }
+  }, [donneesTournee, tournees])
   const itineraire = useMemo(() => donneesTournee?.itineraire ?? [], [donneesTournee])
   const modeTournee = donneesTournee?.mode || filtres.mode_tournee || 'vente'
   const isRecouvrementMode = modeTournee === 'recouvrement'
@@ -325,12 +365,14 @@ function App() {
         nom: row.nom,
         adresse: row.adresse || 'Adresse non specifiee',
         latitude: Number(row.latitude),
-        longitude: Number(row.longitude),
-        score_ia: Number(row.score_ia || 0),
-        chiffre: Number.parseFloat(row.chiffre) || Number(row.chiffre_brut || 0) || 0
+        longitude: Number(row.longitude)
       }))
       .filter(stop => Number.isFinite(stop.latitude) && Number.isFinite(stop.longitude))
   }, [tourneesAffichees])
+  const routingSignature = useMemo(
+    () => routingCandidates.map(stop => `${stop.id}:${stop.latitude}:${stop.longitude}`).join('|'),
+    [routingCandidates]
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -362,25 +404,30 @@ function App() {
             : null
 
       try {
-        const inputStops = origin ? [origin, ...routingCandidates] : routingCandidates
-        const tripCoords = inputStops.map(stop => `${stop.longitude},${stop.latitude}`).join(';')
-        const tripUrl = `https://router.project-osrm.org/trip/v1/driving/${tripCoords}`
-        const tripParams = origin
-          ? { source: 'first', roundtrip: false, geometries: 'geojson', overview: 'false' }
-          : { source: 'any', roundtrip: false, geometries: 'geojson', overview: 'false' }
+        let orderedStops = routingCandidates
 
-        const tripRes = await axios.get(tripUrl, { params: tripParams })
-        const waypoints = tripRes.data?.waypoints || []
-        if (!waypoints.length) {
-          throw new Error("Aucun ordre de passage n'a ete trouve.")
+        if (!manualOrderLocked) {
+          const inputStops = origin ? [origin, ...routingCandidates] : routingCandidates
+          const tripCoords = inputStops.map(stop => `${stop.longitude},${stop.latitude}`).join(';')
+          const tripUrl = `https://router.project-osrm.org/trip/v1/driving/${tripCoords}`
+          const tripParams = origin
+            ? { source: 'first', roundtrip: false, geometries: 'geojson', overview: 'false' }
+            : { source: 'any', roundtrip: false, geometries: 'geojson', overview: 'false' }
+
+          const tripRes = await axios.get(tripUrl, { params: tripParams })
+          const waypoints = tripRes.data?.waypoints || []
+          if (!waypoints.length) {
+            throw new Error("Aucun ordre de passage n'a ete trouve.")
+          }
+
+          const clientWaypoints = waypoints
+            .map((wp, index) => ({ ...wp, originalIndex: index }))
+            .filter(wp => !(origin && wp.originalIndex === 0))
+            .sort((a, b) => (a.waypoint_index ?? 0) - (b.waypoint_index ?? 0))
+
+          orderedStops = clientWaypoints.map(wp => inputStops[wp.originalIndex]).filter(Boolean)
         }
 
-        const clientWaypoints = waypoints
-          .map((wp, index) => ({ ...wp, originalIndex: index }))
-          .filter(wp => !(origin && wp.originalIndex === 0))
-          .sort((a, b) => (a.waypoint_index ?? 0) - (b.waypoint_index ?? 0))
-
-        const orderedStops = clientWaypoints.map(wp => inputStops[wp.originalIndex]).filter(Boolean)
         const orderedWithOrigin = origin ? [origin, ...orderedStops] : orderedStops
         const routeCoords = orderedWithOrigin.map(stop => `${stop.longitude},${stop.latitude}`).join(';')
         const routeUrl = `https://router.project-osrm.org/route/v1/driving/${routeCoords}`
@@ -441,7 +488,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [routingCandidates, userLocation, depotOrigin])
+  }, [routingSignature, userLocation, depotOrigin, manualOrderLocked])
 
   useEffect(() => {
     if (!mapRef.current || !L) return
@@ -509,7 +556,10 @@ function App() {
     }
   }, [itineraireGeo, routePlan])
 
-  const chiffreTotal = tourneesAffichees.reduce((acc, curr) => acc + parseFloat(curr.chiffre || 0), 0)
+  const chiffreTotal = tourneesAffichees.reduce(
+    (acc, curr) => acc + Number(curr.collecte_prevue ?? curr.chiffre_brut ?? parseFloat(curr.chiffre) ?? 0),
+    0
+  )
   const quantiteTotalCamion = chargeTotale.agro + chargeTotale.chips + chargeTotale.bureautique
   const plafondTotal = tourneesAffichees.reduce((acc, curr) => acc + (Number(curr.plafond_credit) || 0), 0)
   const encoursTotalRecouvrement = tourneesAffichees.reduce((acc, curr) => acc + (Number(curr.encours_credit) || 0), 0)
@@ -529,6 +579,173 @@ function App() {
     () => buildGoogleMapsUrl(routePlan.origin, routePlan.orderedStops),
     [routePlan.origin, routePlan.orderedStops]
   )
+  const selectedCommercialLabel = useMemo(
+    () => options.commerciaux.find(item => item.value === filtres.commercial)?.label || `Commercial ${filtres.commercial || ''}`,
+    [options.commerciaux, filtres.commercial]
+  )
+  const validationDisabledReason = validationLoading
+    ? 'Validation en cours...'
+    : !tourneesAffichees.length
+      ? 'Aucun client a enregistrer pour ce plan de route.'
+      : null
+
+  const buildValidationStops = () => {
+    const rowsByClient = new Map(
+      tourneesAffichees.map((row, index) => [String(row.nbr_client || ''), { ...row, __index: index }])
+    )
+
+    const routeStops = routePlan.orderedStops.length
+      ? routePlan.orderedStops
+          .map((stop, index) => {
+            const clientCode = String(stop.client_code || stop.id || '').trim()
+            const row = rowsByClient.get(clientCode)
+            if (!clientCode && !row) return null
+
+            return {
+              client_code: clientCode || String(row?.nbr_client || '').trim(),
+              client_name: row?.nom || stop.nom || '',
+              adresse: row?.adresse || stop.adresse || '',
+              latitude: row?.latitude ?? stop.latitude ?? null,
+              longitude: row?.longitude ?? stop.longitude ?? null,
+              rang: index + 1
+            }
+          })
+          .filter(Boolean)
+      : tourneesAffichees.map((row, index) => ({
+          client_code: String(row.nbr_client || '').trim(),
+          client_name: row.nom || '',
+          adresse: row.adresse || '',
+          latitude: row.latitude ?? null,
+          longitude: row.longitude ?? null,
+          rang: index + 1
+        }))
+
+    return routeStops.filter(stop => stop.client_code)
+  }
+
+  const updateEditableRow = (rowIndex, updater) => {
+    setEditableTournees(current => current.map((row, index) => (
+      index === rowIndex ? updater(row) : row
+    )))
+  }
+
+  const handleQteRecoChange = (rowIndex, rawValue) => {
+    const parsedValue = Number.parseFloat(String(rawValue || '').replace(',', '.'))
+    const nextQte = Number.isFinite(parsedValue) ? Math.max(0, parsedValue) : 0
+
+    updateEditableRow(rowIndex, row => {
+      const previousQte = Math.max(0, Number(row.qte_reco || 0))
+      const ratio = previousQte > 0 ? nextQte / previousQte : 0
+      const produits = Array.isArray(row.produits)
+        ? row.produits.map(produit => ({
+            ...produit,
+            quantite: Number.isFinite(Number(produit.quantite))
+              ? Number((Number(produit.quantite) * ratio).toFixed(1))
+              : produit.quantite
+          }))
+        : row.produits
+      const details = buildQuantitySplit(nextQte)
+
+      return {
+        ...row,
+        qte_reco: nextQte,
+        produits,
+        details: {
+          ...row.details,
+          agro: details.agro,
+          chips: details.chips,
+          bur: details.bur
+        }
+      }
+    })
+  }
+
+  const handleAmountChange = (rowIndex, rawValue, fieldName = 'chiffre_brut') => {
+    const parsedValue = Number.parseFloat(String(rawValue || '').replace(',', '.'))
+    const nextAmount = Number.isFinite(parsedValue) ? Math.max(0, parsedValue) : 0
+
+    updateEditableRow(rowIndex, row => ({
+      ...row,
+      [fieldName]: nextAmount,
+      ...(fieldName === 'chiffre_brut' ? { chiffre: `${nextAmount.toFixed(1)} TND` } : {}),
+      ...(fieldName === 'collecte_prevue' ? { chiffre_brut: nextAmount } : {})
+    }))
+  }
+
+  const moveEditableRow = (rowIndex, direction) => {
+    setEditableTournees(current => {
+      const nextRows = [...current]
+      const targetIndex = rowIndex + direction
+      if (rowIndex < 0 || targetIndex < 0 || rowIndex >= nextRows.length || targetIndex >= nextRows.length) {
+        return current
+      }
+
+      const [movedRow] = nextRows.splice(rowIndex, 1)
+      nextRows.splice(targetIndex, 0, movedRow)
+      return nextRows
+    })
+    setManualOrderLocked(true)
+    setClickedClient(null)
+  }
+
+  const resetManualRouteOrder = () => {
+    setManualOrderLocked(false)
+  }
+
+  const validateRoutePlan = async () => {
+    if (!donneesTournee) {
+      const errorMessage = 'Aucun plan de route disponible a valider.'
+      setValidationFeedback({ type: 'error', message: errorMessage })
+      window.alert(errorMessage)
+      return
+    }
+
+    const stops = buildValidationStops()
+    if (!stops.length) {
+      const errorMessage = 'Aucun client exploitable a enregistrer pour cette tournee.'
+      setValidationFeedback({ type: 'error', message: errorMessage })
+      window.alert(errorMessage)
+      return
+    }
+
+    const selectedDate = donneesTournee.jourSelectionne || effectiveDatePrecise
+    const confirmMessage = `Valider la tournee finale du ${selectedDate} pour ${selectedCommercialLabel} ?\n\nL'ancienne version enregistree pour cette date et ce commercial sera remplacee.`
+    if (!window.confirm(confirmMessage)) {
+      return
+    }
+
+    setValidationLoading(true)
+    setValidationFeedback(null)
+
+    try {
+      const payload = {
+        date: selectedDate,
+        day_label: getJourLabel(0),
+        commercial_code: filtres.commercial,
+        commercial_label: selectedCommercialLabel,
+        route_code: filtres.route || depotOrigin?.route || '',
+        depot_code: depotOrigin?.depot_code || '',
+        depot_name: depotOrigin?.nom || '',
+        mode_tournee: modeTournee,
+        loading_products: isRecouvrementMode ? undefined : chargeTotale.detailsProduits,
+        stops
+      }
+
+      const response = await axios.post(`${API}/api/tournees/plan/validate`, payload, {
+        timeout: 20000
+      })
+
+      const successMessage = response.data?.message || 'La tournee finale a ete enregistree.'
+      setValidationFeedback({ type: 'success', message: successMessage })
+      window.alert(successMessage)
+    } catch (saveError) {
+      const errorMessage = saveError?.response?.data?.error || saveError?.message || "Impossible d'enregistrer la tournee finale."
+      setValidationFeedback({ type: 'error', message: errorMessage })
+      window.alert(errorMessage)
+    } finally {
+      setValidationLoading(false)
+    }
+  }
 
   return (
     <div style={{ padding: '20px 40px', fontFamily: '"Segoe UI", Roboto, Helvetica, Arial, sans-serif', backgroundColor: '#f4f7fa', minHeight: '100vh', color: '#333' }}>
@@ -820,6 +1037,28 @@ function App() {
           <h3 style={{ marginTop: 0, color: '#1a2b4c', borderBottom: '2px solid #f1f3f5', paddingBottom: '10px' }}>
             {isRecouvrementMode ? 'Liste des clients (tries par priorite de recouvrement)' : 'Liste des clients (tries par Intelligence IA)'}
           </h3>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '12px' }}>
+            <div style={{ fontSize: '12px', color: '#667085', fontWeight: '600' }}>
+              Tu peux modifier la quantite, le montant predit et l'ordre des clients avant validation.
+            </div>
+            {manualOrderLocked && (
+              <button
+                type="button"
+                onClick={resetManualRouteOrder}
+                style={{
+                  padding: '8px 12px',
+                  borderRadius: '8px',
+                  border: '1px solid #d0d5dd',
+                  backgroundColor: 'white',
+                  color: '#344054',
+                  fontWeight: '700',
+                  cursor: 'pointer'
+                }}
+              >
+                Reoptimiser l'ordre
+              </button>
+            )}
+          </div>
           <div style={{ overflowX: 'auto', maxHeight: '380px' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
               <thead style={{ position: 'sticky', top: 0, backgroundColor: '#f8f9fa' }}>
@@ -853,8 +1092,23 @@ function App() {
                         <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef' }}>
                           {isRecouvrementMode ? (
                             <div>
-                              <div style={{ fontWeight: 'bold', fontSize: '14px', color: '#0d6efd', display: 'inline-block' }}>
-                                {(Number(row.collecte_prevue || row.chiffre_brut || row.qte_reco || 0)).toFixed(1)} TND
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  step="0.1"
+                                  value={Number(row.collecte_prevue || row.chiffre_brut || row.qte_reco || 0)}
+                                  onChange={event => handleAmountChange(idx, event.target.value, 'collecte_prevue')}
+                                  style={{
+                                    width: '96px',
+                                    padding: '6px 8px',
+                                    borderRadius: '6px',
+                                    border: '1px solid #cbd5e1',
+                                    fontWeight: '700',
+                                    color: '#0d6efd'
+                                  }}
+                                />
+                                <span style={{ fontWeight: '700', color: '#0d6efd' }}>TND</span>
                               </div>
                               <div style={{ fontSize: '11px', color: '#6c757d', marginTop: '4px' }}>
                                 Encours: {(Number(row.encours_credit || 0)).toFixed(1)} TND
@@ -863,21 +1117,38 @@ function App() {
                             </div>
                           ) : (
                             <>
-                              <div
-                                onClick={() => setClickedClient(clickedClient === idx ? null : idx)}
-                                style={{
-                                  fontWeight: 'bold',
-                                  fontSize: '14px',
-                                  color: '#0d6efd',
-                                  cursor: 'pointer',
-                                  padding: '4px 8px',
-                                  borderRadius: '4px',
-                                  backgroundColor: clickedClient === idx ? '#e7f3ff' : 'transparent',
-                                  transition: '0.2s',
-                                  display: 'inline-block'
-                                }}
-                              >
-                                {row.qte_reco} unites
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  step="0.1"
+                                  value={Number(row.qte_reco || 0)}
+                                  onChange={event => handleQteRecoChange(idx, event.target.value)}
+                                  style={{
+                                    width: '86px',
+                                    padding: '6px 8px',
+                                    borderRadius: '6px',
+                                    border: '1px solid #cbd5e1',
+                                    fontWeight: '700',
+                                    color: '#0d6efd'
+                                  }}
+                                />
+                                <div
+                                  onClick={() => setClickedClient(clickedClient === idx ? null : idx)}
+                                  style={{
+                                    fontWeight: 'bold',
+                                    fontSize: '13px',
+                                    color: '#0d6efd',
+                                    cursor: 'pointer',
+                                    padding: '4px 8px',
+                                    borderRadius: '4px',
+                                    backgroundColor: clickedClient === idx ? '#e7f3ff' : 'transparent',
+                                    transition: '0.2s',
+                                    display: 'inline-block'
+                                  }}
+                                >
+                                  unites
+                                </div>
                               </div>
 
                               {clickedClient === idx && (
@@ -903,10 +1174,67 @@ function App() {
                           )}
                         </td>
                         <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef', fontWeight: 'bold', color: '#4b5563' }}>{jourLabel}</td>
-                        <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef' }}>{row.nom} ({row.nbr_client})</td>
+                        <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                              <button
+                                type="button"
+                                onClick={() => moveEditableRow(idx, -1)}
+                                disabled={idx === 0}
+                                style={{
+                                  width: '24px',
+                                  height: '24px',
+                                  borderRadius: '6px',
+                                  border: '1px solid #d0d5dd',
+                                  backgroundColor: idx === 0 ? '#f2f4f7' : 'white',
+                                  color: '#344054',
+                                  cursor: idx === 0 ? 'not-allowed' : 'pointer',
+                                  fontWeight: '800'
+                                }}
+                              >
+                                ↑
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => moveEditableRow(idx, 1)}
+                                disabled={idx === tourneesAffichees.length - 1}
+                                style={{
+                                  width: '24px',
+                                  height: '24px',
+                                  borderRadius: '6px',
+                                  border: '1px solid #d0d5dd',
+                                  backgroundColor: idx === tourneesAffichees.length - 1 ? '#f2f4f7' : 'white',
+                                  color: '#344054',
+                                  cursor: idx === tourneesAffichees.length - 1 ? 'not-allowed' : 'pointer',
+                                  fontWeight: '800'
+                                }}
+                              >
+                                ↓
+                              </button>
+                            </div>
+                            <div>{row.nom} ({row.nbr_client})</div>
+                          </div>
+                        </td>
                         {!isRecouvrementMode && (
                           <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef', color: '#198754', fontWeight: 'bold' }}>
-                            {row.chiffre}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <input
+                                type="number"
+                                min={0}
+                                step="0.1"
+                                value={Number(row.chiffre_brut || parseFloat(row.chiffre) || 0)}
+                                onChange={event => handleAmountChange(idx, event.target.value, 'chiffre_brut')}
+                                style={{
+                                  width: '96px',
+                                  padding: '6px 8px',
+                                  borderRadius: '6px',
+                                  border: '1px solid #cbd5e1',
+                                  fontWeight: '700',
+                                  color: '#198754'
+                                }}
+                              />
+                              <span>TND</span>
+                            </div>
                           </td>
                         )}
                         <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef' }}>{row.commercia_zone}</td>
@@ -1003,6 +1331,21 @@ function App() {
                   {routePlan.error}
                 </div>
               )}
+              {validationFeedback && (
+                <div
+                  style={{
+                    marginBottom: '12px',
+                    padding: '10px 12px',
+                    borderRadius: '8px',
+                    backgroundColor: validationFeedback.type === 'success' ? '#ecfdf3' : '#fef3f2',
+                    color: validationFeedback.type === 'success' ? '#027a48' : '#b42318',
+                    fontSize: '12px',
+                    fontWeight: '700'
+                  }}
+                >
+                  {validationFeedback.message}
+                </div>
+              )}
               <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 1fr) minmax(260px, 1fr)', gap: '16px' }}>
                 <div style={{ maxHeight: '220px', overflowY: 'auto', paddingRight: '8px' }}>
                   {routePlan.orderedStops.length ? (
@@ -1049,10 +1392,32 @@ function App() {
                 >
                   Ouvrir la navigation
                 </a>
-                <button style={{ flex: 1, padding: '12px', backgroundColor: '#0d6efd', color: 'white', border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer', transition: '0.2s' }}>
-                  Valider le Plan de Route
+                <button
+                  type="button"
+                  onClick={validateRoutePlan}
+                  disabled={validationLoading}
+                  title={validationDisabledReason || 'Enregistrer ce plan de route dans la base'}
+                  style={{
+                    flex: 1,
+                    padding: '12px',
+                    backgroundColor: validationLoading ? '#94a3b8' : '#0d6efd',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '6px',
+                    fontWeight: 'bold',
+                    cursor: validationLoading ? 'not-allowed' : 'pointer',
+                    transition: '0.2s',
+                    opacity: validationDisabledReason && !validationLoading ? 0.8 : 1
+                  }}
+                >
+                  {validationLoading ? 'Validation en cours...' : 'Valider le Plan de Route'}
                 </button>
               </div>
+              {validationDisabledReason && (
+                <div style={{ marginTop: '10px', fontSize: '12px', color: '#6c757d', fontWeight: '600' }}>
+                  {validationDisabledReason}
+                </div>
+              )}
             </div>
 
           </div>

@@ -42,6 +42,11 @@ db.connect(err => {
 
   console.log('Connecte a la base de donnees dist_utic !')
   console.log('Le reentrainement automatique est desactive dans server.js. Utilisez le scheduler systeme.')
+
+  ensureMovementSupportTables()
+    .catch(error => {
+      console.error('Initialisation tables support mouvements impossible:', error.message)
+    })
 })
 
 const COMMERCIAL_OPTIONS_CACHE_TTL_MS = 5 * 60 * 1000
@@ -255,6 +260,108 @@ function queryAsync(sql, params = []) {
   })
 }
 
+let movementSupportTablesPending = null
+
+async function ensureMovementSupportTables() {
+  if (movementSupportTablesPending) {
+    return movementSupportTablesPending
+  }
+
+  movementSupportTablesPending = (async () => {
+    await queryAsync(`
+      CREATE TABLE IF NOT EXISTS stock_depots (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        produit_code VARCHAR(255) NOT NULL,
+        soussociete_code VARCHAR(255) NOT NULL,
+        quantite DOUBLE NOT NULL DEFAULT 0,
+        retour DOUBLE NOT NULL DEFAULT 0,
+        dlc DOUBLE NOT NULL DEFAULT 0,
+        casse DOUBLE NOT NULL DEFAULT 0,
+        reservation DOUBLE NOT NULL DEFAULT 0,
+        securite DOUBLE NOT NULL DEFAULT 0,
+        created_at TIMESTAMP NULL DEFAULT NULL,
+        updated_at TIMESTAMP NULL DEFAULT NULL,
+        PRIMARY KEY (id),
+        UNIQUE KEY stock_depots_unique (produit_code, soussociete_code)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+    `)
+
+    await queryAsync(`
+      CREATE TABLE IF NOT EXISTS stock_depot_info (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_code VARCHAR(255) DEFAULT NULL,
+        commercial_code VARCHAR(255) DEFAULT NULL,
+        soussociete_code VARCHAR(255) DEFAULT NULL,
+        code VARCHAR(255) DEFAULT NULL,
+        produit_code VARCHAR(255) DEFAULT NULL,
+        old_quantite DOUBLE DEFAULT NULL,
+        diff_quantite DOUBLE DEFAULT NULL,
+        new_quantite DOUBLE DEFAULT NULL,
+        module_nomadis VARCHAR(255) DEFAULT NULL,
+        type_mouvement VARCHAR(255) DEFAULT NULL,
+        cause VARCHAR(255) DEFAULT NULL,
+        etat VARCHAR(255) DEFAULT NULL,
+        latitude VARCHAR(255) DEFAULT NULL,
+        longitude VARCHAR(255) DEFAULT NULL,
+        date DATETIME DEFAULT NULL,
+        created_at TIMESTAMP NULL DEFAULT NULL,
+        updated_at TIMESTAMP NULL DEFAULT NULL,
+        PRIMARY KEY (id),
+        KEY stock_depot_info_code_idx (code),
+        KEY stock_depot_info_produit_idx (produit_code),
+        KEY stock_depot_info_soussociete_idx (soussociete_code)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+    `)
+
+    await queryAsync(`
+      CREATE TABLE IF NOT EXISTS mouvements_deleted (
+        archive_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        id BIGINT UNSIGNED NOT NULL,
+        magasinier_code VARCHAR(255) DEFAULT NULL,
+        depot_code VARCHAR(255) DEFAULT NULL,
+        commercial_code VARCHAR(255) DEFAULT NULL,
+        caisse_code VARCHAR(191) DEFAULT NULL,
+        soussociete_code VARCHAR(255) DEFAULT NULL,
+        produit_code VARCHAR(255) DEFAULT NULL,
+        prix_achat_ht DOUBLE DEFAULT NULL,
+        prix_achat_ttc DOUBLE DEFAULT NULL,
+        quantite DOUBLE DEFAULT NULL,
+        qte_demande DOUBLE DEFAULT NULL,
+        prix_ht DOUBLE DEFAULT NULL,
+        prix_ttc DOUBLE DEFAULT NULL,
+        p_tva DOUBLE DEFAULT NULL,
+        taux_tva DOUBLE DEFAULT NULL,
+        remise DOUBLE DEFAULT NULL,
+        type VARCHAR(255) DEFAULT NULL,
+        num_serie VARCHAR(255) DEFAULT NULL,
+        numero VARCHAR(255) DEFAULT NULL,
+        configuration VARCHAR(255) DEFAULT NULL,
+        etat VARCHAR(255) DEFAULT NULL,
+        isSync TINYINT(1) DEFAULT 0,
+        wavesoft VARCHAR(50) DEFAULT NULL,
+        num_lot VARCHAR(50) DEFAULT NULL,
+        deleted_at TIMESTAMP NULL DEFAULT NULL,
+        created_at TIMESTAMP NULL DEFAULT NULL,
+        updated_at TIMESTAMP NULL DEFAULT NULL,
+        date DATETIME DEFAULT NULL,
+        date_accept DATETIME DEFAULT NULL,
+        from_stock TINYINT(1) DEFAULT NULL,
+        PRIMARY KEY (archive_id),
+        KEY mouvements_deleted_id_idx (id),
+        KEY mouvements_deleted_numero_idx (numero),
+        KEY mouvements_deleted_produit_idx (produit_code)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+    `)
+
+    console.log('Tables support mouvements verifiees.')
+  })().catch(error => {
+    movementSupportTablesPending = null
+    throw error
+  })
+
+  return movementSupportTablesPending
+}
+
 async function fetchCommercialOptions() {
   const now = Date.now()
   if (commercialOptionsCache.data !== null && commercialOptionsCache.expiresAt > now) {
@@ -414,6 +521,12 @@ function addLocalDays(date, days) {
   return next
 }
 
+function resolveFrenchDayLabel(dateValue, fallbackLabel = null) {
+  const parsed = parseLocalDate(dateValue)
+  const computed = FRENCH_DAY_NAMES[parsed.getDay()]
+  return FRENCH_DAY_NAMES.includes(fallbackLabel) ? fallbackLabel : computed
+}
+
 function buildWorkingDays(startDateValue, periodDays) {
   const startDate = parseLocalDate(startDateValue)
   const days = []
@@ -468,6 +581,467 @@ function deriveFallbackHabitScore(visitsHist) {
 
 function deriveFallbackRecencyScore(daysSinceLastVisit, periodDays) {
   return roundScore(clamp((Number(daysSinceLastVisit || 0) / Math.max(periodDays, 1)) * 100, 0, 100))
+}
+
+function buildValidatedTourneeCode(prefix, date, commercialCode) {
+  const safeDate = String(date || '').replace(/[^0-9]/g, '')
+  const safeCommercial = String(commercialCode || '').trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'unknown'
+  const safePrefix = String(prefix || 'tournee').trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'tournee'
+  return `${safePrefix}-${safeDate}-${safeCommercial}`
+}
+
+function buildCoverageValidationCode(date, commercialCode) {
+  return buildValidatedTourneeCode('coverage', date, commercialCode)
+}
+
+function normalizeValidatedStops(stops) {
+  return (Array.isArray(stops) ? stops : [])
+    .map((stop, index) => ({
+      client_code: String(stop.client_code || stop.nbr_client || '').trim(),
+      client_name: String(stop.client_name || stop.nom || '').trim(),
+      adresse: String(stop.adresse || '').trim(),
+      latitude: Number.isFinite(Number(stop.latitude)) ? String(Number(stop.latitude)) : null,
+      longitude: Number.isFinite(Number(stop.longitude)) ? String(Number(stop.longitude)) : null,
+      rang: Number.isFinite(Number(stop.rang)) && Number(stop.rang) > 0 ? Number(stop.rang) : index + 1
+    }))
+    .filter(stop => stop.client_code)
+}
+
+function buildValidatedLoadingCode(date, commercialCode) {
+  return buildValidatedTourneeCode('prechargement', date, commercialCode)
+}
+
+function normalizeProductLookupKey(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .trim()
+}
+
+function normalizeLoadingProducts(products) {
+  return (Array.isArray(products) ? products : [])
+    .map((item, index) => {
+      const nom = String(
+        item?.nom ||
+        item?.name ||
+        item?.produit_nom ||
+        item?.produit_code ||
+        ''
+      ).trim()
+      const quantiteBrute = Number.parseFloat(String(
+        item?.quantite ??
+        item?.quantity ??
+        item?.qte ??
+        item?.qte_reco ??
+        0
+      ).replace(',', '.'))
+
+      return {
+        nom,
+        quantite: Number.isFinite(quantiteBrute) ? Number(quantiteBrute.toFixed(3)) : 0,
+        ordre: index + 1
+      }
+    })
+    .filter(item => item.nom && item.quantite > 0)
+}
+
+async function resolveMovementSoussocieteCode({ commercialCode = '', depotCode = '' } = {}) {
+  return null
+}
+
+async function resolveLoadingProductDefinition(productName, cache = new Map()) {
+  const lookupKey = String(productName || '').trim()
+  const normalizedLookupKey = normalizeProductLookupKey(lookupKey)
+
+  if (!lookupKey) {
+    return null
+  }
+
+  if (cache.has(lookupKey)) {
+    return cache.get(lookupKey)
+  }
+
+  const productSelect = `
+    SELECT
+      code,
+      prix_achat_ht,
+      prix_achat_ttc,
+      prix_ht,
+      prix_ttc,
+      tva,
+      chargement,
+      qte_stock,
+      updated_at,
+      sousfamille_code,
+      famille_code,
+      libelle,
+      description,
+      details
+    FROM produits
+    WHERE %ACTIF_CONDITION%
+      AND %FIELD_CONDITION%
+    ORDER BY
+      CASE WHEN chargement = 1 THEN 0 ELSE 1 END ASC,
+      qte_stock DESC,
+      updated_at DESC,
+      code ASC
+    LIMIT %LIMIT_VALUE%
+  `
+
+  const exactFields = ['code', 'sousfamille_code', 'famille_code', 'libelle', 'description', 'details']
+  const activeConditions = ['actif = 1', '1 = 1']
+  let resolved = null
+
+  exactSearch:
+  for (const activeCondition of activeConditions) {
+    for (const field of exactFields) {
+      const sql = productSelect
+        .replace('%ACTIF_CONDITION%', activeCondition)
+        .replace('%FIELD_CONDITION%', `${field} = ?`)
+        .replace('%LIMIT_VALUE%', '1')
+
+      const rows = await queryAsync(sql, [lookupKey])
+      if (rows.length > 0) {
+        resolved = rows[0]
+        break exactSearch
+      }
+    }
+  }
+
+  if (!resolved && normalizedLookupKey) {
+    const likePattern = `%${lookupKey}%`
+    const sql = productSelect
+      .replace('%ACTIF_CONDITION%', 'actif = 1')
+      .replace('%FIELD_CONDITION%', '(code LIKE ? OR sousfamille_code LIKE ? OR famille_code LIKE ? OR libelle LIKE ? OR description LIKE ? OR details LIKE ?)')
+      .replace('%LIMIT_VALUE%', '50')
+
+    const rows = await queryAsync(sql, Array(6).fill(likePattern))
+    const scoredRows = rows
+      .map(row => {
+        const ranks = [
+          ['code', 0],
+          ['sousfamille_code', 1],
+          ['famille_code', 2],
+          ['libelle', 3],
+          ['description', 4],
+          ['details', 5]
+        ]
+
+        let bestRank = Number.POSITIVE_INFINITY
+        for (const [field, rank] of ranks) {
+          const candidateValue = normalizeProductLookupKey(row[field])
+          if (!candidateValue) continue
+
+          if (candidateValue === normalizedLookupKey) {
+            bestRank = Math.min(bestRank, rank)
+          } else if (
+            candidateValue.includes(normalizedLookupKey) ||
+            normalizedLookupKey.includes(candidateValue)
+          ) {
+            bestRank = Math.min(bestRank, rank + 10)
+          }
+        }
+
+        return {
+          row,
+          bestRank
+        }
+      })
+      .filter(item => Number.isFinite(item.bestRank))
+      .sort((a, b) => {
+        if (a.bestRank !== b.bestRank) return a.bestRank - b.bestRank
+        if (Number(a.row.chargement || 0) !== Number(b.row.chargement || 0)) {
+          return Number(b.row.chargement || 0) - Number(a.row.chargement || 0)
+        }
+        if (Number(a.row.qte_stock || 0) !== Number(b.row.qte_stock || 0)) {
+          return Number(b.row.qte_stock || 0) - Number(a.row.qte_stock || 0)
+        }
+        return String(a.row.code || '').localeCompare(String(b.row.code || ''))
+      })
+
+    resolved = scoredRows[0]?.row || null
+  }
+
+  cache.set(lookupKey, resolved || null)
+  return resolved || null
+}
+
+async function replaceValidatedLoadingPrediction({
+  date,
+  commercialCode,
+  depotCode,
+  loadingProducts,
+  logPrefix = 'PLAN_VALIDATE'
+}) {
+  await ensureMovementSupportTables()
+
+  const selectedDate = formatLocalDate(parseLocalDate(date))
+  const loadingCode = buildValidatedLoadingCode(selectedDate, commercialCode)
+  const normalizedProducts = normalizeLoadingProducts(loadingProducts)
+  const movementDate = `${selectedDate} 00:00:00`
+  const mouvementDepotCode = String(depotCode || '').trim() || null
+  const soussocieteCode = await resolveMovementSoussocieteCode({
+    commercialCode,
+    depotCode: mouvementDepotCode
+  })
+  const magasinierCode = String(process.env.PRECHARGEMENT_MAGASINIER_CODE || 'nomadis').trim() || null
+  const resolutionCache = new Map()
+  const createdAt = new Date()
+
+  await queryAsync(
+    `DELETE FROM mouvements
+     WHERE deleted_at IS NULL
+       AND type = 'pre-chargement'
+       AND from_dash = 1
+       AND commercial_code = ?
+       AND DATE(date) = ?
+       AND (numero = ? OR group_cmd_code = ?)`,
+    [commercialCode, selectedDate, loadingCode, loadingCode]
+  )
+
+  if (!normalizedProducts.length) {
+    console.log(`[${logPrefix}] Aucun pre-chargement IA a enregistrer pour date=${selectedDate} commercial=${commercialCode}`)
+    return {
+      savedRows: 0,
+      movementCode: loadingCode
+    }
+  }
+
+  for (const product of normalizedProducts) {
+    const definition = await resolveLoadingProductDefinition(product.nom, resolutionCache)
+
+    if (!definition?.code) {
+      const error = new Error(`Produit de chargement introuvable pour la prediction: ${product.nom}.`)
+      error.statusCode = 400
+      throw error
+    }
+
+    const quantite = Number(product.quantite)
+    const prixAchatHt = Number.isFinite(Number(definition.prix_achat_ht)) ? Number(definition.prix_achat_ht) : 0
+    const prixAchatTtc = Number.isFinite(Number(definition.prix_achat_ttc)) ? Number(definition.prix_achat_ttc) : 0
+    const prixHt = Number.isFinite(Number(definition.prix_ht)) ? Number(definition.prix_ht) : null
+    const prixTtc = Number.isFinite(Number(definition.prix_ttc)) ? Number(definition.prix_ttc) : null
+    const tauxTva = Number.isFinite(Number(definition.tva)) ? Number(definition.tva) : null
+    const pTva = prixHt != null && prixTtc != null
+      ? Number(((prixTtc - prixHt) * quantite).toFixed(3))
+      : null
+
+    await queryAsync(
+      `INSERT INTO mouvements (
+        magasinier_code,
+        depot_code,
+        commercial_code,
+        soussociete_code,
+        produit_code,
+        prix_achat_ht,
+        prix_achat_ttc,
+        quantite,
+        qte_demande,
+        prix_ht,
+        prix_ttc,
+        p_tva,
+        taux_tva,
+        remise,
+        type,
+        type_chargement,
+        from_stock,
+        from_stock_ri,
+        from_dash,
+        numero,
+        group_cmd_code,
+        configuration,
+        etat,
+        date,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pre-chargement', NULL, 1, 0, 1, ?, ?, ?, NULL, ?, ?, ?)`,
+      [
+        magasinierCode,
+        mouvementDepotCode,
+        commercialCode,
+        soussocieteCode,
+        definition.code,
+        prixAchatHt,
+        prixAchatTtc,
+        quantite,
+        quantite,
+        prixHt,
+        prixTtc,
+        pTva,
+        tauxTva,
+        loadingCode,
+        loadingCode,
+        product.nom,
+        movementDate,
+        createdAt,
+        createdAt
+      ]
+    )
+  }
+
+  console.log(`[${logPrefix}] Pre-chargement IA enregistre -> code=${loadingCode} rows=${normalizedProducts.length}`)
+
+  return {
+    savedRows: normalizedProducts.length,
+    movementCode: loadingCode
+  }
+}
+
+async function saveValidatedTourneePlan({
+  date,
+  dayLabel,
+  commercialCode,
+  commercialLabel,
+  routeCode,
+  depotCode,
+  depotName,
+  stops,
+  frequence,
+  categorieCode,
+  typeClient,
+  codePrefix,
+  loadingProducts = null,
+  logPrefix = 'PLAN_VALIDATE'
+}) {
+  const selectedDate = formatLocalDate(parseLocalDate(date))
+  const normalizedStops = normalizeValidatedStops(stops)
+
+  if (!commercialCode) {
+    const error = new Error('Commercial manquant pour la validation de la tournee.')
+    error.statusCode = 400
+    throw error
+  }
+
+  if (!normalizedStops.length) {
+    const error = new Error('Aucun client valide a enregistrer pour cette tournee.')
+    error.statusCode = 400
+    throw error
+  }
+
+  console.log(`[${logPrefix}] Debut validation -> date=${selectedDate} commercial=${commercialCode} stops=${normalizedStops.length}`)
+
+  const resolvedDayLabel = resolveFrenchDayLabel(selectedDate, dayLabel)
+  const validationCode = buildValidatedTourneeCode(codePrefix, selectedDate, commercialCode)
+  const routingCode = routeCode || commercialCode || 'plan-ia'
+  const depotValue = depotCode || depotName || null
+  const tourneeLabel = `${commercialLabel} - ${selectedDate}`
+  let transactionStarted = false
+
+  try {
+    await queryAsync('START TRANSACTION')
+    transactionStarted = true
+
+    await queryAsync(
+      `DELETE FROM tournees
+       WHERE deleted_at IS NULL
+         AND frequence = ?
+         AND code_layer = ?
+         AND date_debut = ?
+         AND date_fin = ?`,
+      [frequence, commercialCode, selectedDate, selectedDate]
+    )
+
+    for (const stop of normalizedStops) {
+      const coordinates = stop.latitude != null && stop.longitude != null
+        ? JSON.stringify({ latitude: Number(stop.latitude), longitude: Number(stop.longitude) })
+        : null
+
+      await queryAsync(
+        `INSERT INTO tournees (
+          code,
+          libelle,
+          layer,
+          coordinates,
+          code_jour,
+          client_code,
+          routing_code,
+          depot_code,
+          frequence,
+          dates,
+          actif,
+          actif_client,
+          date_debut,
+          date_fin,
+          rang,
+          categorie_code,
+          type_layer,
+          code_layer,
+          couleur,
+          type_client,
+          rs_client_code,
+          latitude,
+          longitude,
+          adresse,
+          activite,
+          client,
+          icon,
+          couleur_icon,
+          image
+        ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, 'tournee', ?, NULL, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL)`,
+        [
+          validationCode,
+          tourneeLabel,
+          coordinates,
+          resolvedDayLabel,
+          stop.client_code,
+          routingCode,
+          depotValue,
+          frequence,
+          selectedDate,
+          selectedDate,
+          selectedDate,
+          stop.rang,
+          categorieCode,
+          commercialCode,
+          typeClient,
+          stop.client_code,
+          stop.latitude,
+          stop.longitude,
+          stop.adresse || null,
+          stop.client_name || null
+        ]
+      )
+    }
+
+    const loadingResult = Array.isArray(loadingProducts)
+      ? await replaceValidatedLoadingPrediction({
+          date: selectedDate,
+          commercialCode,
+          depotCode: depotCode || depotName || null,
+          loadingProducts,
+          logPrefix
+        })
+      : { savedRows: 0, movementCode: null }
+
+    await queryAsync('COMMIT')
+
+    console.log(`[${logPrefix}] Succes -> code=${validationCode} rows=${normalizedStops.length}`)
+
+    const loadingMessage = loadingResult.savedRows > 0
+      ? ` Le pre-chargement IA (${loadingResult.savedRows} produit${loadingResult.savedRows > 1 ? 's' : ''}) a aussi ete enregistre.`
+      : ''
+
+    return {
+      status: 'success',
+      message: `La tournee finale du ${selectedDate} pour ${commercialLabel} a ete enregistree.${loadingMessage}`,
+      saved_rows: normalizedStops.length,
+      saved_loading_rows: loadingResult.savedRows,
+      loading_code: loadingResult.movementCode,
+      tournee_code: validationCode
+    }
+  } catch (error) {
+    if (transactionStarted) {
+      try {
+        await queryAsync('ROLLBACK')
+      } catch (rollbackError) {
+        console.error(`[${logPrefix}] Rollback impossible:`, rollbackError.message)
+      }
+    }
+
+    throw error
+  }
 }
 
 function computeCoveragePriorityScore({
@@ -717,6 +1291,77 @@ app.get('/api/tournees/options', async (req, res) => {
   } catch (error) {
     console.error('Erreur SQL options tournees:', error.message)
     res.status(500).json({ error: 'Erreur SQL options tournees' })
+  }
+})
+
+app.post('/api/tournees/coverage-plan/validate', async (req, res) => {
+  const payload = req.body || {}
+  const commercialCode = String(payload.commercial_code || '').trim()
+  const commercialLabel = String(payload.commercial_label || `Commercial ${commercialCode}`).trim()
+  const routeCode = String(payload.route_code || '').trim()
+  const depotCode = String(payload.depot_code || '').trim()
+  const depotName = String(payload.depot_name || '').trim()
+  const stops = payload.stops
+
+  try {
+    const result = await saveValidatedTourneePlan({
+      date: payload.date,
+      dayLabel: payload.day_label,
+      commercialCode,
+      commercialLabel,
+      routeCode,
+      depotCode,
+      depotName,
+      stops,
+      frequence: 'couverture_ia',
+      categorieCode: 'coverage_ia',
+      typeClient: 'coverage_plan',
+      codePrefix: 'coverage',
+      logPrefix: 'COVERAGE_VALIDATE'
+    })
+
+    return res.json(result)
+  } catch (error) {
+    const statusCode = error.statusCode || 500
+    console.error('[COVERAGE_VALIDATE] Erreur validation plan de route:', error.message)
+    return res.status(statusCode).json({ error: error.message || "Impossible d'enregistrer la tournee finale." })
+  }
+})
+
+app.post('/api/tournees/plan/validate', async (req, res) => {
+  const payload = req.body || {}
+  const commercialCode = String(payload.commercial_code || '').trim()
+  const commercialLabel = String(payload.commercial_label || `Commercial ${commercialCode}`).trim()
+  const routeCode = String(payload.route_code || '').trim()
+  const depotCode = String(payload.depot_code || '').trim()
+  const depotName = String(payload.depot_name || '').trim()
+  const stops = payload.stops
+  const modeTournee = String(payload.mode_tournee || 'vente').trim() === 'recouvrement' ? 'recouvrement' : 'vente'
+  const loadingProducts = Array.isArray(payload.loading_products) ? payload.loading_products : null
+
+  try {
+    const result = await saveValidatedTourneePlan({
+      date: payload.date,
+      dayLabel: payload.day_label,
+      commercialCode,
+      commercialLabel,
+      routeCode,
+      depotCode,
+      depotName,
+      stops,
+      frequence: modeTournee === 'recouvrement' ? 'plan_route_recouvrement' : 'plan_route_vente',
+      categorieCode: modeTournee === 'recouvrement' ? 'plan_route_recouvrement' : 'plan_route_vente',
+      typeClient: modeTournee === 'recouvrement' ? 'route_plan_recouvrement' : 'route_plan_vente',
+      codePrefix: modeTournee === 'recouvrement' ? 'recouvrement' : 'vente',
+      loadingProducts: modeTournee === 'recouvrement' ? null : loadingProducts,
+      logPrefix: 'ROUTE_PLAN_VALIDATE'
+    })
+
+    return res.json(result)
+  } catch (error) {
+    const statusCode = error.statusCode || 500
+    console.error('[ROUTE_PLAN_VALIDATE] Erreur validation plan de route:', error.message)
+    return res.status(statusCode).json({ error: error.message || "Impossible d'enregistrer la tournee finale." })
   }
 })
 
