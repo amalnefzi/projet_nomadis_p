@@ -1,0 +1,104 @@
+# 🎯 PROCHAINES ÉTAPES - Nomadis IA
+
+## 📋 CE QUI A ÉTÉ FAIT
+
+✅ **Auto-entraînement de l'IA**
+   - Au démarrage du serveur Node.js
+   - Toutes les 12 heures automatiquement
+
+✅ **Données réelles et cohérentes**
+   - Client codes normalisés: "00155"
+   - Produits réels depuis MySQL
+   - Pas d'estimation - données vraies
+
+✅ **Scripts utilitaires** 
+   - `setup_ia.py` - Configuration complète
+   - `verify_data.py` - Vérifier les données
+   - `requirements.txt` - Dépendances
+
+✅ **Guides de démarrage**
+   - `LANCEMENT_RAPIDE.md` - Guide complet
+   - `MODIFICATIONS.md` - Détails techniques
+   - `RELANCER_IA.bat` - Double-clic pour relancer
+
+---
+
+## 🚀 COMMENT DÉMARRER (3 steps)
+
+### ÉTAPE 1: Configuration initiale (UNE SEULE FOIS)
+
+Ouvrir `cmd` dans `C:\Users\asus\Desktop\Projet_Nomadis\optimisation_tournee_api`:
+
+```cmd
+python setup_ia.py
+```
+
+Cela va:
+- ✅ Installer les dépendances Python
+- ✅ Vérifier MySQL et la base dist_utic
+- ✅ Entraîner l'IA avec les vrais données
+- ✅ Générer le modèle modele_nomadis.pkl
+
+### ÉTAPE 2: Lancer 3 services (chacun dans un terminal séparé)
+
+**Terminal 1 (Ouvrir `cmd` dans optimisation_tournee_api):**
+```cmd
+node server.js
+```
+Il affichera: `🚀 Serveur API prêt sur http://localhost:5000`
+
+**Terminal 2 (Ouvrir `cmd` dans optimisation_tournee_api):**
+```cmd
+python api_ia.py
+```
+Il affichera: `Running on http://127.0.0.1:5001`
+
+**Terminal 3 (Ouvrir `cmd` dans optimisation_tournee_front):**
+```cmd
+npm run dev
+```
+Il affichera: `http://localhost:5173/`
+
+### ÉTAPE 3: Ouvrir l'interface
+
+Aller sur: **http://localhost:5173**
+
+---
+
+## 💡 UTILISATION
+
+1. **Sélectionner une date** dans l'interface
+2. **Cliquer "Analyser avec l'IA"** pour voir les prédictions
+3. **Voir les résultats:**
+   - Clients triés par Score VIP
+   - Chiffre prédit (TND)
+   - Quantités par produit
+
+4. **Cliquer "Mettre à jour le Cerveau IA"** si besoin de relancer manuellement
+
+---
+
+## ❓ AVOIR BESOIN D'AIDE?
+
+- 📖 Lire `LANCEMENT_RAPIDE.md` pour guide complet
+- 🔧 Lire `MODIFICATIONS.md` pour détails techniques  
+- 🔍 Exécuter `python verify_data.py` pour vérifier les données
+- 🗑️ Supprimer `modele_nomadis.pkl` et relancer `train_auto.py` si problème
+
+---
+
+## 📁 FICHIERS IMPORTANTS
+
+| Fichier | Utilité |
+|---------|---------|
+| `setup_ia.py` | Configuration initiale |
+| `verify_data.py` | Vérifier les données |
+| `requirements.txt` | Dépendances Python |
+| `LANCEMENT_RAPIDE.md` | Guide début rapide |
+| `MODIFICATIONS.md` | Changements effectués |
+| `RELANCER_IA.bat` | Double-clic = relancer IA |
+| `.env.example` | Template configuration |
+
+---
+
+**✅ Vous êtes prêt! Suivez juste les 3 étapes ci-dessus et profitez de l'IA automatisée!**
