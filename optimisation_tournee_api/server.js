@@ -43,9 +43,13 @@ db.connect(err => {
   console.log('Connecte a la base de donnees dist_utic !')
   console.log('Le reentrainement automatique est desactive dans server.js. Utilisez le scheduler systeme.')
 
-  ensureMovementSupportTables()
+  Promise.all([
+    ensureMovementSupportTables(),
+    ensurePredictionLoggingTables(),
+    ensurePredictionFeedbackTables()
+  ])
     .catch(error => {
-      console.error('Initialisation tables support mouvements impossible:', error.message)
+      console.error('Initialisation tables support impossible:', error.message)
     })
 })
 
@@ -261,6 +265,18 @@ function queryAsync(sql, params = []) {
 }
 
 let movementSupportTablesPending = null
+let predictionLoggingTablesPending = null
+let predictionFeedbackTablesPending = null
+
+function readCurrentIaPrecisionScore() {
+  try {
+    const precisionLue = fs.readFileSync(path.join(apiDir, 'precision.txt'), 'utf8')
+    const parsedValue = parseFloat(precisionLue)
+    return Number.isFinite(parsedValue) ? parsedValue : 0
+  } catch (error) {
+    return 0
+  }
+}
 
 async function ensureMovementSupportTables() {
   if (movementSupportTablesPending) {
@@ -360,6 +376,569 @@ async function ensureMovementSupportTables() {
   })
 
   return movementSupportTablesPending
+}
+
+async function ensurePredictionLoggingTables() {
+  if (predictionLoggingTablesPending) {
+    return predictionLoggingTablesPending
+  }
+
+  predictionLoggingTablesPending = (async () => {
+    await queryAsync(`
+      CREATE TABLE IF NOT EXISTS ia_prediction_runs (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        run_code VARCHAR(191) NOT NULL,
+        source_context VARCHAR(191) NOT NULL,
+        source_mode VARCHAR(191) DEFAULT NULL,
+        request_date DATE DEFAULT NULL,
+        request_payload_json LONGTEXT DEFAULT NULL,
+        request_context_json LONGTEXT DEFAULT NULL,
+        request_commercials_json LONGTEXT DEFAULT NULL,
+        request_route_code VARCHAR(191) DEFAULT NULL,
+        request_commercial_code VARCHAR(191) DEFAULT NULL,
+        request_top_clients INT DEFAULT NULL,
+        request_target_chiffre DOUBLE DEFAULT NULL,
+        response_status VARCHAR(64) DEFAULT NULL,
+        response_message TEXT DEFAULT NULL,
+        response_meta_json LONGTEXT DEFAULT NULL,
+        total_candidates INT DEFAULT NULL,
+        selected_clients INT DEFAULT NULL,
+        expected_buyers_estimate INT DEFAULT NULL,
+        selection_limit INT DEFAULT NULL,
+        model_version VARCHAR(255) DEFAULT NULL,
+        precision_score DOUBLE DEFAULT NULL,
+        created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY ia_prediction_runs_code_unique (run_code),
+        KEY ia_prediction_runs_context_idx (source_context),
+        KEY ia_prediction_runs_request_date_idx (request_date),
+        KEY ia_prediction_runs_commercial_idx (request_commercial_code)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+    `)
+
+    await queryAsync(`
+      CREATE TABLE IF NOT EXISTS ia_prediction_items (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        run_code VARCHAR(191) NOT NULL,
+        client_code VARCHAR(191) NOT NULL,
+        prediction_rank INT DEFAULT NULL,
+        best_commercial_code VARCHAR(191) DEFAULT NULL,
+        predicted_score DOUBLE DEFAULT NULL,
+        confidence_score DOUBLE DEFAULT NULL,
+        vip_score INT DEFAULT NULL,
+        predicted_qte DOUBLE DEFAULT NULL,
+        predicted_ca DOUBLE DEFAULT NULL,
+        predicted_ca_if_buy DOUBLE DEFAULT NULL,
+        predicted_qte_if_buy DOUBLE DEFAULT NULL,
+        predicted_unit_price DOUBLE DEFAULT NULL,
+        prob_achat DOUBLE DEFAULT NULL,
+        habit_score DOUBLE DEFAULT NULL,
+        recency_score DOUBLE DEFAULT NULL,
+        details_json LONGTEXT DEFAULT NULL,
+        commercial_scores_json LONGTEXT DEFAULT NULL,
+        created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY ia_prediction_items_run_client_unique (run_code, client_code),
+        KEY ia_prediction_items_run_code_idx (run_code),
+        KEY ia_prediction_items_best_commercial_idx (best_commercial_code)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+    `)
+
+    console.log('Tables logging IA verifiees.')
+  })().catch(error => {
+    predictionLoggingTablesPending = null
+    throw error
+  })
+
+  return predictionLoggingTablesPending
+}
+
+async function ensurePredictionFeedbackTables() {
+  if (predictionFeedbackTablesPending) {
+    return predictionFeedbackTablesPending
+  }
+
+  predictionFeedbackTablesPending = (async () => {
+    await queryAsync(`
+      CREATE TABLE IF NOT EXISTS ia_prediction_feedback (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        run_code VARCHAR(191) NOT NULL,
+        client_code VARCHAR(191) NOT NULL,
+        feedback_stage VARCHAR(64) NOT NULL,
+        feedback_date DATE DEFAULT NULL,
+        request_date DATE DEFAULT NULL,
+        source_context VARCHAR(191) DEFAULT NULL,
+        source_mode VARCHAR(191) DEFAULT NULL,
+        was_predicted TINYINT(1) NOT NULL DEFAULT 1,
+        selected_in_final_plan TINYINT(1) NOT NULL DEFAULT 0,
+        selection_source VARCHAR(64) DEFAULT NULL,
+        predicted_rank INT DEFAULT NULL,
+        predicted_score DOUBLE DEFAULT NULL,
+        predicted_ca DOUBLE DEFAULT NULL,
+        predicted_qte DOUBLE DEFAULT NULL,
+        prob_achat DOUBLE DEFAULT NULL,
+        best_commercial_code VARCHAR(191) DEFAULT NULL,
+        final_rank INT DEFAULT NULL,
+        final_commercial_code VARCHAR(191) DEFAULT NULL,
+        final_route_code VARCHAR(191) DEFAULT NULL,
+        final_depot_code VARCHAR(191) DEFAULT NULL,
+        final_tournee_code VARCHAR(191) DEFAULT NULL,
+        actual_sale_amount DOUBLE DEFAULT NULL,
+        actual_sale_qty DOUBLE DEFAULT NULL,
+        actual_purchase_flag TINYINT(1) DEFAULT NULL,
+        actual_doc_count INT DEFAULT NULL,
+        actual_checked_at DATETIME DEFAULT NULL,
+        created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY ia_prediction_feedback_run_client_stage_unique (run_code, client_code, feedback_stage),
+        KEY ia_prediction_feedback_run_code_idx (run_code),
+        KEY ia_prediction_feedback_feedback_date_idx (feedback_date),
+        KEY ia_prediction_feedback_final_commercial_idx (final_commercial_code)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+    `)
+
+    console.log('Table feedback IA verifiee.')
+  })().catch(error => {
+    predictionFeedbackTablesPending = null
+    throw error
+  })
+
+  return predictionFeedbackTablesPending
+}
+
+async function recordPredictionValidationFeedback({
+  predictionRunCode,
+  feedbackDate,
+  commercialCode,
+  routeCode,
+  depotCode,
+  validationCode,
+  stops,
+  logPrefix = 'PLAN_VALIDATE'
+}) {
+  const normalizedRunCode = String(predictionRunCode || '').trim()
+  if (!normalizedRunCode) {
+    return {
+      savedRows: 0,
+      predictedRows: 0,
+      selectedRows: 0,
+      unmatchedSelectedRows: 0,
+      skipped: true,
+      reason: 'missing_prediction_run_code'
+    }
+  }
+
+  const normalizedStops = normalizeValidatedStops(stops)
+  if (!normalizedStops.length) {
+    return {
+      savedRows: 0,
+      predictedRows: 0,
+      selectedRows: 0,
+      unmatchedSelectedRows: 0,
+      skipped: true,
+      reason: 'empty_stops'
+    }
+  }
+
+  await ensurePredictionFeedbackTables()
+
+  const runRows = await queryAsync(
+    `SELECT run_code, request_date, source_context, source_mode
+     FROM ia_prediction_runs
+     WHERE run_code = ?
+     LIMIT 1`,
+    [normalizedRunCode]
+  )
+
+  const runMeta = runRows[0]
+  if (!runMeta) {
+    return {
+      savedRows: 0,
+      predictedRows: 0,
+      selectedRows: normalizedStops.length,
+      unmatchedSelectedRows: normalizedStops.length,
+      skipped: true,
+      reason: 'prediction_run_not_found'
+    }
+  }
+
+  const predictedItems = await queryAsync(
+    `SELECT
+       client_code,
+       prediction_rank,
+       best_commercial_code,
+       predicted_score,
+       predicted_ca,
+       predicted_qte,
+       prob_achat
+     FROM ia_prediction_items
+     WHERE run_code = ?
+     ORDER BY prediction_rank ASC, client_code ASC`,
+    [normalizedRunCode]
+  )
+
+  const selectedByKey = new Map()
+  normalizedStops.forEach((stop, index) => {
+    const key = getCanonicalClientKey(stop.client_code)
+    if (!key || selectedByKey.has(key)) return
+    selectedByKey.set(key, {
+      stop,
+      finalRank: index + 1
+    })
+  })
+
+  await queryAsync(
+    `DELETE FROM ia_prediction_feedback
+     WHERE run_code = ?
+       AND feedback_stage = 'tournee_validation'`,
+    [normalizedRunCode]
+  )
+
+  const predictedKeys = new Set()
+  let savedRows = 0
+
+  for (const item of predictedItems) {
+    const key = getCanonicalClientKey(item.client_code)
+    if (!key) continue
+
+    predictedKeys.add(key)
+    const selectedEntry = selectedByKey.get(key) || null
+
+    await queryAsync(
+      `INSERT INTO ia_prediction_feedback (
+        run_code,
+        client_code,
+        feedback_stage,
+        feedback_date,
+        request_date,
+        source_context,
+        source_mode,
+        was_predicted,
+        selected_in_final_plan,
+        selection_source,
+        predicted_rank,
+        predicted_score,
+        predicted_ca,
+        predicted_qte,
+        prob_achat,
+        best_commercial_code,
+        final_rank,
+        final_commercial_code,
+        final_route_code,
+        final_depot_code,
+        final_tournee_code
+      ) VALUES (?, ?, 'tournee_validation', ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        normalizedRunCode,
+        String(item.client_code || '').trim(),
+        feedbackDate || null,
+        runMeta.request_date || null,
+        runMeta.source_context || null,
+        runMeta.source_mode || null,
+        selectedEntry ? 1 : 0,
+        selectedEntry ? 'validated_selected' : 'validated_not_selected',
+        item.prediction_rank != null ? Number(item.prediction_rank) : null,
+        item.predicted_score != null ? Number(item.predicted_score) : null,
+        item.predicted_ca != null ? Number(item.predicted_ca) : null,
+        item.predicted_qte != null ? Number(item.predicted_qte) : null,
+        item.prob_achat != null ? Number(item.prob_achat) : null,
+        String(item.best_commercial_code || '').trim() || null,
+        selectedEntry ? selectedEntry.finalRank : null,
+        String(commercialCode || '').trim() || null,
+        String(routeCode || '').trim() || null,
+        String(depotCode || '').trim() || null,
+        String(validationCode || '').trim() || null
+      ]
+    )
+
+    savedRows += 1
+  }
+
+  let unmatchedSelectedRows = 0
+  for (const [key, selectedEntry] of selectedByKey.entries()) {
+    if (predictedKeys.has(key)) continue
+
+    const fallbackClientCode = String(selectedEntry.stop.client_code || '').trim()
+    if (!fallbackClientCode) continue
+
+    await queryAsync(
+      `INSERT INTO ia_prediction_feedback (
+        run_code,
+        client_code,
+        feedback_stage,
+        feedback_date,
+        request_date,
+        source_context,
+        source_mode,
+        was_predicted,
+        selected_in_final_plan,
+        selection_source,
+        final_rank,
+        final_commercial_code,
+        final_route_code,
+        final_depot_code,
+        final_tournee_code
+      ) VALUES (?, ?, 'tournee_validation', ?, ?, ?, ?, 0, 1, 'validated_manual_only', ?, ?, ?, ?, ?)`,
+      [
+        normalizedRunCode,
+        fallbackClientCode,
+        feedbackDate || null,
+        runMeta.request_date || null,
+        runMeta.source_context || null,
+        runMeta.source_mode || null,
+        selectedEntry.finalRank,
+        String(commercialCode || '').trim() || null,
+        String(routeCode || '').trim() || null,
+        String(depotCode || '').trim() || null,
+        String(validationCode || '').trim() || null
+      ]
+    )
+
+    savedRows += 1
+    unmatchedSelectedRows += 1
+  }
+
+  console.log(
+    `[${logPrefix}] Feedback prediction enregistre -> run=${normalizedRunCode} rows=${savedRows} predicted=${predictedItems.length} selected=${selectedByKey.size} unmatched=${unmatchedSelectedRows}`
+  )
+
+  return {
+    savedRows,
+    predictedRows: predictedItems.length,
+    selectedRows: selectedByKey.size,
+    unmatchedSelectedRows,
+    skipped: false,
+    reason: null
+  }
+}
+
+async function reconcilePredictionFeedbackActualSales({
+  runCode = null,
+  feedbackDate = null,
+  dateFrom = null,
+  dateTo = null,
+  onlyPending = true,
+  logPrefix = 'PREDICTION_RECONCILE'
+}) {
+  await ensurePredictionFeedbackTables()
+
+  const whereClauses = [`feedback_stage = 'tournee_validation'`]
+  const params = []
+
+  const normalizedRunCode = String(runCode || '').trim()
+  if (normalizedRunCode) {
+    whereClauses.push('run_code = ?')
+    params.push(normalizedRunCode)
+  }
+
+  const normalizedFeedbackDate = normalizeDateOnly(feedbackDate)
+  const normalizedDateFrom = normalizeDateOnly(dateFrom)
+  const normalizedDateTo = normalizeDateOnly(dateTo)
+
+  if (normalizedFeedbackDate) {
+    whereClauses.push('feedback_date = ?')
+    params.push(normalizedFeedbackDate)
+  } else if (normalizedDateFrom && normalizedDateTo) {
+    whereClauses.push('feedback_date BETWEEN ? AND ?')
+    params.push(normalizedDateFrom, normalizedDateTo)
+  } else if (normalizedDateFrom) {
+    whereClauses.push('feedback_date >= ?')
+    params.push(normalizedDateFrom)
+  } else if (normalizedDateTo) {
+    whereClauses.push('feedback_date <= ?')
+    params.push(normalizedDateTo)
+  }
+
+  if (onlyPending) {
+    whereClauses.push('(actual_checked_at IS NULL OR actual_purchase_flag IS NULL)')
+  }
+
+  const feedbackRows = await queryAsync(
+    `SELECT
+       id,
+       run_code,
+       client_code,
+       feedback_date
+     FROM ia_prediction_feedback
+     WHERE ${whereClauses.join(' AND ')}
+     ORDER BY feedback_date ASC, client_code ASC`,
+    params
+  )
+
+  if (!feedbackRows.length) {
+    return {
+      requestedRows: 0,
+      checkedRows: 0,
+      purchasedRows: 0,
+      zeroSaleRows: 0,
+      skippedRows: 0,
+      sourceSalesRows: 0,
+      skipped: true,
+      reason: 'no_feedback_rows'
+    }
+  }
+
+  const eligibleRows = feedbackRows.filter(row => {
+    const rowDate = normalizeDateOnly(row.feedback_date)
+    const clientCode = String(row.client_code || '').trim()
+    return rowDate && clientCode
+  })
+
+  const skippedRows = feedbackRows.length - eligibleRows.length
+  if (!eligibleRows.length) {
+    return {
+      requestedRows: feedbackRows.length,
+      checkedRows: 0,
+      purchasedRows: 0,
+      zeroSaleRows: 0,
+      skippedRows,
+      sourceSalesRows: 0,
+      skipped: true,
+      reason: 'no_eligible_feedback_rows'
+    }
+  }
+
+  const clientCodesForSales = [...new Set(
+    eligibleRows.flatMap(row => {
+      const keys = normalizeClientKeys(row.client_code)
+      return keys.filter(key => /^\d+$/.test(key)).map(key => key.padStart(5, '0'))
+    })
+  )]
+
+  if (!clientCodesForSales.length) {
+    return {
+      requestedRows: feedbackRows.length,
+      checkedRows: 0,
+      purchasedRows: 0,
+      zeroSaleRows: 0,
+      skippedRows: feedbackRows.length,
+      sourceSalesRows: 0,
+      skipped: true,
+      reason: 'no_numeric_client_codes'
+    }
+  }
+
+  const eligibleDates = eligibleRows
+    .map(row => normalizeDateOnly(row.feedback_date))
+    .filter(Boolean)
+    .sort()
+
+  const salesDateFrom = eligibleDates[0]
+  const salesDateTo = eligibleDates[eligibleDates.length - 1]
+  const clientFilter = buildInClause(`LPAD(e.client_code, 5, '0')`, clientCodesForSales)
+
+  const salesRows = await queryAsync(
+    `
+      SELECT
+        sales_docs.sale_date,
+        sales_docs.client_code,
+        COUNT(*) AS actual_doc_count,
+        SUM(sales_docs.net_amount) AS actual_sale_amount,
+        SUM(COALESCE(doc_quantities.total_qty, 0)) AS actual_sale_qty
+      FROM (
+        SELECT
+          e.code AS doc_code,
+          DATE(e.date) AS sale_date,
+          LPAD(e.client_code, 5, '0') AS client_code,
+          CAST(COALESCE(e.net_a_payer, '0') AS DECIMAL(15,3)) AS net_amount
+        FROM entetecommercials e
+        WHERE e.deleted_at IS NULL
+          AND e.type IN ('facture', 'bl', 'blf')
+          AND DATE(e.date) BETWEEN ? AND ?
+          ${clientFilter.sql}
+      ) sales_docs
+      LEFT JOIN (
+        SELECT
+          l.entetecommercial_code AS doc_code,
+          SUM(CAST(COALESCE(l.quantite, '0') AS DECIMAL(15,3))) AS total_qty
+        FROM lignecommercials l
+        GROUP BY l.entetecommercial_code
+      ) doc_quantities ON doc_quantities.doc_code = sales_docs.doc_code
+      GROUP BY sales_docs.sale_date, sales_docs.client_code
+      ORDER BY sales_docs.sale_date ASC, sales_docs.client_code ASC
+    `,
+    [salesDateFrom, salesDateTo, ...clientFilter.params]
+  )
+
+  const salesByDateClient = new Map()
+  ;(salesRows || []).forEach(row => {
+    const salesKey = `${normalizeDateOnly(row.sale_date)}::${getCanonicalClientKey(row.client_code)}`
+    salesByDateClient.set(salesKey, {
+      actualDocCount: Number(row.actual_doc_count || 0),
+      actualSaleAmount: Number(row.actual_sale_amount || 0),
+      actualSaleQty: Number(row.actual_sale_qty || 0)
+    })
+  })
+
+  let checkedRows = 0
+  let purchasedRows = 0
+  let zeroSaleRows = 0
+
+  for (const row of eligibleRows) {
+    const rowDate = normalizeDateOnly(row.feedback_date)
+    const salesKey = `${rowDate}::${getCanonicalClientKey(row.client_code)}`
+    const actualSales = salesByDateClient.get(salesKey) || null
+
+    const actualDocCount = Math.max(0, Number(actualSales?.actualDocCount || 0))
+    const actualSaleAmount = Number(actualSales?.actualSaleAmount || 0)
+    const actualSaleQty = Number(actualSales?.actualSaleQty || 0)
+    const actualPurchaseFlag = actualDocCount > 0 || actualSaleAmount > 0 || actualSaleQty > 0 ? 1 : 0
+
+    await queryAsync(
+      `UPDATE ia_prediction_feedback
+       SET
+         actual_sale_amount = ?,
+         actual_sale_qty = ?,
+         actual_purchase_flag = ?,
+         actual_doc_count = ?,
+         actual_checked_at = NOW()
+       WHERE id = ?`,
+      [
+        Number(actualSaleAmount.toFixed(3)),
+        Number(actualSaleQty.toFixed(3)),
+        actualPurchaseFlag,
+        actualDocCount,
+        row.id
+      ]
+    )
+
+    checkedRows += 1
+    if (actualPurchaseFlag) purchasedRows += 1
+    else zeroSaleRows += 1
+  }
+
+  console.log(
+    `[${logPrefix}] Reconciliation ventes -> rows=${checkedRows} purchased=${purchasedRows} zero=${zeroSaleRows} sales=${salesRows.length}`
+  )
+
+  return {
+    requestedRows: feedbackRows.length,
+    checkedRows,
+    purchasedRows,
+    zeroSaleRows,
+    skippedRows,
+    sourceSalesRows: salesRows.length,
+    skipped: false,
+    reason: null,
+    range: {
+      from: salesDateFrom,
+      to: salesDateTo
+    }
+  }
+}
+
+async function fetchLoggedAiPredictions(requestPayload, loggingContext = {}) {
+  const response = await axios.post('http://127.0.0.1:5001/api/predict', requestPayload)
+  return {
+    response,
+    loggingResult: {
+      runCode: response?.data?.prediction_run_code || null,
+      sourceContext: loggingContext.sourceContext || null
+    }
+  }
 }
 
 async function fetchCommercialOptions() {
@@ -471,11 +1050,14 @@ async function resolveDepotOrigin(route, commercial) {
   }
 }
 
-function applyClientObjective(sortedClients, maxClients, targetChiffre) {
+function splitClientObjective(sortedClients, maxClients, targetChiffre) {
   const hasMaxClients = Number.isFinite(maxClients) && maxClients > 0
   const cappedClients = hasMaxClients ? sortedClients.slice(0, maxClients) : [...sortedClients]
   if (!targetChiffre || targetChiffre <= 0) {
-    return cappedClients
+    return {
+      selected: cappedClients,
+      suggestions: hasMaxClients ? sortedClients.slice(maxClients) : []
+    }
   }
 
   const selected = []
@@ -489,7 +1071,13 @@ function applyClientObjective(sortedClients, maxClients, targetChiffre) {
     }
   }
 
-  return selected
+  return {
+    selected,
+    suggestions: [
+      ...cappedClients.slice(selected.length),
+      ...(hasMaxClients ? sortedClients.slice(maxClients) : [])
+    ]
+  }
 }
 
 const FRENCH_DAY_NAMES = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi']
@@ -514,6 +1102,29 @@ function formatLocalDate(date) {
   return `${year}-${month}-${day}`
 }
 
+function normalizeDateOnly(value) {
+  if (!value) return ''
+
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return formatLocalDate(value)
+  }
+
+  const rawValue = String(value).trim()
+  if (!rawValue) return ''
+
+  const isoMatch = rawValue.match(/^(\d{4}-\d{2}-\d{2})/)
+  if (isoMatch) {
+    return isoMatch[1]
+  }
+
+  const parsed = new Date(rawValue)
+  if (!Number.isNaN(parsed.getTime())) {
+    return formatLocalDate(parsed)
+  }
+
+  return ''
+}
+
 function addLocalDays(date, days) {
   const next = new Date(date)
   next.setDate(next.getDate() + days)
@@ -533,7 +1144,6 @@ function buildWorkingDays(startDateValue, periodDays) {
 
   for (let offset = 0; offset < periodDays; offset += 1) {
     const current = addLocalDays(startDate, offset)
-    if (current.getDay() === 0) continue
     days.push({
       date: formatLocalDate(current),
       dayIndex: current.getDay(),
@@ -569,6 +1179,220 @@ function buildInClause(column, values) {
   }
 }
 
+function extractNumericCapacityHint(rawValue) {
+  const matches = String(rawValue || '').match(/\d+(?:[.,]\d+)?/g)
+  if (!matches || matches.length === 0) return null
+
+  const rawNumber = String(matches[matches.length - 1] || '').replace(',', '.')
+  const parsed = Number(rawNumber)
+  if (!Number.isFinite(parsed) || parsed <= 0) return null
+  return parsed
+}
+
+function computeQuantile(sortedValues, percentile) {
+  if (!Array.isArray(sortedValues) || sortedValues.length === 0) return 0
+  if (sortedValues.length === 1) return Number(sortedValues[0] || 0)
+
+  const safePercentile = clamp(Number(percentile || 0), 0, 1)
+  const position = (sortedValues.length - 1) * safePercentile
+  const lowerIndex = Math.floor(position)
+  const upperIndex = Math.ceil(position)
+  const lowerValue = Number(sortedValues[lowerIndex] || 0)
+  const upperValue = Number(sortedValues[upperIndex] || 0)
+
+  if (lowerIndex === upperIndex) return lowerValue
+
+  const weight = position - lowerIndex
+  return lowerValue + ((upperValue - lowerValue) * weight)
+}
+
+function summarizeNumericSeries(values) {
+  const normalized = (Array.isArray(values) ? values : [])
+    .map(value => Number(value))
+    .filter(value => Number.isFinite(value) && value >= 0)
+    .sort((a, b) => a - b)
+
+  if (normalized.length === 0) {
+    return {
+      count: 0,
+      min: 0,
+      max: 0,
+      avg: 0,
+      p50: 0,
+      p75: 0,
+      p90: 0
+    }
+  }
+
+  const total = normalized.reduce((sum, value) => sum + value, 0)
+
+  return {
+    count: normalized.length,
+    min: normalized[0],
+    max: normalized[normalized.length - 1],
+    avg: total / normalized.length,
+    p50: computeQuantile(normalized, 0.5),
+    p75: computeQuantile(normalized, 0.75),
+    p90: computeQuantile(normalized, 0.9)
+  }
+}
+
+function deriveClientCapacityFromStats(stats) {
+  if (!stats || !stats.count) return null
+
+  const base = Math.max(
+    Number(stats.p75 || 0),
+    Number(stats.p90 || 0) * 0.95,
+    Number(stats.avg || 0) * 1.05,
+    stats.count < 4 ? Number(stats.max || 0) : 0
+  )
+
+  return Math.max(1, Math.round(clamp(base, 1, 250)))
+}
+
+function deriveTruckCapacityFromStats(stats, routeCapacityHint = null) {
+  const safeRouteHint = Number(routeCapacityHint || 0)
+  let derived = 0
+
+  if (stats && stats.count) {
+    derived = Math.max(
+      Number(stats.p75 || 0) * 1.05,
+      Number(stats.p90 || 0) * 0.95,
+      Number(stats.avg || 0) * 1.10,
+      stats.count < 4 ? Number(stats.max || 0) : 0
+    )
+  }
+
+  if (Number.isFinite(safeRouteHint) && safeRouteHint > 0) {
+    derived = derived > 0
+      ? Math.min(safeRouteHint, Math.max(derived, safeRouteHint * 0.6))
+      : safeRouteHint
+  }
+
+  if (!(derived > 0)) return null
+  return Math.max(1, Math.round(derived))
+}
+
+function buildCommercialCapacityProfiles(activityRows, routeHintRows) {
+  const profiles = new Map()
+  const routeHintsByCommercial = new Map()
+
+  ;(routeHintRows || []).forEach(row => {
+    const commercialCode = String(row.commercial_code || '').trim()
+    if (!commercialCode) return
+
+    const routeHint = extractNumericCapacityHint(row.depot_code)
+    if (!Number.isFinite(routeHint) || routeHint <= 0) return
+
+    if (!routeHintsByCommercial.has(commercialCode)) {
+      routeHintsByCommercial.set(commercialCode, new Map())
+    }
+
+    const weight = Math.max(1, Number(row.nb_clients || 0))
+    const commercialHints = routeHintsByCommercial.get(commercialCode)
+    commercialHints.set(routeHint, (commercialHints.get(routeHint) || 0) + weight)
+  })
+
+  ;(activityRows || []).forEach(row => {
+    const commercialCode = String(row.commercial_code || '').trim()
+    if (!commercialCode) return
+
+    if (!profiles.has(commercialCode)) {
+      profiles.set(commercialCode, {
+        commercial_code: commercialCode,
+        overall: {
+          clientSamples: [],
+          loadSamples: []
+        },
+        byDayIndex: new Map()
+      })
+    }
+
+    const profile = profiles.get(commercialCode)
+    const dayIndex = Number(row.day_index)
+    const uniqueClients = Number(row.unique_clients || 0)
+    const effectiveLoad = Math.max(
+      0,
+      Number(row.loading_quantity || 0),
+      Number(row.total_quantity || 0)
+    )
+
+    profile.overall.clientSamples.push(uniqueClients)
+    profile.overall.loadSamples.push(effectiveLoad)
+
+    if (!profile.byDayIndex.has(dayIndex)) {
+      profile.byDayIndex.set(dayIndex, {
+        clientSamples: [],
+        loadSamples: []
+      })
+    }
+
+    const dayProfile = profile.byDayIndex.get(dayIndex)
+    dayProfile.clientSamples.push(uniqueClients)
+    dayProfile.loadSamples.push(effectiveLoad)
+  })
+
+  profiles.forEach((profile, commercialCode) => {
+    const weightedHints = routeHintsByCommercial.get(commercialCode)
+    const routeCapacityHint = weightedHints
+      ? [...weightedHints.entries()]
+          .sort((a, b) => (b[1] - a[1]) || (a[0] - b[0]))[0]?.[0] || null
+      : null
+
+    const overallClientStats = summarizeNumericSeries(profile.overall.clientSamples)
+    const overallLoadStats = summarizeNumericSeries(profile.overall.loadSamples)
+
+    profile.overall = {
+      ...overallClientStats,
+      client_capacity_limit: deriveClientCapacityFromStats(overallClientStats),
+      load_capacity_units: deriveTruckCapacityFromStats(overallLoadStats, routeCapacityHint),
+      route_capacity_hint: routeCapacityHint
+    }
+
+    profile.byDayIndex.forEach((dayProfile, dayIndex) => {
+      const clientStats = summarizeNumericSeries(dayProfile.clientSamples)
+      const loadStats = summarizeNumericSeries(dayProfile.loadSamples)
+      profile.byDayIndex.set(dayIndex, {
+        ...clientStats,
+        client_capacity_limit: deriveClientCapacityFromStats(clientStats) || profile.overall.client_capacity_limit,
+        load_capacity_units: deriveTruckCapacityFromStats(loadStats, routeCapacityHint) || profile.overall.load_capacity_units,
+        route_capacity_hint: routeCapacityHint
+      })
+    })
+  })
+
+  return profiles
+}
+
+function resolveCommercialCapacityForDay(profile, dayIndex, requestedMaxVisits) {
+  const requestedLimit = Math.max(1, Number(requestedMaxVisits || 1))
+  const dayProfile = profile?.byDayIndex?.get(dayIndex) || null
+  const overallProfile = profile?.overall || null
+
+  const resolvedClientCapacity = Number(
+    dayProfile?.client_capacity_limit ||
+    overallProfile?.client_capacity_limit ||
+    requestedLimit
+  )
+  const resolvedTruckCapacity = Number(
+    dayProfile?.load_capacity_units ||
+    overallProfile?.load_capacity_units ||
+    0
+  )
+
+  return {
+    maxClients: Math.max(1, Math.min(requestedLimit, Number.isFinite(resolvedClientCapacity) && resolvedClientCapacity > 0 ? resolvedClientCapacity : requestedLimit)),
+    maxLoadUnits: Number.isFinite(resolvedTruckCapacity) && resolvedTruckCapacity > 0 ? resolvedTruckCapacity : null,
+    clientSource: dayProfile?.count ? 'historique_jour' : (overallProfile?.count ? 'historique_global' : 'parametre'),
+    truckSource: dayProfile?.load_capacity_units
+      ? 'historique_jour'
+      : (overallProfile?.load_capacity_units
+          ? (overallProfile?.route_capacity_hint ? 'historique+route' : 'historique_global')
+          : (overallProfile?.route_capacity_hint ? 'route' : 'aucun')),
+    routeCapacityHint: overallProfile?.route_capacity_hint || null
+  }
+}
+
 function deriveFallbackProbability(visitsHist, daysSinceLastVisit, periodDays) {
   const visitSignal = clamp((Number(visitsHist || 0) / 24) * 100, 6, 70)
   const urgencySignal = clamp((Number(daysSinceLastVisit || 0) / Math.max(periodDays, 1)) * 55, 0, 55)
@@ -588,6 +1412,16 @@ function buildValidatedTourneeCode(prefix, date, commercialCode) {
   const safeCommercial = String(commercialCode || '').trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'unknown'
   const safePrefix = String(prefix || 'tournee').trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'tournee'
   return `${safePrefix}-${safeDate}-${safeCommercial}`
+}
+
+function sendCoveragePlannerMessage(res, message, extra = {}) {
+  return res.json({
+    status: 'invalid_parameters',
+    message,
+    summary: null,
+    blocks: [],
+    ...extra
+  })
 }
 
 function buildCoverageValidationCode(date, commercialCode) {
@@ -902,6 +1736,7 @@ async function saveValidatedTourneePlan({
   categorieCode,
   typeClient,
   codePrefix,
+  predictionRunCode = null,
   loadingProducts = null,
   logPrefix = 'PLAN_VALIDATE'
 }) {
@@ -1019,6 +1854,72 @@ async function saveValidatedTourneePlan({
 
     console.log(`[${logPrefix}] Succes -> code=${validationCode} rows=${normalizedStops.length}`)
 
+    let feedbackResult = {
+      savedRows: 0,
+      predictedRows: 0,
+      selectedRows: normalizedStops.length,
+      unmatchedSelectedRows: 0,
+      skipped: true,
+      reason: 'missing_prediction_run_code'
+    }
+
+    try {
+      feedbackResult = await recordPredictionValidationFeedback({
+        predictionRunCode,
+        feedbackDate: selectedDate,
+        commercialCode,
+        routeCode: routingCode,
+        depotCode: depotValue,
+        validationCode,
+        stops: normalizedStops,
+        logPrefix
+      })
+    } catch (feedbackError) {
+      console.warn(`[${logPrefix}] Feedback prediction non enregistre: ${feedbackError.message}`)
+      feedbackResult = {
+        savedRows: 0,
+        predictedRows: 0,
+        selectedRows: normalizedStops.length,
+        unmatchedSelectedRows: 0,
+        skipped: true,
+        reason: 'feedback_logging_error'
+      }
+    }
+
+    let reconciliationResult = {
+      requestedRows: 0,
+      checkedRows: 0,
+      purchasedRows: 0,
+      zeroSaleRows: 0,
+      skippedRows: 0,
+      sourceSalesRows: 0,
+      skipped: true,
+      reason: 'feedback_not_available'
+    }
+
+    if (!feedbackResult.skipped && String(predictionRunCode || '').trim()) {
+      try {
+        reconciliationResult = await reconcilePredictionFeedbackActualSales({
+          runCode: predictionRunCode,
+          feedbackDate: selectedDate,
+          onlyPending: false,
+          logPrefix: `${logPrefix}_ACTUAL`
+        })
+      } catch (reconciliationError) {
+        console.warn(`[${logPrefix}] Reconciliation ventes non terminee: ${reconciliationError.message}`)
+        reconciliationResult = {
+          requestedRows: 0,
+          checkedRows: 0,
+          purchasedRows: 0,
+          zeroSaleRows: 0,
+          skippedRows: 0,
+          sourceSalesRows: 0,
+          skipped: true,
+          reason: 'reconciliation_error'
+        }
+      }
+    }
+
     const loadingMessage = loadingResult.savedRows > 0
       ? ` Le pre-chargement IA (${loadingResult.savedRows} produit${loadingResult.savedRows > 1 ? 's' : ''}) a aussi ete enregistre.`
       : ''
@@ -1029,7 +1930,18 @@ async function saveValidatedTourneePlan({
       saved_rows: normalizedStops.length,
       saved_loading_rows: loadingResult.savedRows,
       loading_code: loadingResult.movementCode,
-      tournee_code: validationCode
+      tournee_code: validationCode,
+      prediction_run_code: String(predictionRunCode || '').trim() || null,
+      prediction_feedback_rows: feedbackResult.savedRows,
+      prediction_feedback_skipped: Boolean(feedbackResult.skipped),
+      prediction_feedback_reason: feedbackResult.reason,
+      prediction_feedback_unmatched_selected_rows: feedbackResult.unmatchedSelectedRows,
+      prediction_actual_checked_rows: reconciliationResult.checkedRows,
+      prediction_actual_purchase_rows: reconciliationResult.purchasedRows,
+      prediction_actual_zero_rows: reconciliationResult.zeroSaleRows,
+      prediction_actual_skipped_rows: reconciliationResult.skippedRows,
+      prediction_actual_reconcile_skipped: Boolean(reconciliationResult.skipped),
+      prediction_actual_reconcile_reason: reconciliationResult.reason
     }
   } catch (error) {
     if (transactionStarted) {
@@ -1087,49 +1999,117 @@ function computeVisitQuota(profile, periodDays) {
   return Math.max(1, Math.min(3, quota))
 }
 
-function createBlockSlots(workingDays, commercials, totalVisits, minVisits) {
+function createBlockSlots(workingDays, commercials, totalVisits, minVisits, maxVisits, capacityProfiles = new Map()) {
   const availableSlots = []
+  const safeMinVisits = Math.max(1, Number(minVisits || 1))
+  const safeMaxVisits = Math.max(safeMinVisits, Number(maxVisits || safeMinVisits))
+
   workingDays.forEach(day => {
     commercials.forEach(commercial => {
+      const commercialCode = String(commercial.value || '').trim()
+      const capacity = resolveCommercialCapacityForDay(
+        capacityProfiles.get(commercialCode) || null,
+        day.dayIndex,
+        safeMaxVisits
+      )
+
       availableSlots.push({
-        id: `${day.date}::${commercial.value}`,
+        id: `${day.date}::${commercialCode}`,
         date: day.date,
         day_label: day.label,
-        proposed_commercial: commercial.value,
+        day_index: day.dayIndex,
+        proposed_commercial: commercialCode,
         proposed_commercial_label: commercial.label,
         tournees: [],
         total_predicted_ca: 0,
         total_score: 0,
-        uniqueClients: new Set()
+        total_reco_units: 0,
+        uniqueClients: new Set(),
+        target_size: 0,
+        min_size: Math.min(safeMinVisits, capacity.maxClients),
+        max_size: capacity.maxClients,
+        max_load_units: capacity.maxLoadUnits,
+        client_capacity_source: capacity.clientSource,
+        truck_capacity_source: capacity.truckSource,
+        route_capacity_hint: capacity.routeCapacityHint
       })
     })
   })
 
-  if (availableSlots.length === 0) return []
-
-  const safeMinVisits = Math.max(1, Number(minVisits || 1))
-  let blockCount = Math.max(1, Math.ceil(totalVisits / safeMinVisits))
-  blockCount = Math.min(blockCount, availableSlots.length)
-
-  while (blockCount > 1 && Math.floor(totalVisits / blockCount) < safeMinVisits) {
-    blockCount -= 1
+  if (availableSlots.length === 0) {
+    return {
+      slots: [],
+      totalClientCapacity: 0,
+      totalTruckCapacityUnits: 0,
+      totalAvailableSlots: 0
+    }
   }
 
-  const targetBase = Math.floor(totalVisits / blockCount)
-  let remainder = totalVisits % blockCount
+  const chosenSlots = []
+  let totalClientCapacity = 0
+  let totalTruckCapacityUnits = 0
 
-  return availableSlots.slice(0, blockCount).map(slot => {
-    const targetSize = targetBase + (remainder > 0 ? 1 : 0)
-    if (remainder > 0) remainder -= 1
+  for (const slot of availableSlots) {
+    if (slot.max_size <= 0) continue
 
-    return {
-      ...slot,
-      target_size: targetSize
+    chosenSlots.push(slot)
+    totalClientCapacity += Number(slot.max_size || 0)
+    totalTruckCapacityUnits += Number(slot.max_load_units || 0)
+
+    if (totalClientCapacity >= totalVisits) {
+      break
     }
+  }
+
+  if (chosenSlots.length === 0) {
+    return {
+      slots: [],
+      totalClientCapacity: 0,
+      totalTruckCapacityUnits: 0,
+      totalAvailableSlots: availableSlots.length
+    }
+  }
+
+  const boundedTotalCapacity = Math.max(1, chosenSlots.reduce((sum, slot) => sum + Number(slot.max_size || 0), 0))
+  let assignedTargets = 0
+
+  chosenSlots.forEach(slot => {
+    const proportionalTarget = Math.floor((totalVisits * Number(slot.max_size || 0)) / boundedTotalCapacity)
+    slot.target_size = Math.min(Number(slot.max_size || 0), Math.max(0, proportionalTarget))
+    assignedTargets += slot.target_size
   })
+
+  let remainder = Math.max(0, totalVisits - assignedTargets)
+  const slotOrder = chosenSlots
+    .map((slot, index) => ({ slot, index }))
+    .sort((a, b) => {
+      const spareA = Number(a.slot.max_size || 0) - Number(a.slot.target_size || 0)
+      const spareB = Number(b.slot.max_size || 0) - Number(b.slot.target_size || 0)
+      if (spareB !== spareA) return spareB - spareA
+      return a.index - b.index
+    })
+
+  while (remainder > 0) {
+    let progressed = false
+    for (const entry of slotOrder) {
+      if (entry.slot.target_size >= Number(entry.slot.max_size || 0)) continue
+      entry.slot.target_size += 1
+      remainder -= 1
+      progressed = true
+      if (remainder <= 0) break
+    }
+    if (!progressed) break
+  }
+
+  return {
+    slots: chosenSlots,
+    totalClientCapacity,
+    totalTruckCapacityUnits,
+    totalAvailableSlots: availableSlots.length
+  }
 }
 
-function pickBestSlotForVisit(slots, visit, cursorRef) {
+function pickBestSlotForVisit(slots, visit, cursorRef, diagnostics = null) {
   if (!slots.length) return null
 
   const totalSlots = slots.length
@@ -1141,21 +2121,43 @@ function pickBestSlotForVisit(slots, visit, cursorRef) {
     const slotSignal = visit.slot_predictions?.[slot.id] || null
     const mlAffinity = clamp(Number(slotSignal?.assignment_prob || 0), 0, 100)
     const mlPredictedCa = Math.max(0, Number(slotSignal?.weighted_predicted_ca || slotSignal?.predicted_ca || 0))
+    const projectedUnits = Math.max(1, Math.round(Number(slotSignal?.weighted_qte || visit.qte_reco || 1)))
     const sameCommercial = preferredCommercial && slot.proposed_commercial === preferredCommercial ? 6 : 0
     const recommendedSlotBonus = preferredSlotId && slot.id === preferredSlotId ? 12 : 0
     const remainingCapacity = Math.max(0, slot.target_size - slot.tournees.length)
+    const remainingTruckUnits = Number.isFinite(Number(slot.max_load_units))
+      ? Math.max(0, Number(slot.max_load_units) - Number(slot.total_reco_units || 0))
+      : projectedUnits
+    const truckRoomBonus = Math.min(remainingTruckUnits, projectedUnits * 2) * 0.02
     const loadPenalty = slot.tournees.length * 2
     const cursorBonus = ((index - cursorRef.current + totalSlots) % totalSlots) === 0 ? 4 : 0
-    return (mlAffinity * 0.45) + (mlPredictedCa * 0.02) + sameCommercial + recommendedSlotBonus + (remainingCapacity * 3) - loadPenalty + cursorBonus
+    return (mlAffinity * 0.45) + (mlPredictedCa * 0.02) + sameCommercial + recommendedSlotBonus + (remainingCapacity * 3) + truckRoomBonus - loadPenalty + cursorBonus
   }
 
   let bestIndex = -1
   let bestScore = Number.NEGATIVE_INFINITY
+  let blockedByClientCapacity = 0
+  let blockedByTruckCapacity = 0
 
   for (let i = 0; i < totalSlots; i += 1) {
     const index = (cursorRef.current + i) % totalSlots
     const slot = slots[index]
     if (slot.uniqueClients.has(clientKey)) continue
+    if (slot.tournees.length >= Number(slot.max_size || Number.POSITIVE_INFINITY)) {
+      blockedByClientCapacity += 1
+      continue
+    }
+
+    const slotSignal = visit.slot_predictions?.[slot.id] || null
+    const projectedUnits = Math.max(1, Math.round(Number(slotSignal?.weighted_qte || visit.qte_reco || 1)))
+    if (Number.isFinite(Number(slot.max_load_units)) && Number(slot.max_load_units) > 0) {
+      const nextLoad = Number(slot.total_reco_units || 0) + projectedUnits
+      if (nextLoad > Number(slot.max_load_units)) {
+        blockedByTruckCapacity += 1
+        continue
+      }
+    }
+
     const currentScore = scoreSlot(slot, index)
     if (currentScore > bestScore) {
       bestScore = currentScore
@@ -1164,7 +2166,11 @@ function pickBestSlotForVisit(slots, visit, cursorRef) {
   }
 
   if (bestIndex < 0) {
-    bestIndex = cursorRef.current % totalSlots
+    if (diagnostics) {
+      diagnostics.clientCapacityBlocks += blockedByClientCapacity > 0 ? 1 : 0
+      diagnostics.truckCapacityBlocks += blockedByTruckCapacity > 0 ? 1 : 0
+    }
+    return null
   }
 
   cursorRef.current = (bestIndex + 1) % totalSlots
@@ -1224,9 +2230,19 @@ function finalizeCoverageBlock(slot, depotOrigin) {
     day_label: slot.day_label,
     proposed_commercial: slot.proposed_commercial,
     proposed_commercial_label: slot.proposed_commercial_label,
+    prediction_run_code: String(slot.prediction_run_code || '').trim() || null,
     clients_count: tournees.length,
     predicted_ca: roundScore(slot.total_predicted_ca),
     average_score: tournees.length ? roundScore(slot.total_score / tournees.length) : 0,
+    capacity: {
+      planned_clients: tournees.length,
+      max_clients: Number(slot.max_size || 0),
+      planned_truck_units: roundScore(Number(slot.total_reco_units || 0)),
+      max_truck_units: Number.isFinite(Number(slot.max_load_units)) ? roundScore(Number(slot.max_load_units)) : null,
+      client_capacity_source: slot.client_capacity_source,
+      truck_capacity_source: slot.truck_capacity_source,
+      route_capacity_hint: slot.route_capacity_hint
+    },
     detail: {
       tournees,
       total: tournees.length,
@@ -1277,6 +2293,50 @@ app.post('/api/train-ia', (req, res) => {
   runManualTraining(res)
 })
 
+app.post('/api/ia/prediction-feedback/reconcile', async (req, res) => {
+  const payload = req.body || {}
+  const runCode = String(payload.run_code || payload.prediction_run_code || req.query.run_code || '').trim() || null
+  const feedbackDate = String(payload.feedback_date || req.query.feedback_date || '').trim() || null
+  const dateFrom = String(payload.date_from || req.query.date_from || '').trim() || null
+  const dateTo = String(payload.date_to || req.query.date_to || '').trim() || null
+  const rawOnlyPending = payload.only_pending ?? req.query.only_pending
+  const onlyPending = rawOnlyPending == null
+    ? true
+    : !['0', 'false', 'non', 'no'].includes(String(rawOnlyPending).trim().toLowerCase())
+
+  try {
+    const result = await reconcilePredictionFeedbackActualSales({
+      runCode,
+      feedbackDate,
+      dateFrom,
+      dateTo,
+      onlyPending,
+      logPrefix: 'PREDICTION_RECONCILE_API'
+    })
+
+    return res.json({
+      status: 'success',
+      message: result.skipped
+        ? 'Aucune ligne feedback eligible a reconcilier pour le moment.'
+        : `${result.checkedRows} ligne(s) feedback ont ete rapprochees avec les ventes reelles.`,
+      filters: {
+        run_code: runCode,
+        feedback_date: feedbackDate,
+        date_from: dateFrom,
+        date_to: dateTo,
+        only_pending: onlyPending
+      },
+      ...result
+    })
+  } catch (error) {
+    console.error('[PREDICTION_RECONCILE_API] Erreur reconciliation feedback:', error.message)
+    return res.status(500).json({
+      status: 'error',
+      message: error.message || 'Impossible de rapprocher les feedbacks IA avec les ventes reelles.'
+    })
+  }
+})
+
 app.get('/api/tournees/options', async (req, res) => {
   try {
     const [routes, commerciaux] = await Promise.all([
@@ -1317,6 +2377,7 @@ app.post('/api/tournees/coverage-plan/validate', async (req, res) => {
       categorieCode: 'coverage_ia',
       typeClient: 'coverage_plan',
       codePrefix: 'coverage',
+      predictionRunCode: payload.prediction_run_code,
       logPrefix: 'COVERAGE_VALIDATE'
     })
 
@@ -1353,6 +2414,7 @@ app.post('/api/tournees/plan/validate', async (req, res) => {
       categorieCode: modeTournee === 'recouvrement' ? 'plan_route_recouvrement' : 'plan_route_vente',
       typeClient: modeTournee === 'recouvrement' ? 'route_plan_recouvrement' : 'route_plan_vente',
       codePrefix: modeTournee === 'recouvrement' ? 'recouvrement' : 'vente',
+      predictionRunCode: payload.prediction_run_code,
       loadingProducts: modeTournee === 'recouvrement' ? null : loadingProducts,
       logPrefix: 'ROUTE_PLAN_VALIDATE'
     })
@@ -1368,13 +2430,23 @@ app.post('/api/tournees/plan/validate', async (req, res) => {
 app.get('/api/tournees/coverage-plan', async (req, res) => {
   const startDate = req.query.start_date || formatLocalDate(new Date())
   const periodDays = Math.max(1, Math.min(60, parseInt(req.query.period_days, 10) || 14))
-  const minVisits = Math.max(1, Math.min(250, parseInt(req.query.min_visits, 10) || 20))
+  const rawMinVisits = parseInt(req.query.min_visits, 10)
+  const rawMaxVisits = parseInt(req.query.max_visits, 10)
+  const minVisits = Math.max(1, Math.min(250, rawMinVisits || 20))
+  const maxVisits = Math.max(minVisits, Math.min(250, rawMaxVisits || 30))
   const minTotalCa = Math.max(0, parseFloat(req.query.min_total_ca || '0') || 0)
   const selectedCommercials = parseCommercialSelection(req.query.commercials)
   const workingDays = buildWorkingDays(startDate, periodDays)
 
+  if (Number.isFinite(rawMinVisits) && Number.isFinite(rawMaxVisits) && rawMaxVisits < rawMinVisits) {
+    return sendCoveragePlannerMessage(
+      res,
+      `Le calcul ne peut pas etre lance avec ces valeurs : Max visite (${rawMaxVisits}) doit etre superieur ou egal a Min visite (${rawMinVisits}).`
+    )
+  }
+
   if (workingDays.length === 0) {
-    return res.status(400).json({ error: 'Aucun jour ouvrable disponible sur la periode selectionnee.' })
+    return sendCoveragePlannerMessage(res, 'Aucun jour ouvrable disponible sur la periode selectionnee.')
   }
 
   const allCommercials = await fetchCommercialOptions()
@@ -1384,10 +2456,14 @@ app.get('/api/tournees/coverage-plan', async (req, res) => {
     : allCommercials
 
   if (activeCommercials.length === 0) {
-    return res.status(400).json({ error: 'Aucun commercial selectionne pour la planification.' })
+    return sendCoveragePlannerMessage(res, 'Aucun commercial selectionne pour la planification.')
   }
 
   const commercialFilter = buildInClause('c.user_code', activeCommercials.map(item => item.value))
+  const capacityCommercialFilter = buildInClause(
+    `COALESCE(NULLIF(TRIM(e.commercial_code), ''), NULLIF(TRIM(e.user_code), ''), NULLIF(TRIM(c.user_code), ''), 'Inconnu')`,
+    activeCommercials.map(item => item.value)
+  )
 
   try {
     const sqlClients = `
@@ -1425,9 +2501,53 @@ app.get('/api/tournees/coverage-plan', async (req, res) => {
       GROUP BY e.client_code
     `
 
-    const [clients, historiqueRows] = await Promise.all([
+    const sqlCommercialCapacityHistory = `
+      SELECT
+        COALESCE(NULLIF(TRIM(e.commercial_code), ''), NULLIF(TRIM(e.user_code), ''), NULLIF(TRIM(c.user_code), ''), 'Inconnu') AS commercial_code,
+        DATE(e.date) AS activity_date,
+        DAYOFWEEK(DATE(e.date)) - 1 AS day_index,
+        COUNT(DISTINCT LPAD(e.client_code, 5, '0')) AS unique_clients,
+        SUM(CAST(COALESCE(l.quantite, '0') AS DECIMAL(15,3))) AS total_quantity,
+        SUM(
+          CASE
+            WHEN COALESCE(p.chargement, 1) = 1
+            THEN CAST(COALESCE(l.quantite, '0') AS DECIMAL(15,3))
+            ELSE 0
+          END
+        ) AS loading_quantity
+      FROM entetecommercials e
+      JOIN clients c ON e.client_code = c.code
+      LEFT JOIN lignecommercials l ON e.code = l.entetecommercial_code
+      LEFT JOIN produits p ON l.produit_code = p.code
+      WHERE e.deleted_at IS NULL
+        AND e.type IN ('facture', 'bl', 'blf')
+        AND DATE(e.date) <= ?
+        AND DATE(e.date) >= DATE_SUB(?, INTERVAL 365 DAY)
+        ${capacityCommercialFilter.sql}
+      GROUP BY
+        commercial_code,
+        DATE(e.date),
+        DAYOFWEEK(DATE(e.date)) - 1
+    `
+
+    const sqlCommercialRouteHints = `
+      SELECT
+        c.user_code AS commercial_code,
+        r.depot_code,
+        COUNT(*) AS nb_clients
+      FROM clients c
+      LEFT JOIN routings r ON r.code = c.routing_code
+      WHERE c.deleted_at IS NULL
+        AND c.isactif = '1'
+        ${commercialFilter.sql}
+      GROUP BY c.user_code, r.depot_code
+    `
+
+    const [clients, historiqueRows, commercialCapacityRows, commercialRouteHintRows] = await Promise.all([
       queryAsync(sqlClients, commercialFilter.params),
-      queryAsync(sqlHistorique, [startDate])
+      queryAsync(sqlHistorique, [startDate]),
+      queryAsync(sqlCommercialCapacityHistory, [startDate, startDate, ...capacityCommercialFilter.params]),
+      queryAsync(sqlCommercialRouteHints, commercialFilter.params)
     ])
 
     if (!clients || clients.length === 0) {
@@ -1440,7 +2560,9 @@ app.get('/api/tournees/coverage-plan', async (req, res) => {
           total_unique_clients: 0,
           total_visits: 0,
           total_blocks: 0,
-          total_predicted_ca: 0
+          total_predicted_ca: 0,
+          min_visits: minVisits,
+          max_visits: maxVisits
         },
         blocks: []
       })
@@ -1451,13 +2573,43 @@ app.get('/api/tournees/coverage-plan', async (req, res) => {
       setClientMapValue(historiqueByClient, row.client_code, row)
     })
 
+    const commercialCapacityProfiles = buildCommercialCapacityProfiles(
+      commercialCapacityRows || [],
+      commercialRouteHintRows || []
+    )
+
     const aiPredictionByDate = new Map()
+    const predictionRunCodes = []
     for (const workingDay of workingDays) {
       try {
-        const aiResponse = await axios.post('http://127.0.0.1:5001/api/predict', {
-          date: workingDay.date,
-          commercials: activeCommercials.map(item => item.value)
-        })
+        const { response: aiResponse, loggingResult } = await fetchLoggedAiPredictions(
+          {
+            date: workingDay.date,
+            commercials: activeCommercials.map(item => item.value)
+          },
+          {
+            sourceContext: 'coverage_plan',
+            sourceMode: 'coverage',
+            requestCommercialCode: activeCommercials.length === 1 ? activeCommercials[0].value : null,
+            requestContext: {
+              planner_start_date: startDate,
+              working_day: workingDay.date,
+              period_days: periodDays,
+              min_visits: minVisits,
+              max_visits: maxVisits,
+              min_total_ca: minTotalCa
+            }
+          }
+        )
+
+        const predictionRunCode = aiResponse.data?.prediction_run_code || loggingResult?.runCode || null
+        if (predictionRunCode) {
+          predictionRunCodes.push({
+            date: workingDay.date,
+            run_code: predictionRunCode
+          })
+        }
+
         if (aiResponse.data?.status === 'success' && aiResponse.data?.predictions) {
           aiPredictionByDate.set(workingDay.date, aiResponse.data.predictions)
         } else {
@@ -1658,12 +2810,36 @@ app.get('/api/tournees/coverage-plan', async (req, res) => {
       return Number(b.predicted_ca || 0) - Number(a.predicted_ca || 0)
     })
 
-    const slots = createBlockSlots(workingDays, activeCommercials, visitEntries.length, minVisits)
+    const slotPlan = createBlockSlots(
+      workingDays,
+      activeCommercials,
+      visitEntries.length,
+      minVisits,
+      maxVisits,
+      commercialCapacityProfiles
+    )
+
+    if (visitEntries.length > Number(slotPlan.totalClientCapacity || 0)) {
+      return sendCoveragePlannerMessage(
+        res,
+        `Le calcul ne rentre pas avec les capacites commerciales reelles. La capacite maximale estimee est ${slotPlan.totalClientCapacity} visites pour ${slotPlan.totalAvailableSlots} blocks, alors que le plan en demande ${visitEntries.length}. Reduis les visites, allonge la periode, ou ajoute des commerciaux.`
+      )
+    }
+
+    const slots = slotPlan.slots
     const cursorRef = { current: 0 }
+    let unassignedVisits = 0
+    const assignmentDiagnostics = {
+      clientCapacityBlocks: 0,
+      truckCapacityBlocks: 0
+    }
 
     visitEntries.forEach(entry => {
-      const slot = pickBestSlotForVisit(slots, entry, cursorRef)
-      if (!slot) return
+      const slot = pickBestSlotForVisit(slots, entry, cursorRef, assignmentDiagnostics)
+      if (!slot) {
+        unassignedVisits += 1
+        return
+      }
       const slotSignal = entry.slot_predictions?.[slot.id] || null
       const assignedPredictedCa = roundScore(Number(slotSignal?.weighted_predicted_ca || entry.predicted_ca || 0))
       const assignedQteReco = Math.max(1, Math.round(Number(slotSignal?.weighted_qte || entry.qte_reco || 1)))
@@ -1722,11 +2898,39 @@ app.get('/api/tournees/coverage-plan', async (req, res) => {
       slot.uniqueClients.add(entry.canonical_client_key)
       slot.total_predicted_ca += Number(assignedPredictedCa || 0)
       slot.total_score += Number(assignedScoreIa || 0)
+      slot.total_reco_units += Number(assignedQteReco || 0)
     })
+
+    if (unassignedVisits > 0) {
+      const plannedTruckCapacity = roundScore(Number(slotPlan.totalTruckCapacityUnits || 0))
+      const requestedTruckUnits = roundScore(
+        visitEntries.reduce((sum, entry) => sum + Number(entry.qte_reco || 0), 0)
+      )
+      const truckNote = assignmentDiagnostics.truckCapacityBlocks > 0
+        ? ` La charge cumulee estimee atteint ${requestedTruckUnits} unites pour une capacite camion estimee a ${plannedTruckCapacity} unites.`
+        : ''
+      const clientNote = assignmentDiagnostics.clientCapacityBlocks > 0
+        ? ` Les capacites journalieres reelles des commerciaux ont aussi ete atteintes.`
+        : ''
+      return sendCoveragePlannerMessage(
+        res,
+        `Le calcul ne peut pas repartir ${unassignedVisits} visite(s) sans depasser les capacites reelles.${clientNote}${truckNote} Reduis les visites, allonge la periode, ou ajoute des commerciaux.`
+      )
+    }
+
+    const predictionRunCodeByDate = new Map(
+      predictionRunCodes.map(item => [String(item.date || '').trim(), String(item.run_code || '').trim() || null])
+    )
 
     const blocks = slots
       .filter(slot => slot.tournees.length > 0)
-      .map(slot => finalizeCoverageBlock(slot, buildDepotOrigin(SHARED_DEPOT_ORIGIN, null, slot.proposed_commercial, null)))
+      .map(slot => finalizeCoverageBlock(
+        {
+          ...slot,
+          prediction_run_code: predictionRunCodeByDate.get(String(slot.date || '').trim()) || null
+        },
+        buildDepotOrigin(SHARED_DEPOT_ORIGIN, null, slot.proposed_commercial, null)
+      ))
 
     const uniqueClientsCovered = new Set()
     blocks.forEach(block => {
@@ -1743,12 +2947,17 @@ app.get('/api/tournees/coverage-plan', async (req, res) => {
         total_visits: blocks.reduce((sum, block) => sum + block.clients_count, 0),
         total_blocks: blocks.length,
         total_predicted_ca: roundScore(blocks.reduce((sum, block) => sum + Number(block.predicted_ca || 0), 0)),
+        total_planned_units: roundScore(blocks.reduce((sum, block) => sum + Number(block.capacity?.planned_truck_units || 0), 0)),
+        total_truck_capacity_units: roundScore(blocks.reduce((sum, block) => sum + Number(block.capacity?.max_truck_units || 0), 0)),
+        total_client_capacity: Number(slotPlan.totalClientCapacity || 0),
         min_visits: minVisits,
+        max_visits: maxVisits,
         min_total_ca: minTotalCa,
         excluded_days: ['Dimanche'],
         selected_commerciaux: activeCommercials
       },
-      blocks
+      blocks,
+      prediction_run_codes: predictionRunCodes
     })
   } catch (error) {
     return res.status(500).json({ error: error.message })
@@ -2167,10 +3376,12 @@ app.get('/api/tournees/plan', async (req, res) => {
 
         tourneesFormattees = dedupedTournees
 
-        tourneesFormattees = applyClientObjective(tourneesFormattees, topClients, targetChiffre)
+        const recoverySelection = splitClientObjective(tourneesFormattees, topClients, targetChiffre)
+        tourneesFormattees = recoverySelection.selected
         return envoyerReponse(res, tourneesFormattees, dateReference, 0, 0, 0, depotOrigin, {
           mode: modeTournee,
-          recovery_filter_mode: recoveryFilterMode
+          recovery_filter_mode: recoveryFilterMode,
+          suggestions_ajout: recoverySelection.suggestions
         })
       } catch (errRecouvrement) {
         return res.status(500).json({ error: errRecouvrement.message })
@@ -2179,8 +3390,27 @@ app.get('/api/tournees/plan', async (req, res) => {
 
     if (isPast) {
       let aiPredictions = {}
+      let predictionRunCode = null
       try {
-        const aiResponse = await axios.post('http://127.0.0.1:5001/api/predict', { date: datePrediction })
+        const { response: aiResponse, loggingResult } = await fetchLoggedAiPredictions(
+          { date: datePrediction },
+          {
+            sourceContext: 'tournees_plan_past',
+            sourceMode: modeTournee,
+            requestRouteCode: route || null,
+            requestCommercialCode: commercial || null,
+            requestTopClients: topClients,
+            requestTargetChiffre: targetChiffre,
+            requestContext: {
+              date_reference: dateReference,
+              date_prediction: datePrediction,
+              use_range: useRange,
+              route_code: route || null,
+              commercial_code: commercial || null
+            }
+          }
+        )
+        predictionRunCode = aiResponse.data?.prediction_run_code || loggingResult?.runCode || null
         if (aiResponse.data.status === 'success') {
           aiPredictions = aiResponse.data.predictions
         }
@@ -2312,14 +3542,38 @@ app.get('/api/tournees/plan', async (req, res) => {
           }
         }).filter(Boolean).sort((a, b) => b.score_ia - a.score_ia)
 
-        tourneesFormattees = applyClientObjective(tourneesFormattees, topClients, targetChiffre)
+        const pastSelection = splitClientObjective(tourneesFormattees, topClients, targetChiffre)
+        tourneesFormattees = pastSelection.selected
 
-        envoyerReponse(res, tourneesFormattees, dateReference, iaAgro, iaChips, iaBur, depotOrigin, { mode: modeTournee })
+        envoyerReponse(res, tourneesFormattees, dateReference, iaAgro, iaChips, iaBur, depotOrigin, {
+          mode: modeTournee,
+          suggestions_ajout: pastSelection.suggestions,
+          prediction_run_code: predictionRunCode
+        })
       })
     } else {
       let aiPredictions = {}
+      let predictionRunCode = null
       try {
-        const aiResponse = await axios.post('http://127.0.0.1:5001/api/predict', { date: datePrediction })
+        const { response: aiResponse, loggingResult } = await fetchLoggedAiPredictions(
+          { date: datePrediction },
+          {
+            sourceContext: 'tournees_plan_future',
+            sourceMode: modeTournee,
+            requestRouteCode: route || null,
+            requestCommercialCode: commercial || null,
+            requestTopClients: topClients,
+            requestTargetChiffre: targetChiffre,
+            requestContext: {
+              date_reference: dateReference,
+              date_prediction: datePrediction,
+              use_range: useRange,
+              route_code: route || null,
+              commercial_code: commercial || null
+            }
+          }
+        )
+        predictionRunCode = aiResponse.data?.prediction_run_code || loggingResult?.runCode || null
         if (aiResponse.data.status === 'success') {
           aiPredictions = aiResponse.data.predictions
         }
@@ -2400,7 +3654,8 @@ app.get('/api/tournees/plan', async (req, res) => {
       tourneesFormattees = tousLesClients
         .sort((a, b) => b.score_ia - a.score_ia)
 
-      tourneesFormattees = applyClientObjective(tourneesFormattees, topClients, targetChiffre)
+      const futureSelection = splitClientObjective(tourneesFormattees, topClients, targetChiffre)
+      tourneesFormattees = futureSelection.selected
 
       iaAgro = 0
       iaChips = 0
@@ -2414,7 +3669,11 @@ app.get('/api/tournees/plan', async (req, res) => {
         iaBur += t.details.bur
       })
 
-      envoyerReponse(res, tourneesFormattees, dateReference, iaAgro, iaChips, iaBur, depotOrigin, { mode: modeTournee })
+      envoyerReponse(res, tourneesFormattees, dateReference, iaAgro, iaChips, iaBur, depotOrigin, {
+        mode: modeTournee,
+        suggestions_ajout: futureSelection.suggestions,
+        prediction_run_code: predictionRunCode
+      })
     }
   })
 })
@@ -2443,15 +3702,7 @@ function envoyerReponse(res, tournees, date_precise, agro, chips, bur, depotOrig
     detailsProduits: produitsMappes
   }
 
-  let vraiePrecision = 0
-  try {
-    const precisionLue = fs.readFileSync(path.join(apiDir, 'precision.txt'), 'utf8')
-    if (precisionLue && !isNaN(parseFloat(precisionLue))) {
-      vraiePrecision = parseFloat(precisionLue)
-    }
-  } catch (e) {
-    vraiePrecision = 0
-  }
+  const vraiePrecision = readCurrentIaPrecisionScore()
 
   const itineraire = tournees.map((r, idx) => `${idx + 1}. ${r.nom} (${r.nbr_client}) - ${r.adresse || 'Adresse non specifiee'}`)
   const itineraire_geo = tournees.map((r, idx) => ({

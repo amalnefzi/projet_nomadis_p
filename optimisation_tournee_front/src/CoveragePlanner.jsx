@@ -108,6 +108,7 @@ export default function CoveragePlanner({ api }) {
     start_date: todayIsoDate(),
     period_days: '14',
     min_visits: '20',
+    max_visits: '30',
     min_total_ca: ''
   })
   const [planData, setPlanData] = useState(null)
@@ -393,6 +394,50 @@ export default function CoveragePlanner({ api }) {
     ))
   }
 
+  const normalizeVisitLimits = currentFilters => {
+    const nextFilters = { ...currentFilters }
+    const parsedMin = Number.parseInt(nextFilters.min_visits, 10)
+    const parsedMax = Number.parseInt(nextFilters.max_visits, 10)
+
+    if (Number.isFinite(parsedMin)) {
+      nextFilters.min_visits = String(Math.max(1, Math.min(250, parsedMin)))
+    }
+
+    if (Number.isFinite(parsedMax)) {
+      nextFilters.max_visits = String(Math.max(1, Math.min(250, parsedMax)))
+    }
+
+    const safeMin = Number.parseInt(nextFilters.min_visits, 10)
+    const safeMax = Number.parseInt(nextFilters.max_visits, 10)
+    if (Number.isFinite(safeMin) && Number.isFinite(safeMax) && safeMax < safeMin) {
+      nextFilters.max_visits = String(safeMin)
+    }
+
+    return nextFilters
+  }
+
+  const handleVisitLimitChange = (field, rawValue) => {
+    setFilters(current => {
+      if (rawValue === '') {
+        return {
+          ...current,
+          [field]: ''
+        }
+      }
+
+      const parsedValue = Number.parseInt(rawValue, 10)
+      const boundedValue = Number.isFinite(parsedValue) ? Math.max(1, Math.min(250, parsedValue)) : ''
+      return {
+        ...current,
+        [field]: boundedValue === '' ? '' : String(boundedValue)
+      }
+    })
+  }
+
+  const handleVisitLimitBlur = () => {
+    setFilters(current => normalizeVisitLimits(current))
+  }
+
   const runPlanner = async () => {
     try {
       if (!selectedCommercials.length) {
@@ -402,12 +447,15 @@ export default function CoveragePlanner({ api }) {
       setLoading(true)
       setError(null)
       setValidationFeedback(null)
+      const normalizedFilters = normalizeVisitLimits(filters)
+      setFilters(normalizedFilters)
       const allCommercialsSelected = selectedCommercials.length === options.commerciaux.length
       const params = {
-        start_date: filters.start_date,
-        period_days: filters.period_days,
-        min_visits: filters.min_visits,
-        min_total_ca: filters.min_total_ca || undefined,
+        start_date: normalizedFilters.start_date,
+        period_days: normalizedFilters.period_days,
+        min_visits: normalizedFilters.min_visits,
+        max_visits: normalizedFilters.max_visits,
+        min_total_ca: normalizedFilters.min_total_ca || undefined,
         commercials: allCommercialsSelected ? undefined : selectedCommercials
       }
 
@@ -432,11 +480,22 @@ export default function CoveragePlanner({ api }) {
         throw lastError || new Error('Impossible de joindre le serveur API.')
       }
 
+      if (response.data?.status === 'invalid_parameters') {
+        const plannerMessage = response.data?.message || 'Le calcul du plan ne peut pas etre lance avec ces parametres.'
+        setError(plannerMessage)
+        setPlanData(null)
+        setSelectedBlockId(null)
+        return
+      }
+
       setPlanData(response.data)
       const firstBlock = response.data?.blocks?.[0]
       setSelectedBlockId(firstBlock ? firstBlock.id : null)
     } catch (plannerError) {
-      setError(plannerError?.response?.data?.error || 'Impossible de generer le plan de couverture.')
+      const errorMessage = plannerError?.response?.data?.error || 'Impossible de generer le plan de couverture.'
+      setError(errorMessage)
+      setPlanData(null)
+      setSelectedBlockId(null)
     } finally {
       setLoading(false)
     }
@@ -444,6 +503,7 @@ export default function CoveragePlanner({ api }) {
 
   const summary = planData?.summary || null
   const selectedRows = selectedBlock?.detail?.tournees || []
+  const selectedCapacity = selectedBlock?.capacity || null
   const chargeTotale = selectedBlock?.detail?.chargeTotale || { agro: 0, chips: 0, bureautique: 0, detailsProduits: [] }
   const quantiteTotalCamion = Number(chargeTotale.agro || 0) + Number(chargeTotale.chips || 0) + Number(chargeTotale.bureautique || 0)
   const allCommercialsSelected = options.commerciaux.length > 0 && selectedCommercials.length === options.commerciaux.length
@@ -512,6 +572,7 @@ export default function CoveragePlanner({ api }) {
         route_code: selectedBlock.detail?.depot_origin?.route || '',
         depot_code: selectedBlock.detail?.depot_origin?.depot_code || '',
         depot_name: selectedBlock.detail?.depot_origin?.nom || '',
+        prediction_run_code: selectedBlock.prediction_run_code || null,
         stops
       }
 
@@ -565,12 +626,10 @@ export default function CoveragePlanner({ api }) {
         <div>
           <h1 style={{ margin: 0, color: '#1a2b4c', fontSize: '28px' }}>Plan Couverture</h1>
           <p style={{ margin: '6px 0 0 0', color: '#667085', maxWidth: '760px' }}>
-            Generation automatique des blocks de tournee avec affectation proposee, couverture client sur la periode et detail GPS sans dimanche.
+            Generation automatique des blocks de tournee avec affectation proposee, couverture client sur la periode et detail GPS.
           </p>
         </div>
-        <div style={{ padding: '10px 14px', borderRadius: '10px', backgroundColor: '#fff4de', color: '#9a6700', fontSize: '12px', fontWeight: '700' }}>
-          Dimanche exclu automatiquement
-        </div>
+        
       </div>
 
       <div style={{ backgroundColor: 'white', borderRadius: '16px', padding: '20px', boxShadow: '0 10px 25px rgba(15, 23, 42, 0.06)', marginBottom: '24px' }}>
@@ -600,8 +659,22 @@ export default function CoveragePlanner({ api }) {
             <input
               type="number"
               min={1}
+              max={250}
               value={filters.min_visits}
-              onChange={event => setFilters(current => ({ ...current, min_visits: event.target.value }))}
+              onChange={event => handleVisitLimitChange('min_visits', event.target.value)}
+              onBlur={handleVisitLimitBlur}
+              style={{ padding: '11px 12px', borderRadius: '10px', border: '1px solid #d0d5dd' }}
+            />
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            <label style={{ fontSize: '12px', fontWeight: '700', color: '#475467' }}>Max visite</label>
+            <input
+              type="number"
+              min={1}
+              max={250}
+              value={filters.max_visits}
+              onChange={event => handleVisitLimitChange('max_visits', event.target.value)}
+              onBlur={handleVisitLimitBlur}
               style={{ padding: '11px 12px', borderRadius: '10px', border: '1px solid #d0d5dd' }}
             />
           </div>
@@ -806,10 +879,20 @@ export default function CoveragePlanner({ api }) {
                       <div style={{ padding: '10px 12px', borderRadius: '10px', backgroundColor: '#f8fafc' }}>
                         <div style={{ fontSize: '11px', color: '#667085', fontWeight: '700', textTransform: 'uppercase' }}>Nombre clients</div>
                         <div style={{ marginTop: '4px', fontSize: '22px', fontWeight: '800', color: '#101828' }}>{block.clients_count}</div>
+                        {block.capacity?.max_clients ? (
+                          <div style={{ marginTop: '4px', fontSize: '11px', color: '#667085', fontWeight: '700' }}>
+                            Cap. {block.capacity.planned_clients}/{block.capacity.max_clients}
+                          </div>
+                        ) : null}
                       </div>
                       <div style={{ padding: '10px 12px', borderRadius: '10px', backgroundColor: '#f8fafc' }}>
                         <div style={{ fontSize: '11px', color: '#667085', fontWeight: '700', textTransform: 'uppercase' }}>CA predit</div>
                         <div style={{ marginTop: '4px', fontSize: '22px', fontWeight: '800', color: '#198754' }}>{block.predicted_ca.toFixed(1)} TND</div>
+                        {block.capacity?.max_truck_units ? (
+                          <div style={{ marginTop: '4px', fontSize: '11px', color: '#667085', fontWeight: '700' }}>
+                            Charge {Number(block.capacity.planned_truck_units || 0).toFixed(1)}/{Number(block.capacity.max_truck_units || 0).toFixed(1)}
+                          </div>
+                        ) : null}
                       </div>
                     </div>
 
@@ -852,6 +935,16 @@ export default function CoveragePlanner({ api }) {
                   <div style={{ padding: '8px 12px', borderRadius: '10px', backgroundColor: '#ecfdf3', color: '#198754', fontSize: '12px', fontWeight: '800' }}>
                     {selectedBlock.predicted_ca.toFixed(1)} TND
                   </div>
+                  {selectedCapacity?.max_clients ? (
+                    <div style={{ padding: '8px 12px', borderRadius: '10px', backgroundColor: '#f5f3ff', color: '#6d28d9', fontSize: '12px', fontWeight: '800' }}>
+                      Cap clients {selectedCapacity.planned_clients}/{selectedCapacity.max_clients}
+                    </div>
+                  ) : null}
+                  {selectedCapacity?.max_truck_units ? (
+                    <div style={{ padding: '8px 12px', borderRadius: '10px', backgroundColor: '#fff7ed', color: '#c2410c', fontSize: '12px', fontWeight: '800' }}>
+                      Charge {Number(selectedCapacity.planned_truck_units || 0).toFixed(1)}/{Number(selectedCapacity.max_truck_units || 0).toFixed(1)}
+                    </div>
+                  ) : null}
                 </div>
               </div>
 

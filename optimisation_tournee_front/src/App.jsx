@@ -121,6 +121,12 @@ function buildQuantitySplit(totalQuantity) {
   return { agro, chips, bur }
 }
 
+function getClientSelectionKey(row) {
+  const rawKey = String(row?.canonical_client_key ?? row?.nbr_client ?? '').trim()
+  if (!rawKey) return ''
+  return rawKey.replace(/^0+/, '') || '0'
+}
+
 function App() {
   const [activeModule, setActiveModule] = useState('dashboard')
   const [loading, setLoading] = useState(false)
@@ -132,10 +138,12 @@ function App() {
   const [options, setOptions] = useState({ routes: [], commerciaux: [] })
   const [donneesTournee, setDonneesTournee] = useState(null)
   const [editableTournees, setEditableTournees] = useState([])
+  const [additionalSuggestions, setAdditionalSuggestions] = useState([])
   const [clickedClient, setClickedClient] = useState(null)
   const [userLocation, setUserLocation] = useState(null)
   const [validationFeedback, setValidationFeedback] = useState(null)
   const [validationLoading, setValidationLoading] = useState(false)
+  const [isValidationModalOpen, setIsValidationModalOpen] = useState(false)
   const [manualOrderLocked, setManualOrderLocked] = useState(false)
   const [routePlan, setRoutePlan] = useState({
     loading: false,
@@ -256,6 +264,7 @@ function App() {
       })
       setDonneesTournee(res.data)
       setEditableTournees(Array.isArray(res.data?.tournees) ? res.data.tournees : [])
+      setAdditionalSuggestions(Array.isArray(res.data?.suggestions_ajout) ? res.data.suggestions_ajout : [])
       setManualOrderLocked(false)
       setClickedClient(null)
     } catch {
@@ -356,6 +365,14 @@ function App() {
     const n = Math.min(maxPossible, Math.max(1, Number(filtres.top_clients)))
     return filtered.slice(0, n)
   }, [tournees, filtres.top_clients])
+
+  const suggestionRows = useMemo(() => {
+    const selectedKeys = new Set(tournees.map(row => getClientSelectionKey(row)).filter(Boolean))
+    return additionalSuggestions.filter(row => {
+      const key = getClientSelectionKey(row)
+      return key && !selectedKeys.has(key)
+    })
+  }, [additionalSuggestions, tournees])
 
   const routingCandidates = useMemo(() => {
     return tourneesAffichees
@@ -579,9 +596,25 @@ function App() {
     () => buildGoogleMapsUrl(routePlan.origin, routePlan.orderedStops),
     [routePlan.origin, routePlan.orderedStops]
   )
+  const selectedRouteLabel = useMemo(
+    () => options.routes.find(item => item.value === filtres.route)?.label || (filtres.route ? `Route ${filtres.route}` : 'Route non definie'),
+    [options.routes, filtres.route]
+  )
   const selectedCommercialLabel = useMemo(
     () => options.commerciaux.find(item => item.value === filtres.commercial)?.label || `Commercial ${filtres.commercial || ''}`,
     [options.commerciaux, filtres.commercial]
+  )
+  const validationSelectedDate = useMemo(
+    () => donneesTournee?.jourSelectionne || effectiveDatePrecise,
+    [donneesTournee, effectiveDatePrecise]
+  )
+  const validationRouteCode = useMemo(
+    () => filtres.route || depotOrigin?.route || '',
+    [filtres.route, depotOrigin]
+  )
+  const validationDepotName = useMemo(
+    () => depotOrigin?.nom || 'Depot non specifie',
+    [depotOrigin]
   )
   const validationDisabledReason = validationLoading
     ? 'Validation en cours...'
@@ -660,18 +693,6 @@ function App() {
     })
   }
 
-  const handleAmountChange = (rowIndex, rawValue, fieldName = 'chiffre_brut') => {
-    const parsedValue = Number.parseFloat(String(rawValue || '').replace(',', '.'))
-    const nextAmount = Number.isFinite(parsedValue) ? Math.max(0, parsedValue) : 0
-
-    updateEditableRow(rowIndex, row => ({
-      ...row,
-      [fieldName]: nextAmount,
-      ...(fieldName === 'chiffre_brut' ? { chiffre: `${nextAmount.toFixed(1)} TND` } : {}),
-      ...(fieldName === 'collecte_prevue' ? { chiffre_brut: nextAmount } : {})
-    }))
-  }
-
   const moveEditableRow = (rowIndex, direction) => {
     setEditableTournees(current => {
       const nextRows = [...current]
@@ -692,6 +713,61 @@ function App() {
     setManualOrderLocked(false)
   }
 
+  const handleAddSuggestedClient = (suggestion) => {
+    const suggestionKey = getClientSelectionKey(suggestion)
+    if (!suggestionKey) return
+
+    const currentTop = Number.parseInt(filtres.top_clients, 10)
+    if (Number.isFinite(currentTop) && currentTop > 0 && tourneesAffichees.length >= currentTop) {
+      const nextTop = currentTop + 1
+      setTopClientsInput(String(nextTop))
+      setFiltres(prev => ({ ...prev, top_clients: nextTop }))
+    }
+
+    setEditableTournees(current => {
+      if (current.some(row => getClientSelectionKey(row) === suggestionKey)) {
+        return current
+      }
+
+      return [
+        ...current,
+        {
+          ...suggestion,
+          details: suggestion?.details ? { ...suggestion.details } : suggestion.details,
+          produits: Array.isArray(suggestion?.produits)
+            ? suggestion.produits.map(produit => ({ ...produit }))
+            : []
+        }
+      ]
+    })
+
+    setAdditionalSuggestions(current => current.filter(row => getClientSelectionKey(row) !== suggestionKey))
+  }
+
+  const openValidationModal = () => {
+    if (!donneesTournee) {
+      const errorMessage = 'Aucun plan de route disponible a valider.'
+      setValidationFeedback({ type: 'error', message: errorMessage })
+      window.alert(errorMessage)
+      return
+    }
+
+    const stops = buildValidationStops()
+    if (!stops.length) {
+      const errorMessage = 'Aucun client exploitable a enregistrer pour cette tournee.'
+      setValidationFeedback({ type: 'error', message: errorMessage })
+      window.alert(errorMessage)
+      return
+    }
+
+    setIsValidationModalOpen(true)
+  }
+
+  const closeValidationModal = () => {
+    if (validationLoading) return
+    setIsValidationModalOpen(false)
+  }
+
   const validateRoutePlan = async () => {
     if (!donneesTournee) {
       const errorMessage = 'Aucun plan de route disponible a valider.'
@@ -708,25 +784,21 @@ function App() {
       return
     }
 
-    const selectedDate = donneesTournee.jourSelectionne || effectiveDatePrecise
-    const confirmMessage = `Valider la tournee finale du ${selectedDate} pour ${selectedCommercialLabel} ?\n\nL'ancienne version enregistree pour cette date et ce commercial sera remplacee.`
-    if (!window.confirm(confirmMessage)) {
-      return
-    }
-
     setValidationLoading(true)
     setValidationFeedback(null)
+    setIsValidationModalOpen(false)
 
     try {
       const payload = {
-        date: selectedDate,
+        date: validationSelectedDate,
         day_label: getJourLabel(0),
         commercial_code: filtres.commercial,
         commercial_label: selectedCommercialLabel,
-        route_code: filtres.route || depotOrigin?.route || '',
+        route_code: validationRouteCode,
         depot_code: depotOrigin?.depot_code || '',
-        depot_name: depotOrigin?.nom || '',
+        depot_name: validationDepotName,
         mode_tournee: modeTournee,
+        prediction_run_code: donneesTournee?.prediction_run_code || null,
         loading_products: isRecouvrementMode ? undefined : chargeTotale.detailsProduits,
         stops
       }
@@ -1039,7 +1111,9 @@ function App() {
           </h3>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '12px' }}>
             <div style={{ fontSize: '12px', color: '#667085', fontWeight: '600' }}>
-              Tu peux modifier la quantite, le montant predit et l'ordre des clients avant validation.
+              {isRecouvrementMode
+                ? "Tu peux modifier l'ordre des clients avant validation."
+                : "Tu peux modifier la quantite et l'ordre des clients avant validation."}
             </div>
             {manualOrderLocked && (
               <button
@@ -1093,21 +1167,20 @@ function App() {
                           {isRecouvrementMode ? (
                             <div>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                                <input
-                                  type="number"
-                                  min={0}
-                                  step="0.1"
-                                  value={Number(row.collecte_prevue || row.chiffre_brut || row.qte_reco || 0)}
-                                  onChange={event => handleAmountChange(idx, event.target.value, 'collecte_prevue')}
+                                <div
                                   style={{
-                                    width: '96px',
+                                    minWidth: '96px',
                                     padding: '6px 8px',
                                     borderRadius: '6px',
-                                    border: '1px solid #cbd5e1',
+                                    border: '1px solid #e4e7ec',
+                                    backgroundColor: '#f8fafc',
                                     fontWeight: '700',
-                                    color: '#0d6efd'
+                                    color: '#0d6efd',
+                                    textAlign: 'right'
                                   }}
-                                />
+                                >
+                                  {Number(row.collecte_prevue || row.chiffre_brut || row.qte_reco || 0).toLocaleString(undefined, { maximumFractionDigits: 1 })}
+                                </div>
                                 <span style={{ fontWeight: '700', color: '#0d6efd' }}>TND</span>
                               </div>
                               <div style={{ fontSize: '11px', color: '#6c757d', marginTop: '4px' }}>
@@ -1218,21 +1291,20 @@ function App() {
                         {!isRecouvrementMode && (
                           <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef', color: '#198754', fontWeight: 'bold' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                              <input
-                                type="number"
-                                min={0}
-                                step="0.1"
-                                value={Number(row.chiffre_brut || parseFloat(row.chiffre) || 0)}
-                                onChange={event => handleAmountChange(idx, event.target.value, 'chiffre_brut')}
+                              <div
                                 style={{
-                                  width: '96px',
+                                  minWidth: '96px',
                                   padding: '6px 8px',
                                   borderRadius: '6px',
-                                  border: '1px solid #cbd5e1',
+                                  border: '1px solid #e4e7ec',
+                                  backgroundColor: '#f8fafc',
                                   fontWeight: '700',
-                                  color: '#198754'
+                                  color: '#198754',
+                                  textAlign: 'right'
                                 }}
-                              />
+                              >
+                                {Number(row.chiffre_brut || parseFloat(row.chiffre) || 0).toLocaleString(undefined, { maximumFractionDigits: 1 })}
+                              </div>
                               <span>TND</span>
                             </div>
                           </td>
@@ -1250,6 +1322,64 @@ function App() {
 
         {donneesTournee && (
           <div style={{ flex: '1', minWidth: '350px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            {!isRecouvrementMode && suggestionRows.length > 0 && (
+              <div style={{ backgroundColor: 'white', padding: '20px', borderRadius: '10px', boxShadow: '0 4px 6px rgba(0,0,0,0.05)' }}>
+                <h3 style={{ marginTop: 0, color: '#1a2b4c', borderBottom: '2px solid #f1f3f5', paddingBottom: '10px' }}>Autres propositions IA</h3>
+                <p style={{ margin: '0 0 14px 0', fontSize: '12px', color: '#667085', fontWeight: '600' }}>
+                  Ajoute les clients que tu veux pour augmenter le chiffre d'affaire predit.
+                </p>
+
+                <div style={{ maxHeight: '280px', overflowY: 'auto', paddingRight: '4px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  {suggestionRows.map((row, idx) => (
+                    <div
+                      key={`${getClientSelectionKey(row)}-${idx}`}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: '12px',
+                        padding: '12px',
+                        borderRadius: '10px',
+                        border: '1px solid #e4e7ec',
+                        backgroundColor: '#fcfcfd'
+                      }}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: '800', color: '#1d2939', fontSize: '14px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={`${row.nom} (${row.nbr_client})`}>
+                          {row.nom} ({row.nbr_client})
+                        </div>
+                        <div style={{ marginTop: '4px', fontSize: '12px', color: '#667085' }}>
+                          +{Number(row.chiffre_brut || 0).toLocaleString(undefined, { maximumFractionDigits: 1 })} TND
+                          {' - '}
+                          {Number(row.qte_reco || 0).toLocaleString(undefined, { maximumFractionDigits: 1 })} unites
+                        </div>
+                        <div style={{ marginTop: '2px', fontSize: '11px', color: '#98a2b3', fontWeight: '700' }}>
+                          Score IA: {Number(row.score_ia || 0).toFixed(1)} / 100
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleAddSuggestedClient(row)}
+                        style={{
+                          padding: '8px 12px',
+                          border: 'none',
+                          borderRadius: '8px',
+                          backgroundColor: '#198754',
+                          color: 'white',
+                          fontWeight: '800',
+                          cursor: 'pointer',
+                          whiteSpace: 'nowrap'
+                        }}
+                      >
+                        Ajouter
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div style={{ backgroundColor: '#1a2b4c', color: 'white', padding: '20px', borderRadius: '10px', boxShadow: '0 4px 6px rgba(0,0,0,0.1)' }}>
               <h3 style={{ marginTop: 0, color: '#0d6efd', borderBottom: '1px solid #334466', paddingBottom: '10px' }}>
                 {isRecouvrementMode ? 'Recouvrement a traiter' : 'Prediction Chargement IA'}
@@ -1394,7 +1524,7 @@ function App() {
                 </a>
                 <button
                   type="button"
-                  onClick={validateRoutePlan}
+                  onClick={openValidationModal}
                   disabled={validationLoading}
                   title={validationDisabledReason || 'Enregistrer ce plan de route dans la base'}
                   style={{
@@ -1423,6 +1553,122 @@ function App() {
           </div>
         )}
       </div>
+      {isValidationModalOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(15, 23, 42, 0.56)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '20px',
+            zIndex: 2000
+          }}
+        >
+          <div
+            style={{
+              width: '100%',
+              maxWidth: '540px',
+              backgroundColor: 'white',
+              borderRadius: '18px',
+              boxShadow: '0 20px 60px rgba(15, 23, 42, 0.28)',
+              overflow: 'hidden'
+            }}
+          >
+            <div style={{ padding: '22px 24px', borderBottom: '1px solid #e4e7ec', backgroundColor: '#f8fbff' }}>
+              <div style={{ fontSize: '12px', fontWeight: '800', color: '#0d6efd', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Confirmation
+              </div>
+              <h3 style={{ margin: '8px 0 0 0', color: '#1a2b4c', fontSize: '24px' }}>Valider le Plan de Route</h3>
+              <p style={{ margin: '8px 0 0 0', color: '#667085', fontSize: '14px' }}>
+                Verifie bien les informations ci-dessous avant d'enregistrer la tournee finale.
+              </p>
+            </div>
+
+            <div style={{ padding: '24px', display: 'grid', gap: '14px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '12px' }}>
+                <div style={{ padding: '12px 14px', borderRadius: '12px', backgroundColor: '#f8fafc', border: '1px solid #e4e7ec' }}>
+                  <div style={{ fontSize: '11px', color: '#667085', fontWeight: '800', textTransform: 'uppercase' }}>Date</div>
+                  <div style={{ marginTop: '6px', fontSize: '15px', color: '#101828', fontWeight: '700' }}>{validationSelectedDate}</div>
+                </div>
+                <div style={{ padding: '12px 14px', borderRadius: '12px', backgroundColor: '#f8fafc', border: '1px solid #e4e7ec' }}>
+                  <div style={{ fontSize: '11px', color: '#667085', fontWeight: '800', textTransform: 'uppercase' }}>Mode</div>
+                  <div style={{ marginTop: '6px', fontSize: '15px', color: '#101828', fontWeight: '700' }}>
+                    {isRecouvrementMode ? 'Recouvrement' : 'Vente'}
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ padding: '14px 16px', borderRadius: '12px', backgroundColor: '#f8fafc', border: '1px solid #e4e7ec' }}>
+                <div style={{ fontSize: '11px', color: '#667085', fontWeight: '800', textTransform: 'uppercase' }}>Commercial</div>
+                <div style={{ marginTop: '6px', fontSize: '15px', color: '#101828', fontWeight: '700' }}>{selectedCommercialLabel}</div>
+              </div>
+
+              <div style={{ padding: '14px 16px', borderRadius: '12px', backgroundColor: '#f8fafc', border: '1px solid #e4e7ec' }}>
+                <div style={{ fontSize: '11px', color: '#667085', fontWeight: '800', textTransform: 'uppercase' }}>Route / Depot</div>
+                <div style={{ marginTop: '6px', fontSize: '15px', color: '#101828', fontWeight: '700' }}>
+                  {validationRouteCode ? `${selectedRouteLabel} - ${validationDepotName}` : validationDepotName}
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '12px' }}>
+                <div style={{ padding: '12px 14px', borderRadius: '12px', backgroundColor: '#ecfdf3', border: '1px solid #abefc6' }}>
+                  <div style={{ fontSize: '11px', color: '#027a48', fontWeight: '800', textTransform: 'uppercase' }}>Clients</div>
+                  <div style={{ marginTop: '6px', fontSize: '18px', color: '#027a48', fontWeight: '800' }}>{tourneesAffichees.length}</div>
+                </div>
+                <div style={{ padding: '12px 14px', borderRadius: '12px', backgroundColor: '#eef5ff', border: '1px solid #bfd7ff' }}>
+                  <div style={{ fontSize: '11px', color: '#175cd3', fontWeight: '800', textTransform: 'uppercase' }}>
+                    {isRecouvrementMode ? 'Montant prevu' : 'CA predit'}
+                  </div>
+                  <div style={{ marginTop: '6px', fontSize: '18px', color: '#175cd3', fontWeight: '800' }}>
+                    {chiffreTotal.toLocaleString(undefined, { maximumFractionDigits: 1 })} TND
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ padding: '14px 16px', borderRadius: '12px', backgroundColor: '#fff7ed', border: '1px solid #fed7aa', color: '#9a3412', fontSize: '13px', fontWeight: '700', lineHeight: 1.5 }}>
+                L'ancienne version enregistree pour cette date et ce commercial sera remplacee.
+              </div>
+            </div>
+
+            <div style={{ padding: '18px 24px 24px', display: 'flex', gap: '12px', justifyContent: 'flex-end', borderTop: '1px solid #e4e7ec' }}>
+              <button
+                type="button"
+                onClick={closeValidationModal}
+                disabled={validationLoading}
+                style={{
+                  padding: '11px 16px',
+                  borderRadius: '10px',
+                  border: '1px solid #d0d5dd',
+                  backgroundColor: 'white',
+                  color: '#344054',
+                  fontWeight: '700',
+                  cursor: validationLoading ? 'not-allowed' : 'pointer'
+                }}
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                onClick={validateRoutePlan}
+                disabled={validationLoading}
+                style={{
+                  padding: '11px 16px',
+                  borderRadius: '10px',
+                  border: 'none',
+                  backgroundColor: validationLoading ? '#94a3b8' : '#0d6efd',
+                  color: 'white',
+                  fontWeight: '800',
+                  cursor: validationLoading ? 'not-allowed' : 'pointer'
+                }}
+              >
+                {validationLoading ? 'Validation en cours...' : 'Confirmer la validation'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
         </>
       )}
     </div>

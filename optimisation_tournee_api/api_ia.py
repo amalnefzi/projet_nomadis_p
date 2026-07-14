@@ -3,8 +3,15 @@ import pandas as pd
 import joblib
 import numpy as np
 import sys
+import os
+import json
+import uuid
+import hashlib
+from pathlib import Path
+from datetime import datetime
 
 app = Flask(__name__)
+BASE_DIR = Path(__file__).resolve().parent
 
 FEATURE_COLUMNS_BASE = [
     'jour_semaine',
@@ -63,6 +70,306 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(errors="replace")
+
+
+def load_local_env():
+    env_path = BASE_DIR / '.env'
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding='utf8').splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        key = key.strip()
+        if key and key not in os.environ:
+            os.environ[key] = value.strip()
+
+
+load_local_env()
+
+
+_prediction_logging_tables_ready = False
+
+
+def safe_json_dumps(value):
+    try:
+        return json.dumps(value, ensure_ascii=True, default=str)
+    except Exception as error:
+        return json.dumps({
+            "error": "serialize_failed",
+            "message": str(error)
+        }, ensure_ascii=True)
+
+
+def build_prediction_run_code(prefix='pred'):
+    timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+    token = uuid.uuid4().hex[:12]
+    return f"{prefix}-{timestamp}-{token}"
+
+
+def read_precision_score():
+    try:
+        precision_text = (BASE_DIR / 'precision.txt').read_text(encoding='utf8').strip()
+        parsed = float(precision_text)
+        return parsed if np.isfinite(parsed) else 0.0
+    except Exception:
+        return 0.0
+
+
+def build_model_version():
+    artifact_files = [
+        'modele_nomadis_achat.pkl',
+        'modele_nomadis_ca.pkl',
+        'modele_nomadis_qte.pkl',
+        'modele_nomadis_price.pkl',
+        'modele_nomadis_affectation.pkl',
+        'colonnes_ia.pkl',
+        'colonnes_affectation.pkl',
+        'classes_affectation.pkl',
+        'master_dataset_v3.csv',
+        'preferences_clients_produits.csv',
+        'precision.txt'
+    ]
+
+    signature_parts = []
+    for file_name in artifact_files:
+        file_path = BASE_DIR / file_name
+        if file_path.exists():
+            stats = file_path.stat()
+            signature_parts.append(f"{file_name}:{int(stats.st_mtime_ns)}:{stats.st_size}")
+        else:
+            signature_parts.append(f"{file_name}:missing")
+
+    raw_signature = '|'.join(signature_parts)
+    return f"sha1:{hashlib.sha1(raw_signature.encode('utf8')).hexdigest()[:16]}"
+
+
+def get_mysql_connection():
+    try:
+        import pymysql
+    except Exception as error:
+        raise RuntimeError(f"pymysql indisponible pour logging IA: {error}") from error
+
+    return pymysql.connect(
+        host=os.getenv('DB_HOST', 'localhost'),
+        user=os.getenv('DB_USER', 'root'),
+        password=os.getenv('DB_PASS', ''),
+        database=os.getenv('DB_NAME', 'dist_utic'),
+        charset='utf8mb4',
+        autocommit=True
+    )
+
+
+def ensure_prediction_logging_tables(connection):
+    global _prediction_logging_tables_ready
+    if _prediction_logging_tables_ready:
+        return
+
+    with connection.cursor() as cursor:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ia_prediction_runs (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                run_code VARCHAR(191) NOT NULL,
+                source_context VARCHAR(191) NOT NULL,
+                source_mode VARCHAR(191) DEFAULT NULL,
+                request_date DATE DEFAULT NULL,
+                request_payload_json LONGTEXT DEFAULT NULL,
+                request_context_json LONGTEXT DEFAULT NULL,
+                request_commercials_json LONGTEXT DEFAULT NULL,
+                request_route_code VARCHAR(191) DEFAULT NULL,
+                request_commercial_code VARCHAR(191) DEFAULT NULL,
+                request_top_clients INT DEFAULT NULL,
+                request_target_chiffre DOUBLE DEFAULT NULL,
+                response_status VARCHAR(64) DEFAULT NULL,
+                response_message TEXT DEFAULT NULL,
+                response_meta_json LONGTEXT DEFAULT NULL,
+                total_candidates INT DEFAULT NULL,
+                selected_clients INT DEFAULT NULL,
+                expected_buyers_estimate INT DEFAULT NULL,
+                selection_limit INT DEFAULT NULL,
+                model_version VARCHAR(255) DEFAULT NULL,
+                precision_score DOUBLE DEFAULT NULL,
+                created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY ia_prediction_runs_code_unique (run_code),
+                KEY ia_prediction_runs_context_idx (source_context),
+                KEY ia_prediction_runs_request_date_idx (request_date),
+                KEY ia_prediction_runs_commercial_idx (request_commercial_code)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ia_prediction_items (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                run_code VARCHAR(191) NOT NULL,
+                client_code VARCHAR(191) NOT NULL,
+                prediction_rank INT DEFAULT NULL,
+                best_commercial_code VARCHAR(191) DEFAULT NULL,
+                predicted_score DOUBLE DEFAULT NULL,
+                confidence_score DOUBLE DEFAULT NULL,
+                vip_score INT DEFAULT NULL,
+                predicted_qte DOUBLE DEFAULT NULL,
+                predicted_ca DOUBLE DEFAULT NULL,
+                predicted_ca_if_buy DOUBLE DEFAULT NULL,
+                predicted_qte_if_buy DOUBLE DEFAULT NULL,
+                predicted_unit_price DOUBLE DEFAULT NULL,
+                prob_achat DOUBLE DEFAULT NULL,
+                habit_score DOUBLE DEFAULT NULL,
+                recency_score DOUBLE DEFAULT NULL,
+                details_json LONGTEXT DEFAULT NULL,
+                commercial_scores_json LONGTEXT DEFAULT NULL,
+                created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY ia_prediction_items_run_client_unique (run_code, client_code),
+                KEY ia_prediction_items_run_code_idx (run_code),
+                KEY ia_prediction_items_best_commercial_idx (best_commercial_code)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+        """)
+
+    _prediction_logging_tables_ready = True
+
+
+def log_prediction_snapshot(request_payload, response_payload):
+    response_meta = response_payload.get('meta') if isinstance(response_payload.get('meta'), dict) else {}
+    predictions = response_payload.get('predictions') if isinstance(response_payload.get('predictions'), dict) else {}
+    commercials = request_payload.get('commercials', [])
+    if isinstance(commercials, str):
+        commercials = [item.strip() for item in commercials.split(',') if str(item).strip()]
+    elif isinstance(commercials, list):
+        commercials = [str(item).strip() for item in commercials if str(item).strip()]
+    else:
+        commercials = []
+
+    raw_request_date = request_payload.get('date') or request_payload.get('start_date') or response_meta.get('date')
+    request_date = str(raw_request_date)[:10] if raw_request_date else None
+    run_code = build_prediction_run_code('pred')
+    total_candidates = int(response_meta.get('total_candidates', len(predictions)))
+    selected_clients = int(response_meta.get('selected_clients', len(predictions)))
+    expected_buyers_estimate = response_meta.get('expected_buyers_estimate')
+    selection_limit = response_meta.get('selection_limit')
+    request_commercial_code = commercials[0] if len(commercials) == 1 else None
+
+    connection = get_mysql_connection()
+    try:
+        ensure_prediction_logging_tables(connection)
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO ia_prediction_runs (
+                    run_code,
+                    source_context,
+                    source_mode,
+                    request_date,
+                    request_payload_json,
+                    request_context_json,
+                    request_commercials_json,
+                    request_route_code,
+                    request_commercial_code,
+                    request_top_clients,
+                    request_target_chiffre,
+                    response_status,
+                    response_message,
+                    response_meta_json,
+                    total_candidates,
+                    selected_clients,
+                    expected_buyers_estimate,
+                    selection_limit,
+                    model_version,
+                    precision_score
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    run_code,
+                    'api_predict',
+                    None,
+                    request_date,
+                    safe_json_dumps(request_payload),
+                    None,
+                    safe_json_dumps(commercials),
+                    None,
+                    request_commercial_code,
+                    None,
+                    None,
+                    response_payload.get('status'),
+                    response_payload.get('message'),
+                    safe_json_dumps(response_meta),
+                    total_candidates,
+                    selected_clients,
+                    int(expected_buyers_estimate) if expected_buyers_estimate is not None else None,
+                    int(selection_limit) if selection_limit is not None else None,
+                    build_model_version(),
+                    read_precision_score()
+                )
+            )
+
+            if predictions:
+                item_rows = []
+                for rank, (client_code, prediction) in enumerate(predictions.items(), start=1):
+                    item_rows.append((
+                        run_code,
+                        str(client_code).strip(),
+                        rank,
+                        str(prediction.get('best_commercial', '')).strip() or None,
+                        float(prediction.get('score', 0) or 0),
+                        float(prediction.get('confidence', 0) or 0),
+                        int(prediction.get('vip', 0) or 0),
+                        float(prediction.get('qte', 0) or 0),
+                        float(prediction.get('chiffre', 0) or 0),
+                        float(prediction.get('ca_if_buy', 0) or 0),
+                        float(prediction.get('qte_if_buy', 0) or 0),
+                        float(prediction.get('prix_moyen', 0) or 0),
+                        float(prediction.get('prob_achat', 0) or 0),
+                        float(prediction.get('habit_score', 0) or 0),
+                        float(prediction.get('recency_score', 0) or 0),
+                        safe_json_dumps(prediction.get('details', {})),
+                        safe_json_dumps(prediction.get('commercial_scores', {}))
+                    ))
+
+                cursor.executemany(
+                    """
+                    INSERT INTO ia_prediction_items (
+                        run_code,
+                        client_code,
+                        prediction_rank,
+                        best_commercial_code,
+                        predicted_score,
+                        confidence_score,
+                        vip_score,
+                        predicted_qte,
+                        predicted_ca,
+                        predicted_ca_if_buy,
+                        predicted_qte_if_buy,
+                        predicted_unit_price,
+                        prob_achat,
+                        habit_score,
+                        recency_score,
+                        details_json,
+                        commercial_scores_json
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    item_rows
+                )
+
+        print(f"[AI_LOG] Snapshot enregistre -> run={run_code} items={len(predictions)}")
+        return run_code
+    finally:
+        connection.close()
+
+
+def finalize_prediction_response(request_payload, response_payload, status_code=200):
+    payload = dict(response_payload or {})
+    try:
+        payload['prediction_run_code'] = log_prediction_snapshot(request_payload or {}, payload)
+    except Exception as logging_error:
+        print(f"[AI_LOG] Logging prediction impossible: {logging_error}")
+        payload['prediction_run_code'] = None
+
+    return jsonify(payload), status_code
 
 
 def build_features(df):
@@ -268,14 +575,14 @@ def reload_models():
 
 @app.route('/api/predict', methods=['POST'])
 def predict_tournee():
+    data = request.json or {}
     try:
         if model_achat is None or model_ca is None or model_qte is None or model_price is None or not feature_columns or df_master.empty:
-            return jsonify({
+            return finalize_prediction_response(data, {
                 "status": "error",
                 "message": "Modeles IA non charges. Lancez train_auto.py pour regenerer les artefacts XGBoost."
-            }), 503
+            }, 503)
 
-        data = request.json or {}
         date_str = data.get('date', '2026-03-15')
         target_date = pd.to_datetime(date_str)
         min_prob_achat = float(data.get('min_prob_achat', 20))
@@ -322,7 +629,7 @@ def predict_tournee():
         clients_du_jour['month'] = month
 
         if clients_du_jour.empty:
-            return jsonify({"status": "error", "message": "Pas d'historique pour ce jour."})
+            return finalize_prediction_response(data, {"status": "error", "message": "Pas d'historique pour ce jour."})
 
         X_pred = build_features(clients_du_jour)
         achat_prob = np.clip(model_achat.predict_proba(X_pred)[:, 1], 0, 1)
@@ -498,7 +805,7 @@ def predict_tournee():
                 "best_commercial": best_commercial
             }
 
-        return jsonify({
+        return finalize_prediction_response(data, {
             "status": "success",
             "predictions": result_dict,
             "meta": {
@@ -514,7 +821,7 @@ def predict_tournee():
         })
 
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)})
+        return finalize_prediction_response(data, {"status": "error", "message": str(e)}, 500)
 
 
 if __name__ == '__main__':
