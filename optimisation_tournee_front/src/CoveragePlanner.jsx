@@ -92,10 +92,405 @@ function buildApiCandidates(api) {
 }
 
 const OPTIONS_REQUEST_TIMEOUT_MS = 20000
+const COVERAGE_REQUEST_TIMEOUT_MS = 240000
+const COVERAGE_REQUEST_TIMEOUT_MAX_MS = 600000
+
+function computeCoverageRequestTimeoutMs(filters, selectedCommercialCount, totalCommercialCount) {
+  const periodDays = Math.max(1, Number(filters?.period_days || 14))
+  const resolvedCommercialCount = Math.max(
+    1,
+    Number(selectedCommercialCount || 0) || Number(totalCommercialCount || 0) || 1
+  )
+  const extraDays = Math.max(0, periodDays - 14)
+  const extraCommercials = Math.max(0, resolvedCommercialCount - 1)
+
+  return Math.min(
+    COVERAGE_REQUEST_TIMEOUT_MAX_MS,
+    COVERAGE_REQUEST_TIMEOUT_MS + (extraDays * 15000) + (extraCommercials * 20000)
+  )
+}
+
+function countCoverageWorkingDays(startDateValue, periodDaysValue) {
+  const parsedPeriodDays = Number.parseInt(periodDaysValue, 10)
+  if (!startDateValue || !Number.isFinite(parsedPeriodDays) || parsedPeriodDays <= 0) {
+    return 0
+  }
+
+  const [year, month, day] = String(startDateValue).slice(0, 10).split('-').map(Number)
+  const startDate = new Date(year, (month || 1) - 1, day || 1)
+  if (Number.isNaN(startDate.getTime())) {
+    return 0
+  }
+
+  startDate.setHours(0, 0, 0, 0)
+  let workingDaysCount = 0
+
+  for (let offset = 0; offset < parsedPeriodDays; offset += 1) {
+    const current = new Date(startDate)
+    current.setDate(startDate.getDate() + offset)
+    current.setHours(0, 0, 0, 0)
+    if (current.getDay() !== 0) {
+      workingDaysCount += 1
+    }
+  }
+
+  return workingDaysCount
+}
+
+function buildCoverageErrorHelp(payload, fallbackInput = {}) {
+  const toInt = value => {
+    const parsed = Number.parseInt(value, 10)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  const toNumber = value => {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  const diagnostics = payload?.diagnostics && typeof payload.diagnostics === 'object'
+    ? payload.diagnostics
+    : {}
+  const context = payload?.context && typeof payload.context === 'object'
+    ? payload.context
+    : {}
+  const reasonCode = String(payload?.reason_code || '').trim()
+  const startDate = String(context.start_date || fallbackInput.start_date || todayIsoDate()).trim()
+  const periodDays = toInt(context.period_days ?? fallbackInput.period_days)
+  const minVisits = toInt(context.min_visits ?? fallbackInput.min_visits)
+  const maxVisits = toInt(context.max_visits ?? fallbackInput.max_visits)
+  const requestedMinRaw = toInt(
+    diagnostics.requested_min_visits_raw ??
+    context.requested_min_visits_raw ??
+    fallbackInput.min_visits
+  )
+  const requestedMaxRaw = toInt(
+    diagnostics.requested_max_visits_raw ??
+    context.requested_max_visits_raw ??
+    fallbackInput.max_visits
+  )
+  const normalizedMinVisits = toInt(diagnostics.normalized_min_visits ?? minVisits)
+  const normalizedMaxVisits = toInt(diagnostics.normalized_max_visits ?? maxVisits)
+  const selectedCommercialsCount = Number(
+    context.selected_commercials_count ?? fallbackInput.selected_commercials_count ?? 0
+  )
+  const workingDaysCount = Number(
+    context.working_days_count ?? countCoverageWorkingDays(startDate, periodDays)
+  )
+  const estimatedBlocks = Number(
+    diagnostics.estimated_blocks ??
+    (workingDaysCount > 0 && selectedCommercialsCount > 0 ? workingDaysCount * selectedCommercialsCount : 0)
+  )
+  const strictEligibleBlocks = Number(diagnostics.strict_eligible_blocks ?? 0)
+  const bestHistoricalBlockCapacity = Number(diagnostics.best_historical_block_capacity ?? 0)
+  const strictTotalCapacityVisits = Number(diagnostics.strict_total_capacity_visits ?? diagnostics.estimated_capacity_visits ?? 0)
+  const estimatedRequiredVisits = Number(diagnostics.estimated_required_visits ?? 0)
+  const selectedBlocks = Number(diagnostics.strict_selected_blocks ?? 0)
+  const deferredVisits = Number(diagnostics.deferred_assignment_visits ?? 0)
+  const blockedByClientCapacity = Number(diagnostics.blocked_by_client_capacity ?? 0)
+  const blockedByTruckCapacity = Number(diagnostics.blocked_by_truck_capacity ?? 0)
+  const explicitRecommendedMin = Number(diagnostics.recommended_min_visits ?? 0)
+  const explicitRecommendedMax = Number(diagnostics.recommended_max_visits ?? 0)
+  const averageCandidatePerBlock = estimatedBlocks > 0 ? Math.floor(estimatedRequiredVisits / estimatedBlocks) : 0
+  const requestedFullCoverageImpossible = Boolean(diagnostics.requested_full_coverage_impossible)
+  const fullCoverageMaxCapacity = toInt(diagnostics.full_coverage_max_capacity)
+  const requiredAverageVisitsPerBlock = toInt(diagnostics.required_average_visits_per_block)
+  const fullCoverageShortfall = toInt(diagnostics.full_coverage_shortfall)
+  const effectiveMinVisits = toInt(diagnostics.effective_min_visits)
+  const effectiveMaxVisits = toInt(diagnostics.effective_max_visits)
+  const actualMinClientsPerBlock = toInt(diagnostics.actual_min_clients_per_block)
+  const actualMaxClientsPerBlock = toInt(diagnostics.actual_max_clients_per_block)
+  const actualBlocksCount = toInt(diagnostics.actual_blocks_count)
+  const actualTotalVisits = toInt(diagnostics.actual_total_visits)
+  const totalCandidateClients = toInt(diagnostics.total_candidate_clients ?? estimatedRequiredVisits)
+  const coveredUniqueClients = toInt(diagnostics.covered_unique_clients)
+  const deferredUniqueClients = toInt(diagnostics.deferred_unique_clients)
+  const blocksBelowRequestedMin = toInt(diagnostics.blocks_below_requested_min)
+  const blocksAboveRequestedMax = toInt(diagnostics.blocks_above_requested_max)
+  const plannedTruckCapacity = toNumber(diagnostics.planned_truck_capacity)
+  const requestedTruckUnits = toNumber(diagnostics.requested_truck_units)
+  const strictFailureReason = String(diagnostics.strict_failure_reason || '').trim()
+  const rangeInputNormalized = Boolean(diagnostics.range_input_normalized ?? context.range_input_normalized)
+  const minTotalCa = toNumber(diagnostics.min_total_ca ?? context.min_total_ca ?? fallbackInput.min_total_ca)
+  const totalPredictedCa = toNumber(diagnostics.total_predicted_ca)
+  const requestedRangeLabel = `${requestedMinRaw || normalizedMinVisits || minVisits || '?'}-${requestedMaxRaw || normalizedMaxVisits || maxVisits || '?'}`
+  const normalizedRangeLabel = `${normalizedMinVisits || minVisits || '?'}-${normalizedMaxVisits || maxVisits || '?'}`
+  const obtainedRangeLabel = actualMinClientsPerBlock > 0
+    ? `${actualMinClientsPerBlock}-${actualMaxClientsPerBlock}`
+    : `${effectiveMinVisits || normalizedMinVisits || minVisits || '?'}-${effectiveMaxVisits || normalizedMaxVisits || maxVisits || '?'}`
+
+  const recommendedMinCandidates = [
+    explicitRecommendedMin,
+    bestHistoricalBlockCapacity > 0 ? Math.floor(bestHistoricalBlockCapacity * 0.9) : 0,
+    averageCandidatePerBlock > 0 ? averageCandidatePerBlock : 0
+  ].filter(value => Number.isFinite(value) && value > 0)
+
+  const recommendedMinVisits = recommendedMinCandidates.length
+    ? Math.max(1, Math.min(...recommendedMinCandidates))
+    : 0
+  const recommendedMaxVisits = explicitRecommendedMax > 0
+    ? Math.max(recommendedMinVisits || 1, explicitRecommendedMax)
+    : bestHistoricalBlockCapacity > 0
+      ? Math.max(recommendedMinVisits || 1, bestHistoricalBlockCapacity)
+      : Math.max(recommendedMinVisits || 1, maxVisits || 1)
+
+  const formula = [
+    '1 block potentiel = 1 jour ouvrable x 1 commercial selectionne.',
+    `Un block n'est retenu que si sa capacite historique respecte la plage ${minVisits || '?'}-${maxVisits || '?'} clients.`,
+    'La repartition finale refuse tout depassement de capacite clients ou de charge camion.'
+  ]
+
+  const metrics = []
+  const upsertMetric = (label, value) => {
+    if (value === null || value === undefined || value === '') return
+    const index = metrics.findIndex(item => item.label === label)
+    const nextMetric = { label, value: String(value) }
+    if (index >= 0) {
+      metrics[index] = nextMetric
+      return
+    }
+    metrics.push(nextMetric)
+  }
+  if (workingDaysCount > 0) metrics.push({ label: 'Jours ouvrables', value: String(workingDaysCount) })
+  if (selectedCommercialsCount > 0) metrics.push({ label: 'Commerciaux', value: String(selectedCommercialsCount) })
+  if (estimatedBlocks > 0) metrics.push({ label: 'Blocks possibles', value: String(estimatedBlocks) })
+  upsertMetric('Blocks qui passent le minimum', strictEligibleBlocks)
+  if (bestHistoricalBlockCapacity > 0) upsertMetric('Meilleure capacite observee', `${bestHistoricalBlockCapacity} clients`)
+  if (strictTotalCapacityVisits > 0) upsertMetric('Capacite stricte totale', `${strictTotalCapacityVisits} visites`)
+  if (estimatedRequiredVisits > 0) upsertMetric('Clients candidats', estimatedRequiredVisits)
+  if (selectedBlocks > 0) upsertMetric('Blocks retenus', selectedBlocks)
+  if (deferredVisits > 0) upsertMetric('Clients non repartis', deferredVisits)
+
+  let title = 'Pourquoi le plan est refuse'
+  let explanation = payload?.message || "Le plan de couverture n'a pas pu etre calcule avec ces parametres."
+  const actions = []
+  let recommendation = null
+
+  switch (reasonCode) {
+    case 'invalid_visit_range':
+      title = 'Les bornes Min/Max ne sont pas coherentes'
+      explanation = `Le champ "Max clients / block" doit etre superieur ou egal a "Min clients / block". Avec ${minVisits} min et ${maxVisits} max, le calcul est bloque avant meme de tester les commerciaux.`
+      actions.push('Augmente "Max clients / block" pour qu\'il soit au moins egal au minimum.')
+      actions.push('Ou baisse "Min clients / block" si tu veux des blocks plus petits.')
+      recommendation = {
+        label: `Min ${minVisits || 1} / Max ${Math.max(minVisits || 1, maxVisits || 0)}`,
+        filters: {
+          min_visits: minVisits || 1,
+          max_visits: Math.max(minVisits || 1, maxVisits || 0)
+        }
+      }
+      break
+    case 'closest_plan_generated':
+    case 'ortools_plan_generated': {
+      const usingOrTools = reasonCode === 'ortools_plan_generated'
+      title = usingOrTools ? 'Le plan OR-Tools a ete genere' : 'Le meilleur plan possible a ete genere'
+      explanation = usingOrTools
+        ? `Tu as demande ${requestedRangeLabel} client(s) par block. Le solveur OR-Tools a reparti les clients sur ${actualBlocksCount || selectedBlocks || 0} block(s) avec une plage finale de ${obtainedRangeLabel} client(s) par block.`
+        : `Tu as demande ${requestedRangeLabel} client(s) par block. Le moteur a genere le resultat le plus proche possible avec ${actualBlocksCount || selectedBlocks || 0} block(s) et une plage finale de ${obtainedRangeLabel} client(s) par block.`
+      if (rangeInputNormalized) {
+        explanation += ` Les bornes saisies ont d'abord ete remises dans l'ordre logique (${requestedRangeLabel} -> ${normalizedRangeLabel}).`
+      }
+      if (strictFailureReason) {
+        explanation += ` ${strictFailureReason}`
+      } else if (bestHistoricalBlockCapacity > 0 && normalizedMinVisits > bestHistoricalBlockCapacity) {
+        explanation += ` Le meilleur block historique observe monte a ${bestHistoricalBlockCapacity} clients, donc la demande stricte n'etait pas tenable telle quelle.`
+      }
+      if (coveredUniqueClients > 0) {
+        explanation += ` ${coveredUniqueClients} client(s) ont ete couverts`
+        explanation += deferredUniqueClients > 0
+          ? ` et ${deferredUniqueClients} restent a reprogrammer.`
+          : '.'
+      }
+      if (requestedFullCoverageImpossible && requiredAverageVisitsPerBlock > 0) {
+        explanation += ` Pour couvrir 100% des ${totalCandidateClients || estimatedRequiredVisits} client(s) sur ${estimatedBlocks} block(s) possibles, il faudrait au moins ${requiredAverageVisitsPerBlock} client(s) par block, alors que ton max saisi est ${normalizedMaxVisits || maxVisits}.`
+      }
+      if (minTotalCa > 0 && totalPredictedCa > 0 && totalPredictedCa < minTotalCa) {
+        explanation += ` Le CA estime (${totalPredictedCa.toLocaleString()} TND) reste sous le minimum demande (${minTotalCa.toLocaleString()} TND).`
+      }
+
+      formula.splice(0, formula.length,
+        usingOrTools
+          ? `Le solveur OR-Tools repartit d'abord les clients sur tous les blocks disponibles de la periode.`
+          : `Le moteur essaie d'abord strictement ta plage demandee ${normalizedRangeLabel} client(s) par block.`,
+        usingOrTools
+          ? 'Le minimum et le maximum saisis restent des cibles d\'equilibrage, mais la couverture globale passe d\'abord.'
+          : 'Si cette plage est impossible, il baisse seulement le minimum au plus petit niveau necessaire pour rester le plus proche possible de ta demande.',
+        'La repartition finale refuse toujours de depasser la capacite clients ou la charge camion de chaque block.'
+      )
+      if (requestedFullCoverageImpossible && fullCoverageMaxCapacity > 0) {
+        formula.push(`Couverture 100% theorique avec ta saisie = ${estimatedBlocks} block(s) x ${normalizedMaxVisits || maxVisits} max = ${fullCoverageMaxCapacity} visite(s).`)
+      }
+
+      upsertMetric('Plage demandee', `${requestedRangeLabel} clients`)
+      upsertMetric('Plage obtenue', `${obtainedRangeLabel} clients`)
+      if (actualBlocksCount > 0) upsertMetric('Blocks obtenus', actualBlocksCount)
+      if (coveredUniqueClients > 0) upsertMetric('Clients couverts', coveredUniqueClients)
+      if (totalCandidateClients > 0) upsertMetric('Clients candidats', totalCandidateClients)
+      if (deferredUniqueClients > 0) upsertMetric('Clients restants', deferredUniqueClients)
+      if (actualTotalVisits > 0) upsertMetric('Visites planifiees', actualTotalVisits)
+      if (requestedFullCoverageImpossible && fullCoverageMaxCapacity > 0) {
+        upsertMetric('Capacite max demandee', `${fullCoverageMaxCapacity} visites`)
+      }
+      if (requestedFullCoverageImpossible && requiredAverageVisitsPerBlock > 0) {
+        upsertMetric('Moyenne requise / block', `${requiredAverageVisitsPerBlock} clients`)
+      }
+      if (requestedFullCoverageImpossible && fullCoverageShortfall > 0) {
+        upsertMetric('Manque theorique', `${fullCoverageShortfall} clients`)
+      }
+
+      if (rangeInputNormalized) {
+        actions.push(`Saisis directement Min ${normalizedMinVisits} / Max ${normalizedMaxVisits} si tu veux garder cette logique sans inversion automatique.`)
+      }
+      if (requestedFullCoverageImpossible && requiredAverageVisitsPerBlock > 0) {
+        actions.push(`Avec cette periode et ces commerciaux, il faut un Max d'au moins ${requiredAverageVisitsPerBlock} client(s) par block pour viser 100% de couverture.`)
+      }
+      if (recommendedMinVisits > 0 && !usingOrTools) {
+        actions.push(`Pour un prochain calcul plus stable, relance avec Min ${recommendedMinVisits} / Max ${recommendedMaxVisits}.`)
+      }
+      if (deferredUniqueClients > 0) {
+        actions.push(`Allonge la periode ou ajoute des commerciaux pour absorber les ${deferredUniqueClients} client(s) restants.`)
+      }
+      if (blockedByClientCapacity > 0) {
+        actions.push('Plusieurs blocks ont ete limites par leur capacite clients reelle.')
+      }
+      if (blockedByTruckCapacity > 0) {
+        actions.push(`La charge camion a aussi bloque une partie de la repartition (${requestedTruckUnits.toLocaleString()} unites demandees pour environ ${plannedTruckCapacity.toLocaleString()} unites planifiables).`)
+      }
+      if (blocksBelowRequestedMin > 0 || blocksAboveRequestedMax > 0) {
+        actions.push(`Le resultat sort encore de la plage demandee sur ${blocksBelowRequestedMin + blocksAboveRequestedMax} block(s), car il n'existe pas de repartition exacte avec les capacites actuelles.`)
+      }
+      recommendation = recommendedMinVisits > 0
+        ? {
+            label: `Min ${recommendedMinVisits} / Max ${recommendedMaxVisits}`,
+            filters: {
+              min_visits: recommendedMinVisits,
+              max_visits: recommendedMaxVisits
+            }
+          }
+        : null
+      break
+    }
+    case 'no_working_days':
+      title = 'Aucun jour planifiable sur cette periode'
+      explanation = 'Le moteur ignore le dimanche. Sur la periode choisie, il ne reste donc aucun jour ouvrable exploitable.'
+      actions.push('Decale la date de debut.')
+      actions.push('Ou augmente la periode en jours pour inclure plus de jours ouvrables.')
+      break
+    case 'no_commercial_selected':
+      title = 'Aucun commercial selectionne'
+      explanation = 'Le plan ne peut pas etre calcule sans au moins un commercial, car chaque block est rattache a un commercial precis.'
+      actions.push('Selectionne au moins un commercial dans la liste.')
+      actions.push('Si tu veux tester large, garde "Tous les commerciaux".')
+      break
+    case 'min_block_capacity_unreachable':
+      title = 'Le minimum demande est trop haut pour l\'historique disponible'
+      explanation = bestHistoricalBlockCapacity > 0
+        ? `Aucun block historique n'atteint le minimum de ${minVisits} clients. Le meilleur block observe sur la periode arrive seulement a ${bestHistoricalBlockCapacity} clients.`
+        : `Aucun block historique n'atteint le minimum de ${minVisits} clients sur la periode choisie.`
+      if (recommendedMinVisits > 0) {
+        actions.push(`Essaie un minimum proche de ${recommendedMinVisits} client(s) par block.`)
+      } else if (bestHistoricalBlockCapacity > 0) {
+        actions.push(`Baisse "Min clients / block" a ${bestHistoricalBlockCapacity} ou moins.`)
+      } else {
+        actions.push('Baisse "Min clients / block".')
+      }
+      actions.push('Allonge la periode pour ajouter plus de jours ouvrables.')
+      actions.push('Ajoute d\'autres commerciaux pour augmenter le nombre de blocks possibles.')
+      if (recommendedMinVisits > 0) {
+        recommendation = {
+          label: `Min ${recommendedMinVisits} / Max ${recommendedMaxVisits}`,
+          filters: {
+            min_visits: recommendedMinVisits,
+            max_visits: recommendedMaxVisits
+          }
+        }
+      }
+      break
+    case 'total_demand_below_min_block':
+      title = 'Pas assez de clients pour ouvrir un block strict'
+      explanation = `Le nombre total de clients candidats reste inferieur au minimum requis pour un seul block (${minVisits}).`
+      actions.push('Baisse "Min clients / block".')
+      actions.push('Allonge la periode pour faire remonter plus de clients candidats.')
+      if (recommendedMinVisits > 0) {
+        recommendation = {
+          label: `Min ${recommendedMinVisits} / Max ${recommendedMaxVisits}`,
+          filters: {
+            min_visits: recommendedMinVisits,
+            max_visits: recommendedMaxVisits
+          }
+        }
+      }
+      break
+    case 'strict_blocks_impossible':
+      title = 'Les capacites existent, mais la regle stricte ne passe pas'
+      explanation = `Le moteur a trouve des capacites historiques, mais il ne peut pas former des blocks qui respectent strictement la plage ${minVisits}-${maxVisits} pour toute la demande.`
+      actions.push('Baisse le minimum par block pour donner plus de souplesse.')
+      actions.push('Allonge la periode ou ajoute des commerciaux.')
+      if (recommendedMinVisits > 0) {
+        recommendation = {
+          label: `Min ${recommendedMinVisits} / Max ${recommendedMaxVisits}`,
+          filters: {
+            min_visits: recommendedMinVisits,
+            max_visits: recommendedMaxVisits
+          }
+        }
+      }
+      break
+    case 'assignment_capacity_overflow':
+      title = 'La repartition finale depasse les capacites reelles'
+      explanation = 'Des blocks stricts existaient, mais en repartissant les clients un ou plusieurs blocks depassent soit la limite clients, soit la charge camion.'
+      if (blockedByClientCapacity > 0) {
+        actions.push('Baisse "Min clients / block" ou augmente la periode pour ajouter des blocks disponibles.')
+      }
+      if (blockedByTruckCapacity > 0) {
+        actions.push('Revois la charge attendue en etalant la periode ou en ajoutant des commerciaux.')
+      }
+      actions.push('Relance avec plus de jours ouvrables pour absorber les clients restants.')
+      if (recommendedMinVisits > 0 && blockedByClientCapacity > 0 && blockedByTruckCapacity === 0 && minVisits > recommendedMinVisits) {
+        recommendation = {
+          label: `Min ${recommendedMinVisits} / Max ${recommendedMaxVisits}`,
+          filters: {
+            min_visits: recommendedMinVisits,
+            max_visits: recommendedMaxVisits
+          }
+        }
+      }
+      break
+    case 'no_exploitable_blocks':
+      title = 'Aucun block exploitable apres les controles'
+      explanation = 'Le moteur a essaye de construire des blocks, puis de repartir les clients, mais aucun block n\'a pu rester valide sans depasser les contraintes reelles.'
+      actions.push('Baisse le minimum par block.')
+      actions.push('Allonge la periode.')
+      actions.push('Ajoute d\'autres commerciaux.')
+      if (recommendedMinVisits > 0) {
+        recommendation = {
+          label: `Min ${recommendedMinVisits} / Max ${recommendedMaxVisits}`,
+          filters: {
+            min_visits: recommendedMinVisits,
+            max_visits: recommendedMaxVisits
+          }
+        }
+      }
+      break
+    default:
+      actions.push('Baisse "Min clients / block" si la contrainte est trop forte.')
+      actions.push('Allonge la periode en jours pour ouvrir plus de blocks.')
+      actions.push('Ajoute d\'autres commerciaux si possible.')
+      break
+  }
+
+  return {
+    title,
+    explanation,
+    metrics,
+    formula,
+    actions: [...new Set(actions.filter(Boolean))],
+    recommendation
+  }
+}
 
 export default function CoveragePlanner({ api }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [plannerFeedback, setPlannerFeedback] = useState(null)
   const [clickedClient, setClickedClient] = useState(null)
   const [validationFeedback, setValidationFeedback] = useState(null)
   const [validationLoading, setValidationLoading] = useState(false)
@@ -407,12 +802,6 @@ export default function CoveragePlanner({ api }) {
       nextFilters.max_visits = String(Math.max(1, Math.min(250, parsedMax)))
     }
 
-    const safeMin = Number.parseInt(nextFilters.min_visits, 10)
-    const safeMax = Number.parseInt(nextFilters.max_visits, 10)
-    if (Number.isFinite(safeMin) && Number.isFinite(safeMax) && safeMax < safeMin) {
-      nextFilters.max_visits = String(safeMin)
-    }
-
     return nextFilters
   }
 
@@ -438,18 +827,44 @@ export default function CoveragePlanner({ api }) {
     setFilters(current => normalizeVisitLimits(current))
   }
 
+  const applyPlannerRecommendation = recommendation => {
+    if (!recommendation?.filters) return
+
+    setFilters(current => normalizeVisitLimits({
+      ...current,
+      ...Object.fromEntries(
+        Object.entries(recommendation.filters).map(([key, value]) => [key, String(value)])
+      )
+    }))
+  }
+
   const runPlanner = async () => {
     try {
+      const normalizedFilters = normalizeVisitLimits(filters)
+      const allCommercialsSelected = selectedCommercials.length === options.commerciaux.length
+      const plannerInputContext = {
+        start_date: normalizedFilters.start_date,
+        period_days: normalizedFilters.period_days,
+        min_visits: normalizedFilters.min_visits,
+        max_visits: normalizedFilters.max_visits,
+        selected_commercials_count: allCommercialsSelected ? options.commerciaux.length : selectedCommercials.length
+      }
+
       if (!selectedCommercials.length) {
-        setError('Selectionne au moins un commercial.')
+        const plannerMessage = 'Selectionne au moins un commercial.'
+        setError(plannerMessage)
+        setPlannerFeedback(buildCoverageErrorHelp({
+          message: plannerMessage,
+          reason_code: 'no_commercial_selected',
+          context: plannerInputContext
+        }, plannerInputContext))
         return
       }
       setLoading(true)
       setError(null)
+      setPlannerFeedback(null)
       setValidationFeedback(null)
-      const normalizedFilters = normalizeVisitLimits(filters)
       setFilters(normalizedFilters)
-      const allCommercialsSelected = selectedCommercials.length === options.commerciaux.length
       const params = {
         start_date: normalizedFilters.start_date,
         period_days: normalizedFilters.period_days,
@@ -458,6 +873,11 @@ export default function CoveragePlanner({ api }) {
         min_total_ca: normalizedFilters.min_total_ca || undefined,
         commercials: allCommercialsSelected ? undefined : selectedCommercials
       }
+      const requestTimeoutMs = computeCoverageRequestTimeoutMs(
+        normalizedFilters,
+        allCommercialsSelected ? options.commerciaux.length : selectedCommercials.length,
+        options.commerciaux.length
+      )
 
       const apiCandidates = buildApiCandidates(resolvedApiBase || api)
       let response = null
@@ -467,7 +887,7 @@ export default function CoveragePlanner({ api }) {
         try {
           response = await axios.get(`${candidate}/api/tournees/coverage-plan`, {
             params,
-            timeout: 20000
+            timeout: requestTimeoutMs
           })
           setResolvedApiBase(candidate)
           break
@@ -483,17 +903,31 @@ export default function CoveragePlanner({ api }) {
       if (response.data?.status === 'invalid_parameters') {
         const plannerMessage = response.data?.message || 'Le calcul du plan ne peut pas etre lance avec ces parametres.'
         setError(plannerMessage)
+        setPlannerFeedback(buildCoverageErrorHelp(response.data, plannerInputContext))
         setPlanData(null)
         setSelectedBlockId(null)
         return
       }
 
+      setPlannerFeedback(
+        response.data?.planner_warning
+          ? buildCoverageErrorHelp(response.data.planner_warning, plannerInputContext)
+          : null
+      )
       setPlanData(response.data)
       const firstBlock = response.data?.blocks?.[0]
       setSelectedBlockId(firstBlock ? firstBlock.id : null)
     } catch (plannerError) {
-      const errorMessage = plannerError?.response?.data?.error || 'Impossible de generer le plan de couverture.'
+      const timeoutMessage = plannerError?.code === 'ECONNABORTED'
+        ? "Le calcul du plan est encore en cours et a depasse le delai d'attente de l'interface. Relance dans quelques secondes: le moteur finit generalement par produire le resultat avec ces memes parametres."
+        : null
+      const errorMessage =
+        plannerError?.response?.data?.message ||
+        plannerError?.response?.data?.error ||
+        timeoutMessage ||
+        'Impossible de generer le plan de couverture.'
       setError(errorMessage)
+      setPlannerFeedback(null)
       setPlanData(null)
       setSelectedBlockId(null)
     } finally {
@@ -521,6 +955,11 @@ export default function CoveragePlanner({ api }) {
     : !selectedRows.length
       ? 'Ce block ne contient aucun client exploitable a enregistrer.'
       : null
+  const plannerRecommendationApplied = Boolean(
+    plannerFeedback?.recommendation?.filters &&
+    String(filters.min_visits || '') === String(plannerFeedback.recommendation.filters.min_visits || '') &&
+    String(filters.max_visits || '') === String(plannerFeedback.recommendation.filters.max_visits || '')
+  )
 
   const buildValidationStops = () => {
     const routeStops = routePlan.orderedStops.length
@@ -655,7 +1094,7 @@ export default function CoveragePlanner({ api }) {
             />
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-            <label style={{ fontSize: '12px', fontWeight: '700', color: '#475467' }}>Min visite</label>
+            <label style={{ fontSize: '12px', fontWeight: '700', color: '#475467' }}>Min clients / block</label>
             <input
               type="number"
               min={1}
@@ -667,7 +1106,7 @@ export default function CoveragePlanner({ api }) {
             />
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-            <label style={{ fontSize: '12px', fontWeight: '700', color: '#475467' }}>Max visite</label>
+            <label style={{ fontSize: '12px', fontWeight: '700', color: '#475467' }}>Max clients / block</label>
             <input
               type="number"
               min={1}
@@ -690,6 +1129,10 @@ export default function CoveragePlanner({ api }) {
               style={{ padding: '11px 12px', borderRadius: '10px', border: '1px solid #d0d5dd' }}
             />
           </div>
+        </div>
+
+        <div style={{ marginBottom: '16px', padding: '10px 12px', borderRadius: '10px', backgroundColor: '#f8fafc', color: '#475467', fontSize: '12px', fontWeight: '600' }}>
+          Regle cible: le moteur essaie d'abord de respecter strictement le minimum et le maximum saisis. Si ce n'est pas realiste avec l'historique, il genere le meilleur plan possible et t'explique pourquoi.
         </div>
 
         <div style={{ borderTop: '1px solid #eef2f7', paddingTop: '16px' }}>
@@ -815,6 +1258,102 @@ export default function CoveragePlanner({ api }) {
         </div>
       )}
 
+      {plannerFeedback && (
+        <div
+          style={{
+            marginTop: error ? '-8px' : 0,
+            marginBottom: '24px',
+            padding: '18px',
+            borderRadius: '16px',
+            backgroundColor: '#fffaf5',
+            border: '1px solid #fed7aa',
+            boxShadow: '0 10px 24px rgba(194, 65, 12, 0.08)'
+          }}
+        >
+          <div style={{ fontSize: '18px', fontWeight: '800', color: '#9a3412', marginBottom: '8px' }}>
+            {plannerFeedback.title}
+          </div>
+          <div style={{ color: '#7c2d12', fontSize: '14px', lineHeight: 1.6, marginBottom: '14px' }}>
+            {plannerFeedback.explanation}
+          </div>
+
+          {plannerFeedback.recommendation && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', marginBottom: '14px' }}>
+              <div style={{ padding: '8px 12px', borderRadius: '999px', backgroundColor: '#fff', border: '1px solid #fdba74', color: '#9a3412', fontSize: '12px', fontWeight: '800' }}>
+                Reglage recommande: {plannerFeedback.recommendation.label}
+              </div>
+              <button
+                type="button"
+                onClick={() => applyPlannerRecommendation(plannerFeedback.recommendation)}
+                disabled={plannerRecommendationApplied}
+                style={{
+                  padding: '9px 14px',
+                  borderRadius: '10px',
+                  border: 'none',
+                  backgroundColor: plannerRecommendationApplied ? '#94a3b8' : '#ea580c',
+                  color: 'white',
+                  fontSize: '12px',
+                  fontWeight: '800',
+                  cursor: plannerRecommendationApplied ? 'not-allowed' : 'pointer'
+                }}
+              >
+                {plannerRecommendationApplied ? 'Reglage deja applique' : 'Appliquer le reglage recommande'}
+              </button>
+              <div style={{ color: '#9a3412', fontSize: '12px', fontWeight: '600' }}>
+                Puis relance le calcul.
+              </div>
+            </div>
+          )}
+
+          {plannerFeedback.metrics.length > 0 && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '10px', marginBottom: '14px' }}>
+              {plannerFeedback.metrics.map(metric => (
+                <div
+                  key={metric.label}
+                  style={{
+                    backgroundColor: 'white',
+                    border: '1px solid #ffedd5',
+                    borderRadius: '12px',
+                    padding: '12px'
+                  }}
+                >
+                  <div style={{ fontSize: '11px', textTransform: 'uppercase', color: '#9a3412', fontWeight: '700' }}>
+                    {metric.label}
+                  </div>
+                  <div style={{ marginTop: '4px', fontSize: '20px', fontWeight: '800', color: '#7c2d12' }}>
+                    {metric.value}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '16px' }}>
+            <div style={{ backgroundColor: 'white', borderRadius: '12px', padding: '14px', border: '1px solid #ffedd5' }}>
+              <div style={{ fontSize: '13px', fontWeight: '800', color: '#9a3412', marginBottom: '8px' }}>
+                Comment le calcul se fait
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '18px', color: '#7c2d12', fontSize: '13px', lineHeight: 1.6 }}>
+                {plannerFeedback.formula.map(line => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+            </div>
+
+            <div style={{ backgroundColor: 'white', borderRadius: '12px', padding: '14px', border: '1px solid #ffedd5' }}>
+              <div style={{ fontSize: '13px', fontWeight: '800', color: '#9a3412', marginBottom: '8px' }}>
+                Ce que tu peux faire maintenant
+              </div>
+              <ul style={{ margin: 0, paddingLeft: '18px', color: '#7c2d12', fontSize: '13px', lineHeight: 1.6 }}>
+                {plannerFeedback.actions.map(action => (
+                  <li key={action}>{action}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </div>
+      )}
+
       {summary && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px', marginBottom: '24px' }}>
           <div style={{ backgroundColor: 'white', borderRadius: '14px', padding: '18px', boxShadow: '0 8px 20px rgba(15, 23, 42, 0.05)', borderLeft: '5px solid #1c6dd0' }}>
@@ -836,6 +1375,21 @@ export default function CoveragePlanner({ api }) {
         </div>
       )}
 
+      {summary?.planner_note && (
+        <div
+          style={{
+            padding: '14px 16px',
+            borderRadius: '12px',
+            backgroundColor: (summary.capacity_limited || summary.planning_mode === 'relaxed') ? '#fff7ed' : '#eff8ff',
+            color: (summary.capacity_limited || summary.planning_mode === 'relaxed') ? '#b54708' : '#175cd3',
+            marginBottom: '24px',
+            fontWeight: '600'
+          }}
+        >
+          {summary.planner_note}
+        </div>
+      )}
+
       <div style={{ display: 'grid', gridTemplateColumns: selectedBlock ? 'minmax(320px, 420px) minmax(0, 1fr)' : '1fr', gap: '24px' }}>
         <div style={{ backgroundColor: 'white', borderRadius: '16px', padding: '18px', boxShadow: '0 10px 25px rgba(15, 23, 42, 0.06)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
@@ -850,7 +1404,9 @@ export default function CoveragePlanner({ api }) {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxHeight: '900px', overflowY: 'auto', paddingRight: '4px' }}>
             {blocks.length === 0 ? (
               <div style={{ padding: '18px', borderRadius: '12px', backgroundColor: '#f8fafc', color: '#667085', textAlign: 'center' }}>
-                Lance la planification pour afficher les blocks.
+                {plannerFeedback
+                  ? 'Aucun block n\'a pu etre genere avec ces reglages. Ajuste les parametres ci-dessus puis relance le calcul.'
+                  : 'Lance la planification pour afficher les blocks.'}
               </div>
             ) : (
               blocks.map(block => {
@@ -881,7 +1437,12 @@ export default function CoveragePlanner({ api }) {
                         <div style={{ marginTop: '4px', fontSize: '22px', fontWeight: '800', color: '#101828' }}>{block.clients_count}</div>
                         {block.capacity?.max_clients ? (
                           <div style={{ marginTop: '4px', fontSize: '11px', color: '#667085', fontWeight: '700' }}>
-                            Cap. {block.capacity.planned_clients}/{block.capacity.max_clients}
+                            Cible {block.capacity.planned_clients}/{block.capacity.target_clients || block.capacity.max_clients}
+                          </div>
+                        ) : null}
+                        {block.capacity?.historical_max_clients && block.capacity.historical_max_clients !== (block.capacity.target_clients || block.capacity.max_clients) ? (
+                          <div style={{ marginTop: '2px', fontSize: '10px', color: '#98a2b3', fontWeight: '700' }}>
+                            Cap. hist {block.capacity.historical_max_clients}
                           </div>
                         ) : null}
                       </div>
@@ -937,7 +1498,12 @@ export default function CoveragePlanner({ api }) {
                   </div>
                   {selectedCapacity?.max_clients ? (
                     <div style={{ padding: '8px 12px', borderRadius: '10px', backgroundColor: '#f5f3ff', color: '#6d28d9', fontSize: '12px', fontWeight: '800' }}>
-                      Cap clients {selectedCapacity.planned_clients}/{selectedCapacity.max_clients}
+                      Cible clients {selectedCapacity.planned_clients}/{selectedCapacity.target_clients || selectedCapacity.max_clients}
+                    </div>
+                  ) : null}
+                  {selectedCapacity?.historical_max_clients && selectedCapacity.historical_max_clients !== (selectedCapacity.target_clients || selectedCapacity.max_clients) ? (
+                    <div style={{ padding: '8px 12px', borderRadius: '10px', backgroundColor: '#f8fafc', color: '#475467', fontSize: '12px', fontWeight: '800' }}>
+                      Cap. hist {selectedCapacity.historical_max_clients}
                     </div>
                   ) : null}
                   {selectedCapacity?.max_truck_units ? (
@@ -953,7 +1519,7 @@ export default function CoveragePlanner({ api }) {
                   <thead style={{ position: 'sticky', top: 0, backgroundColor: '#f8fafc' }}>
                     <tr>
                       <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #eaecf0', color: '#475467' }}>SCORE VIP</th>
-                      <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #eaecf0', color: '#475467' }}>QTE. RECO</th>
+                      <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #eaecf0', color: '#475467' }}>CHARGE EST.</th>
                       <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #eaecf0', color: '#475467' }}>JOUR</th>
                       <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #eaecf0', color: '#475467' }}>CLIENT</th>
                       <th style={{ textAlign: 'left', padding: '12px 8px', borderBottom: '2px solid #eaecf0', color: '#475467' }}>CHIFFRE PREDIT</th>
@@ -986,7 +1552,7 @@ export default function CoveragePlanner({ api }) {
                                 cursor: 'pointer'
                               }}
                             >
-                              {row.qte_reco} unites
+                              {row.qte_reco} unites estimees
                             </div>
                             {isExpanded && (
                               <div style={{ marginTop: '8px', padding: '10px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #d8e9ff', fontSize: '12px' }}>
@@ -1041,9 +1607,9 @@ export default function CoveragePlanner({ api }) {
             <div style={{ backgroundColor: '#1a2b4c', color: 'white', borderRadius: '16px', padding: '20px', boxShadow: '0 10px 25px rgba(15, 23, 42, 0.12)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px', flexWrap: 'wrap', marginBottom: '14px' }}>
                 <div>
-                  <h3 style={{ margin: 0, color: '#60a5fa' }}>Prediction Chargement IA</h3>
+                  <h3 style={{ margin: 0, color: '#60a5fa' }}>Estimation Chargement</h3>
                   <p style={{ margin: '8px 0 0 0', fontSize: '13px', color: '#c5d3e3' }}>
-                    L'IA suggere ce chargement detaille par produit pour ce block.
+                    Estimation de chargement utilisee pour equilibrer les tournees sur ce block.
                   </p>
                 </div>
                 <div style={{ padding: '8px 12px', borderRadius: '10px', backgroundColor: '#2c3e5d', color: '#20c997', fontSize: '12px', fontWeight: '800' }}>

@@ -7,6 +7,7 @@ import os
 import json
 import uuid
 import hashlib
+import math
 from pathlib import Path
 from datetime import datetime
 
@@ -26,25 +27,53 @@ FEATURE_COLUMNS_BASE = [
     'days_since_last_order',
     'vente_last',
     'qte_last',
+    'docs_last',
+    'line_items_last',
+    'product_refs_last',
     'vente_avg_3',
     'qte_avg_3',
+    'docs_avg_3',
+    'line_items_avg_3',
+    'product_refs_avg_3',
+    'ca_last_7d',
     'ca_last_30d',
     'ca_last_60d',
     'ca_last_90d',
+    'qte_last_7d',
     'qte_last_30d',
     'qte_last_60d',
     'qte_last_90d',
+    'docs_last_30d',
+    'docs_last_90d',
+    'line_items_last_30d',
+    'line_items_last_90d',
+    'product_refs_last_30d',
+    'product_refs_last_90d',
+    'orders_last_7d',
     'orders_last_30d',
     'orders_last_60d',
     'orders_last_90d',
     'avg_ca_per_order_90d',
     'avg_qte_per_order_90d',
+    'avg_docs_per_order_90d',
+    'avg_line_items_per_order_90d',
+    'avg_product_refs_per_order_90d',
     'weekday_purchase_rate',
     'days_since_last_same_weekday_order',
+    'days_between_last_orders',
+    'avg_days_between_orders_5',
+    'order_gap_ratio',
     'recent_ca_trend',
     'recent_qte_trend',
     'avg_price_hist',
     'month'
+]
+
+MAIN_CATEGORICAL_COLUMNS = [
+    'region',
+    'delegation',
+    'routing_code',
+    'home_commercial'
 ]
 
 ASSIGNMENT_CATEGORICAL_COLUMNS = [
@@ -64,6 +93,8 @@ feature_columns = []
 assignment_feature_columns = []
 assignment_classes = []
 df_master = pd.DataFrame()
+prediction_history_source = None
+df_daily_demand = pd.DataFrame()
 df_prefs = pd.DataFrame(columns=['client_code', 'produit_nom', 'produit_code', 'qte_moyenne'])
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -128,6 +159,8 @@ def build_model_version():
         'colonnes_ia.pkl',
         'colonnes_affectation.pkl',
         'classes_affectation.pkl',
+        'dataset_features_clients_jour.csv',
+        'daily_demand_history.csv',
         'master_dataset_v3.csv',
         'preferences_clients_produits.csv',
         'precision.txt'
@@ -152,8 +185,14 @@ def get_mysql_connection():
     except Exception as error:
         raise RuntimeError(f"pymysql indisponible pour logging IA: {error}") from error
 
+    try:
+        db_port = int(os.getenv('DB_PORT', '3306') or '3306')
+    except ValueError:
+        db_port = 3306
+
     return pymysql.connect(
         host=os.getenv('DB_HOST', 'localhost'),
+        port=db_port,
         user=os.getenv('DB_USER', 'root'),
         password=os.getenv('DB_PASS', ''),
         database=os.getenv('DB_NAME', 'dist_utic'),
@@ -373,11 +412,12 @@ def finalize_prediction_response(request_payload, response_payload, status_code=
 
 
 def build_features(df):
-    features = df[FEATURE_COLUMNS_BASE + ['region']].copy()
-    features['region'] = features['region'].fillna('Inconnu').astype(str).str.strip()
+    features = df[FEATURE_COLUMNS_BASE + MAIN_CATEGORICAL_COLUMNS].copy()
+    for col in MAIN_CATEGORICAL_COLUMNS:
+        features[col] = features[col].fillna('Inconnu').astype(str).str.strip()
     for col in FEATURE_COLUMNS_BASE:
         features[col] = pd.to_numeric(features[col], errors='coerce').fillna(0)
-    features = pd.get_dummies(features, columns=['region'], dummy_na=False)
+    features = pd.get_dummies(features, columns=MAIN_CATEGORICAL_COLUMNS, dummy_na=False)
     if feature_columns:
         features = features.reindex(columns=feature_columns, fill_value=0)
     return features
@@ -457,13 +497,15 @@ def blend_expected_quantity(prob_buy, ca_if_buy, qte_if_buy, price_if_buy, avg_p
 
 
 def build_purchase_probability(row):
-    visites_jour = max(0, float(row.get('nbr_visites_jour', 0)))
+    weekday_rate = max(0.0, min(1.0, float(row.get('weekday_purchase_rate', 0) or 0)))
+    visites_hist = max(1.0, float(row.get('nbr_visites_hist', 0) or 0))
+    visites_jour = max(0.0, float(row.get('nbr_visites_jour', 0) or 0))
     recency_days = max(0, float(row.get('days_since_last_order', 999)))
 
-    history_factor = min(1.0, visites_jour / 8.0)
+    weekday_support = min(1.0, visites_jour / visites_hist)
     recency_factor = max(0.0, 1.0 - min(recency_days, 45.0) / 45.0)
 
-    prob = (0.75 * history_factor) + (0.25 * recency_factor)
+    prob = (0.60 * weekday_rate) + (0.25 * weekday_support) + (0.15 * recency_factor)
     return round(prob * 100, 1)
 
 
@@ -475,20 +517,20 @@ def stabilize_purchase_probability(model_prob_pct, hist_prob_pct, habit_score, r
     ca_if_buy = float(ca_if_buy) if pd.notna(ca_if_buy) else 0.0
 
     blended = (
-        (0.50 * model_prob_pct) +
-        (0.25 * hist_prob_pct) +
-        (0.15 * habit_score) +
-        (0.10 * recency_score)
+        (0.88 * model_prob_pct) +
+        (0.07 * hist_prob_pct) +
+        (0.03 * habit_score) +
+        (0.02 * recency_score)
     )
 
-    # Avoid collapsing expected value too aggressively for clients with decent
-    # historical behavior and commercially relevant predicted CA.
-    if ca_if_buy >= 80 and (hist_prob_pct >= 18 or habit_score >= 25):
-        blended = max(blended, min(45.0, (0.60 * hist_prob_pct) + (0.40 * habit_score)))
-    elif ca_if_buy >= 30 and (hist_prob_pct >= 10 or recency_score >= 20):
-        blended = max(blended, min(28.0, (0.65 * hist_prob_pct) + (0.35 * recency_score)))
+    if model_prob_pct >= 6 and hist_prob_pct >= 18 and ca_if_buy >= 80:
+        blended += 2.0
+    elif model_prob_pct >= 3 and hist_prob_pct >= 12 and ca_if_buy >= 30:
+        blended += 1.0
 
-    return round(float(np.clip(blended, 0, 95)), 1)
+    max_allowed = max(2.0, model_prob_pct * 2.0)
+    blended = min(blended, max_allowed)
+    return round(float(np.clip(blended, 0, 85)), 1)
 
 
 def compute_habit_score(row):
@@ -510,10 +552,320 @@ def compute_recency_score(row):
     return round(((0.6 * recency_general) + (0.4 * recency_weekday)) * 100, 1)
 
 
+def clamp(value, min_value, max_value):
+    return min(max_value, max(min_value, value))
+
+
+def compute_cadence_score(row):
+    gap_ratio = float(row.get('order_gap_ratio', np.nan))
+    days_since_last_order = float(row.get('days_since_last_order', np.nan))
+    avg_gap = float(row.get('avg_days_between_orders_5', np.nan))
+
+    if not np.isfinite(gap_ratio) or gap_ratio <= 0 or not np.isfinite(avg_gap) or avg_gap <= 0:
+        return 40.0
+
+    score = 100.0 - (abs(np.log(max(gap_ratio, 0.05))) * 60.0)
+    if gap_ratio < 0.45:
+        score *= 0.55
+    elif gap_ratio > 2.5:
+        score *= 0.85
+
+    if np.isfinite(days_since_last_order) and days_since_last_order < 2:
+        score = min(score, 30.0)
+
+    return round(clamp(score, 10.0, 100.0), 1)
+
+
+def compute_basket_fit_score(row):
+    pred_ca_if_buy = max(1.0, float(row.get('Pred_ca_if_buy', 0) or 0))
+    hist_avg_order = float(row.get('avg_ca_per_order_90d', np.nan))
+    orders_90d = float(row.get('orders_last_90d', 0) or 0)
+
+    if not np.isfinite(hist_avg_order) or hist_avg_order <= 1 or orders_90d < 3:
+        return 55.0
+
+    ratio = pred_ca_if_buy / max(1.0, hist_avg_order)
+    score = 100.0 - (abs(np.log(max(ratio, 0.05))) * 55.0)
+    return round(clamp(score, 20.0, 100.0), 1)
+
+
+def compute_priority_score(row, max_vn):
+    value_norm = np.sqrt(clamp(float(row.get('Vn_predit', 0) or 0) / max(max_vn, 1.0), 0.0, 1.0))
+    final_prob = clamp(float(row.get('Prob_achat', 0) or 0) / 100.0, 0.0, 1.0)
+    model_prob = clamp(float(row.get('Prob_modele', 0) or 0) / 100.0, 0.0, 1.0)
+    habit = clamp(float(row.get('Habit_score', 0) or 0) / 100.0, 0.0, 1.0)
+    recency = clamp(float(row.get('Recency_score', 0) or 0) / 100.0, 0.0, 1.0)
+    cadence = compute_cadence_score(row) / 100.0
+    basket_fit = compute_basket_fit_score(row) / 100.0
+
+    buy_signal = (
+        (0.45 * final_prob) +
+        (0.20 * model_prob) +
+        (0.15 * habit) +
+        (0.10 * recency) +
+        (0.10 * cadence)
+    )
+    score_norm = (
+        (0.50 * buy_signal) +
+        (0.25 * value_norm) +
+        (0.15 * basket_fit) +
+        (0.10 * cadence)
+    )
+    return round(clamp(score_norm * 100.0, 0.0, 100.0), 1)
+
+
+def load_prediction_history():
+    history_path = BASE_DIR / 'dataset_features_clients_jour.csv'
+    if not history_path.exists():
+        raise RuntimeError(
+            "Historique complet introuvable: dataset_features_clients_jour.csv. "
+            "Lancez train_auto.py pour regenerer les artefacts IA."
+        )
+
+    history = pd.read_csv(history_path, low_memory=False)
+    if 'date_doc' not in history.columns:
+        raise RuntimeError("dataset_features_clients_jour.csv ne contient pas la colonne date_doc.")
+
+    history['history_date'] = pd.to_datetime(history['date_doc'], errors='coerce').dt.normalize()
+    history = history.dropna(subset=['history_date']).copy()
+    history['client_code'] = history['client_code'].astype(str).str.strip()
+    history['region'] = history['region'].fillna('Inconnu').astype(str).str.strip()
+    history['delegation'] = history['delegation'].fillna('Inconnue').astype(str).str.strip() if 'delegation' in history.columns else 'Inconnue'
+    history['routing_code'] = history['routing_code'].fillna('Inconnue').astype(str).str.strip() if 'routing_code' in history.columns else 'Inconnue'
+    history['home_commercial'] = history['home_commercial'].fillna('Inconnu').astype(str).str.strip() if 'home_commercial' in history.columns else 'Inconnu'
+    if 'potentiel' in history.columns:
+        history['potentiel'] = pd.to_numeric(history['potentiel'], errors='coerce').fillna(0)
+    else:
+        history['potentiel'] = 0
+
+    for col in FEATURE_COLUMNS_BASE:
+        if col == 'jour_semaine' and col not in history.columns:
+            history[col] = ((history['history_date'].dt.weekday + 1) % 7).astype(int)
+        elif col in history.columns:
+            history[col] = pd.to_numeric(history[col], errors='coerce').fillna(0)
+        else:
+            history[col] = 0
+
+    history['jour_semaine'] = pd.to_numeric(history['jour_semaine'], errors='coerce').fillna(0).astype(int)
+    history = history.sort_values(['history_date', 'client_code', 'jour_semaine']).reset_index(drop=True)
+    return history
+
+
+def build_daily_demand_history(history):
+    if history.empty:
+        return pd.DataFrame(columns=['date_doc', 'jour_semaine', 'total_ca', 'total_qte', 'buyers', 'active_clients'])
+
+    working = history.copy()
+    source_date_col = 'date_doc' if 'date_doc' in working.columns else 'history_date'
+    working['date_doc'] = pd.to_datetime(working[source_date_col], errors='coerce').dt.normalize()
+    working = working.dropna(subset=['date_doc']).copy()
+    working['client_code'] = working['client_code'].astype(str).str.strip()
+    working['ca_jour'] = pd.to_numeric(working.get('ca_jour', 0), errors='coerce').fillna(0)
+    working['qte_jour'] = pd.to_numeric(working.get('qte_jour', 0), errors='coerce').fillna(0)
+    if 'achat_target' in working.columns:
+        working['achat_target'] = pd.to_numeric(working['achat_target'], errors='coerce').fillna(0).astype(int)
+    else:
+        working['achat_target'] = (working['ca_jour'] > 0).astype(int)
+
+    daily = (
+        working.groupby('date_doc', as_index=False)
+        .agg(
+            total_ca=('ca_jour', 'sum'),
+            total_qte=('qte_jour', 'sum'),
+            buyers=('achat_target', 'sum'),
+            active_clients=('client_code', 'nunique')
+        )
+    )
+    daily['jour_semaine'] = ((daily['date_doc'].dt.weekday + 1) % 7).astype(int)
+    for col in ['total_ca', 'total_qte', 'buyers', 'active_clients']:
+        daily[col] = pd.to_numeric(daily[col], errors='coerce').fillna(0)
+    return daily.sort_values('date_doc').reset_index(drop=True)
+
+
+def load_daily_demand_history(history):
+    history_path = BASE_DIR / 'daily_demand_history.csv'
+    if history_path.exists():
+        daily = pd.read_csv(history_path, low_memory=False)
+        if 'date_doc' not in daily.columns:
+            raise RuntimeError("daily_demand_history.csv ne contient pas la colonne date_doc.")
+        daily['date_doc'] = pd.to_datetime(daily['date_doc'], errors='coerce').dt.normalize()
+        daily = daily.dropna(subset=['date_doc']).copy()
+        if 'jour_semaine' not in daily.columns:
+            daily['jour_semaine'] = ((daily['date_doc'].dt.weekday + 1) % 7).astype(int)
+        for col in ['total_ca', 'total_qte', 'buyers', 'active_clients']:
+            if col not in daily.columns:
+                daily[col] = 0
+            daily[col] = pd.to_numeric(daily[col], errors='coerce').fillna(0)
+        daily['jour_semaine'] = pd.to_numeric(daily['jour_semaine'], errors='coerce').fillna(0).astype(int)
+        return daily.sort_values('date_doc').reset_index(drop=True)
+    return build_daily_demand_history(history)
+
+
+def estimate_daily_budget(target_date):
+    budget_meta = {
+        'budget_reason': 'daily_history_not_loaded',
+        'budget_target_date': pd.Timestamp(target_date).normalize().date().isoformat()
+    }
+
+    if df_daily_demand.empty:
+        return budget_meta
+
+    target_ts = pd.Timestamp(target_date).normalize()
+    current_day_cap = pd.Timestamp(datetime.now().date())
+    available_max_date = pd.Timestamp(df_daily_demand['date_doc'].max()).normalize()
+    trusted_max_date = min(current_day_cap, available_max_date)
+
+    history = df_daily_demand[
+        (df_daily_demand['date_doc'] < target_ts) &
+        (df_daily_demand['date_doc'] <= trusted_max_date)
+    ].copy()
+
+    budget_meta.update({
+        'budget_current_day_cap': current_day_cap.date().isoformat(),
+        'budget_available_max_date': available_max_date.date().isoformat(),
+        'budget_trusted_max_date': trusted_max_date.date().isoformat(),
+        'budget_history_rows': int(len(history))
+    })
+
+    if history.empty:
+        budget_meta['budget_reason'] = 'no_daily_history_before_target'
+        return budget_meta
+
+    jour_semaine = int((target_ts.weekday() + 1) % 7)
+    same_weekday = history[history['jour_semaine'] == jour_semaine].tail(12).copy()
+    recent_all = history.tail(56).copy()
+    weekday_reference = same_weekday if not same_weekday.empty else recent_all
+
+    def robust_anchor(series):
+        values = pd.to_numeric(series, errors='coerce').dropna()
+        if values.empty:
+            return 0.0
+        return float((0.65 * values.median()) + (0.35 * values.quantile(0.75)))
+
+    buyers_anchor = (0.75 * robust_anchor(weekday_reference['buyers'])) + (0.25 * robust_anchor(recent_all['buyers']))
+    ca_anchor = (0.75 * robust_anchor(weekday_reference['total_ca'])) + (0.25 * robust_anchor(recent_all['total_ca']))
+    qte_anchor = (0.75 * robust_anchor(weekday_reference['total_qte'])) + (0.25 * robust_anchor(recent_all['total_qte']))
+
+    budget_meta.update({
+        'budget_reason': 'ok',
+        'budget_same_weekday_rows': int(len(same_weekday)),
+        'budget_recent_rows': int(len(recent_all)),
+        'expected_buyers_estimate': max(1.0, round(float(buyers_anchor), 1)),
+        'expected_total_ca': max(0.0, round(float(ca_anchor), 2)),
+        'expected_total_qte': max(0.0, round(float(qte_anchor), 2))
+    })
+    return budget_meta
+
+
+def apply_daily_budget_controls(predictions, budget_meta):
+    if predictions.empty:
+        budget_meta['probability_scale'] = 1.0
+        budget_meta['volume_scale'] = 1.0
+        return predictions, budget_meta
+
+    adjusted = predictions.copy()
+    raw_expected_buyers = float(adjusted['Prob_achat'].clip(0, 100).sum() / 100.0)
+    prob_scale = 1.0
+
+    expected_buyers = float(budget_meta.get('expected_buyers_estimate', 0) or 0)
+    if expected_buyers > 0:
+        buyer_cap = max(1.0, expected_buyers * 1.15)
+        if raw_expected_buyers > buyer_cap:
+            prob_scale = buyer_cap / max(raw_expected_buyers, 1e-9)
+            adjusted['Prob_achat'] = np.round(np.clip(adjusted['Prob_achat'] * prob_scale, 0, 85), 1)
+
+    adjusted['Vn_predit'] = adjusted['Pred_ca_if_buy'] * (adjusted['Prob_achat'] / 100.0)
+    adjusted['Qte_predite'] = adjusted.apply(
+        lambda row: blend_expected_quantity(
+            row['Prob_achat'] / 100.0,
+            row['Pred_ca_if_buy'],
+            row['Pred_qte_if_buy'],
+            row['Prix_pred'],
+            row.get('avg_price_hist', np.nan)
+        ),
+        axis=1
+    )
+
+    raw_total_ca = float(adjusted['Vn_predit'].sum())
+    raw_total_qte = float(adjusted['Qte_predite'].sum())
+    expected_total_ca = float(budget_meta.get('expected_total_ca', 0) or 0)
+    expected_total_qte = float(budget_meta.get('expected_total_qte', 0) or 0)
+
+    ca_scale = (expected_total_ca * 1.10 / raw_total_ca) if expected_total_ca > 0 and raw_total_ca > (expected_total_ca * 1.10) else 1.0
+    qte_scale = (expected_total_qte * 1.10 / raw_total_qte) if expected_total_qte > 0 and raw_total_qte > (expected_total_qte * 1.10) else 1.0
+    volume_scale = min(1.0, ca_scale, qte_scale)
+
+    if volume_scale < 1.0:
+        adjusted['Vn_predit'] = adjusted['Vn_predit'] * volume_scale
+        adjusted['Qte_predite'] = adjusted['Qte_predite'] * volume_scale
+
+    budget_meta.update({
+        'probability_scale': round(float(prob_scale), 4),
+        'volume_scale': round(float(volume_scale), 4),
+        'raw_expected_buyers': round(raw_expected_buyers, 2),
+        'scaled_expected_buyers': round(float(adjusted['Prob_achat'].clip(0, 100).sum() / 100.0), 2),
+        'raw_total_ca_pred': round(raw_total_ca, 2),
+        'scaled_total_ca_pred': round(float(adjusted['Vn_predit'].sum()), 2),
+        'raw_total_qte_pred': round(raw_total_qte, 2),
+        'scaled_total_qte_pred': round(float(adjusted['Qte_predite'].sum()), 2)
+    })
+    return adjusted, budget_meta
+
+
+def select_prediction_candidates(target_date, jour_semaine):
+    history_meta = {
+        "history_source": prediction_history_source or 'dataset_features_clients_jour.csv',
+        "history_target_date": pd.Timestamp(target_date).normalize().date().isoformat()
+    }
+
+    if df_master.empty:
+        history_meta["history_reason"] = "history_not_loaded"
+        return pd.DataFrame(), history_meta
+
+    target_ts = pd.Timestamp(target_date).normalize()
+    current_day_cap = pd.Timestamp(datetime.now().date())
+    available_max_date = pd.Timestamp(df_master['history_date'].max()).normalize()
+    trusted_max_date = min(current_day_cap, available_max_date)
+    history_cutoff = min(target_ts, trusted_max_date)
+
+    eligible_history = df_master[
+        (df_master['jour_semaine'] == int(jour_semaine)) &
+        (df_master['history_date'] <= history_cutoff)
+    ].copy()
+
+    history_meta.update({
+        "history_current_day_cap": current_day_cap.date().isoformat(),
+        "history_available_max_date": available_max_date.date().isoformat(),
+        "history_trusted_max_date": trusted_max_date.date().isoformat(),
+        "history_cutoff_date": history_cutoff.date().isoformat(),
+        "history_rows_scanned": int(len(eligible_history))
+    })
+
+    if eligible_history.empty:
+        history_meta["history_reason"] = "no_history_before_cutoff"
+        return eligible_history, history_meta
+
+    candidates = (
+        eligible_history
+        .sort_values(['client_code', 'history_date'])
+        .groupby('client_code', as_index=False)
+        .tail(1)
+        .copy()
+    )
+
+    history_meta.update({
+        "history_reason": "ok",
+        "history_candidate_min_date": candidates['history_date'].min().date().isoformat(),
+        "history_candidate_max_date": candidates['history_date'].max().date().isoformat(),
+        "history_candidates_count": int(len(candidates))
+    })
+    return candidates, history_meta
+
+
 def load_artifacts():
     global model_achat, model_ca, model_qte, model_price
     global model_affectation, feature_columns, assignment_feature_columns, assignment_classes
-    global df_master, df_prefs
+    global df_master, prediction_history_source, df_daily_demand, df_prefs
 
     print("Chargement des modeles XGBoost et des donnees...")
     try:
@@ -522,21 +874,11 @@ def load_artifacts():
         model_qte = joblib.load('modele_nomadis_qte.pkl')
         model_price = joblib.load('modele_nomadis_price.pkl')
         feature_columns = joblib.load('colonnes_ia.pkl')
-        df_master = pd.read_csv('master_dataset_v3.csv')
-        df_master['client_code'] = df_master['client_code'].astype(str).str.strip()
-        df_master['region'] = df_master['region'].fillna('Inconnu').astype(str).str.strip()
-        df_master['delegation'] = df_master['delegation'].fillna('Inconnue').astype(str).str.strip() if 'delegation' in df_master.columns else 'Inconnue'
-        df_master['routing_code'] = df_master['routing_code'].fillna('Inconnue').astype(str).str.strip() if 'routing_code' in df_master.columns else 'Inconnue'
-        df_master['home_commercial'] = df_master['home_commercial'].fillna('Inconnu').astype(str).str.strip() if 'home_commercial' in df_master.columns else 'Inconnu'
-        df_master['potentiel'] = pd.to_numeric(df_master['potentiel'], errors='coerce').fillna(0)
-        for col in FEATURE_COLUMNS_BASE:
-            if col in df_master.columns:
-                df_master[col] = pd.to_numeric(df_master[col], errors='coerce').fillna(0)
+        df_master = load_prediction_history()
+        prediction_history_source = 'dataset_features_clients_jour.csv'
+        df_daily_demand = load_daily_demand_history(df_master)
 
-        try:
-            df_prefs = pd.read_csv('preferences_clients_produits.csv')
-        except Exception:
-            df_prefs = pd.read_csv('preferences_clients.csv')
+        df_prefs = pd.read_csv('preferences_clients_produits.csv')
 
         if 'client_code' in df_prefs.columns:
             df_prefs['client_code'] = df_prefs['client_code'].astype(str).str.strip()
@@ -554,7 +896,14 @@ def load_artifacts():
             assignment_classes = []
             print(f"Modele d'affectation non charge : {assign_error}")
 
-        print("IA prete avec les modeles XGBoost Achat + CA + Quantite.")
+        history_min = df_master['history_date'].min().date().isoformat() if not df_master.empty else 'n/a'
+        history_max = df_master['history_date'].max().date().isoformat() if not df_master.empty else 'n/a'
+        daily_rows = len(df_daily_demand)
+        print(
+            "IA prete avec les modeles XGBoost Achat + CA + Quantite. "
+            f"Historique de prediction: {prediction_history_source} ({history_min} -> {history_max}). "
+            f"Historique journalier: {daily_rows} jours."
+        )
         return True, "Modeles IA recharges avec succes."
     except Exception as e:
         print(f"Erreur de chargement : {e}")
@@ -580,7 +929,10 @@ def predict_tournee():
         if model_achat is None or model_ca is None or model_qte is None or model_price is None or not feature_columns or df_master.empty:
             return finalize_prediction_response(data, {
                 "status": "error",
-                "message": "Modeles IA non charges. Lancez train_auto.py pour regenerer les artefacts XGBoost."
+                "message": (
+                    "Modeles IA ou historique complet non charges. "
+                    "Lancez train_auto.py pour regenerer les artefacts XGBoost."
+                )
             }, 503)
 
         date_str = data.get('date', '2026-03-15')
@@ -619,8 +971,13 @@ def predict_tournee():
 
         print(f"Prediction demandee pour le jour : {jour_semaine} (Date: {date_str})")
 
-        clients_du_jour = df_master[df_master['jour_semaine'] == jour_semaine].copy()
-        clients_du_jour = clients_du_jour.drop_duplicates(subset=['client_code'])
+        clients_du_jour, history_meta = select_prediction_candidates(target_date, jour_semaine)
+        print(
+            "Historique prediction retenu "
+            f"(source={history_meta.get('history_source')}, cutoff={history_meta.get('history_cutoff_date')}, "
+            f"candidats={history_meta.get('history_candidates_count', 0)})."
+        )
+
         clients_du_jour['day_of_month'] = day_of_month
         clients_du_jour['week_of_month'] = week_of_month
         clients_du_jour['days_to_month_end'] = days_to_month_end
@@ -629,7 +986,11 @@ def predict_tournee():
         clients_du_jour['month'] = month
 
         if clients_du_jour.empty:
-            return finalize_prediction_response(data, {"status": "error", "message": "Pas d'historique pour ce jour."})
+            cutoff_date = history_meta.get('history_cutoff_date', date_str)
+            return finalize_prediction_response(data, {
+                "status": "error",
+                "message": f"Pas d'historique exploitable avant le {cutoff_date} pour ce jour."
+            })
 
         X_pred = build_features(clients_du_jour)
         achat_prob = np.clip(model_achat.predict_proba(X_pred)[:, 1], 0, 1)
@@ -669,6 +1030,8 @@ def predict_tournee():
             ),
             axis=1
         )
+        budget_meta = estimate_daily_budget(target_date)
+        clients_du_jour, budget_meta = apply_daily_budget_controls(clients_du_jour, budget_meta)
 
         max_vn = clients_du_jour['Vn_predit'].max()
 
@@ -693,18 +1056,23 @@ def predict_tournee():
             return round(min(100, base + bonus), 1)
 
         clients_du_jour['Confidence'] = clients_du_jour.apply(build_confidence, axis=1)
-        clients_du_jour['VIP'] = clients_du_jour.apply(
-            lambda row: int((row['Vn_predit'] / max_vn) * 100) if max_vn > 0 else 0,
+        clients_du_jour['Cadence_score'] = clients_du_jour.apply(compute_cadence_score, axis=1)
+        clients_du_jour['Basket_fit_score'] = clients_du_jour.apply(compute_basket_fit_score, axis=1)
+        clients_du_jour['Score'] = clients_du_jour.apply(
+            lambda row: compute_priority_score(row, max_vn),
             axis=1
         )
-        clients_du_jour['Score'] = clients_du_jour.apply(
-            lambda row: (row['Vn_predit'] / max_vn) * 100 if max_vn > 0 else 0,
+        clients_du_jour['VIP'] = clients_du_jour.apply(
+            lambda row: int(round(clamp((0.65 * float(row['Score'])) + (0.35 * ((float(row['Vn_predit']) / max(max_vn, 1.0)) * 100.0)), 0.0, 100.0))),
             axis=1
         )
 
         # Keep only clients with a credible buy signal for the requested date.
         base_filter = (
-            (clients_du_jour['Prob_achat'] >= min_prob_achat) &
+            (
+                (clients_du_jour['Prob_achat'] >= min_prob_achat) |
+                (clients_du_jour['Score'] >= max(28.0, min_prob_achat * 1.15))
+            ) &
             (
                 (clients_du_jour['Vn_predit'] >= min_vn_predit) |
                 (clients_du_jour['Pred_ca_if_buy'] >= min_ca_if_buy)
@@ -716,12 +1084,15 @@ def predict_tournee():
             filtered_clients = clients_du_jour.copy()
 
         expected_buyers = int(np.ceil((clients_du_jour['Prob_achat'].clip(0, 100) / 100.0).sum()))
+        budget_expected_buyers = int(np.ceil(float(budget_meta.get('expected_buyers_estimate', 0) or 0)))
+        if budget_expected_buyers > 0:
+            expected_buyers = min(expected_buyers, max(1, int(np.ceil(budget_expected_buyers * 1.15))))
         dynamic_limit = int(np.clip(np.ceil(expected_buyers * selection_multiplier), min_clients_floor, max_clients_cap))
         selected_limit = max_clients_req if max_clients_req > 0 else dynamic_limit
         selected_limit = int(np.clip(selected_limit, 1, max_clients_cap))
 
         filtered_clients = filtered_clients.sort_values(
-            ['Prob_achat', 'Vn_predit', 'Score', 'Habit_score', 'Recency_score'],
+            ['Score', 'Prob_achat', 'Prob_modele', 'Vn_predit', 'Cadence_score', 'Basket_fit_score', 'Habit_score', 'Recency_score'],
             ascending=False
         ).head(selected_limit)
 
@@ -799,8 +1170,11 @@ def predict_tournee():
                 "details": details_qte,
                 "prix_moyen": round(prix_moyen, 2),
                 "prob_achat": round(float(row['Prob_achat']), 1),
+                "prob_modele": round(float(row['Prob_modele']), 1),
                 "habit_score": round(float(row['Habit_score']), 1),
                 "recency_score": round(float(row['Recency_score']), 1),
+                "cadence_score": round(float(row['Cadence_score']), 1),
+                "basket_fit_score": round(float(row['Basket_fit_score']), 1),
                 "commercial_scores": commercial_scores,
                 "best_commercial": best_commercial
             }
@@ -816,12 +1190,521 @@ def predict_tournee():
                 "min_prob_achat": float(min_prob_achat),
                 "min_vn_predit": float(min_vn_predit),
                 "min_ca_if_buy": float(min_ca_if_buy),
-                "selection_limit": int(selected_limit)
+                "selection_limit": int(selected_limit),
+                "history_source": history_meta.get('history_source'),
+                "history_cutoff_date": history_meta.get('history_cutoff_date'),
+                "history_target_date": history_meta.get('history_target_date'),
+                "history_current_day_cap": history_meta.get('history_current_day_cap'),
+                "history_available_max_date": history_meta.get('history_available_max_date'),
+                "history_trusted_max_date": history_meta.get('history_trusted_max_date'),
+                "history_rows_scanned": int(history_meta.get('history_rows_scanned', 0)),
+                "history_candidate_min_date": history_meta.get('history_candidate_min_date'),
+                "history_candidate_max_date": history_meta.get('history_candidate_max_date'),
+                "budget_reason": budget_meta.get('budget_reason'),
+                "budget_history_rows": int(budget_meta.get('budget_history_rows', 0)),
+                "budget_same_weekday_rows": int(budget_meta.get('budget_same_weekday_rows', 0)),
+                "budget_recent_rows": int(budget_meta.get('budget_recent_rows', 0)),
+                "budget_current_day_cap": budget_meta.get('budget_current_day_cap'),
+                "budget_available_max_date": budget_meta.get('budget_available_max_date'),
+                "budget_trusted_max_date": budget_meta.get('budget_trusted_max_date'),
+                "expected_total_ca": float(budget_meta.get('expected_total_ca', 0) or 0),
+                "expected_total_qte": float(budget_meta.get('expected_total_qte', 0) or 0),
+                "probability_scale": float(budget_meta.get('probability_scale', 1.0) or 1.0),
+                "volume_scale": float(budget_meta.get('volume_scale', 1.0) or 1.0),
+                "raw_expected_buyers": float(budget_meta.get('raw_expected_buyers', 0) or 0),
+                "scaled_expected_buyers": float(budget_meta.get('scaled_expected_buyers', 0) or 0),
+                "raw_total_ca_pred": float(budget_meta.get('raw_total_ca_pred', 0) or 0),
+                "scaled_total_ca_pred": float(budget_meta.get('scaled_total_ca_pred', 0) or 0),
+                "raw_total_qte_pred": float(budget_meta.get('raw_total_qte_pred', 0) or 0),
+                "scaled_total_qte_pred": float(budget_meta.get('scaled_total_qte_pred', 0) or 0)
             }
         })
 
     except Exception as e:
         return finalize_prediction_response(data, {"status": "error", "message": str(e)}, 500)
+
+
+def _safe_int(value, default=0):
+    try:
+        parsed = int(float(value))
+        return parsed
+    except Exception:
+        return default
+
+
+def _safe_float(value, default=0.0):
+    try:
+        parsed = float(value)
+        return parsed if np.isfinite(parsed) else default
+    except Exception:
+        return default
+
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    try:
+        lat1 = float(lat1)
+        lon1 = float(lon1)
+        lat2 = float(lat2)
+        lon2 = float(lon2)
+    except Exception:
+        return None
+
+    radius = 6371.0
+    d_lat = math.radians(lat2 - lat1)
+    d_lon = math.radians(lon2 - lon1)
+    a = (
+        math.sin(d_lat / 2) ** 2 +
+        math.cos(math.radians(lat1)) *
+        math.cos(math.radians(lat2)) *
+        math.sin(d_lon / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return radius * c
+
+
+def _normalize_slot_entry(slot, default_requested_max=30, default_hard_max=60):
+    slot_id = str(slot.get('id') or '').strip()
+    if not slot_id:
+        return None
+
+    requested_max = max(1, _safe_int(slot.get('requested_max_clients'), default_requested_max))
+    explicit_hard_max = max(
+        0,
+        _safe_int(slot.get('hard_max_clients'), 0),
+        _safe_int(slot.get('max_clients'), 0)
+    )
+    hard_max = explicit_hard_max if explicit_hard_max > 0 else max(requested_max, default_hard_max)
+
+    return {
+        "id": slot_id,
+        "date": str(slot.get('date') or '').strip(),
+        "day_label": str(slot.get('day_label') or '').strip(),
+        "commercial_code": str(slot.get('commercial_code') or slot.get('proposed_commercial') or '').strip(),
+        "commercial_label": str(slot.get('commercial_label') or slot.get('proposed_commercial_label') or '').strip(),
+        "requested_max_clients": requested_max,
+        "hard_max_clients": hard_max,
+        "truck_capacity_units": max(0, int(math.ceil(_safe_float(slot.get('max_truck_units'), 0.0)))),
+        "load_units_per_client": max(1, int(math.ceil(_safe_float(slot.get('load_units_per_client'), 1.0)))),
+        "latitude": _safe_float(slot.get('latitude'), None),
+        "longitude": _safe_float(slot.get('longitude'), None)
+    }
+
+
+def _normalize_client_entry(client):
+    client_key = str(
+        client.get('canonical_client_key') or
+        client.get('client_code') or
+        client.get('nbr_client') or
+        ''
+    ).strip()
+    if not client_key:
+        return None
+
+    candidate_slots = []
+    for raw_candidate in (client.get('candidate_slots') or []):
+        slot_id = str(raw_candidate.get('slot_id') or '').strip()
+        if not slot_id:
+            continue
+        candidate_slots.append({
+            "slot_id": slot_id,
+            "assignment_prob": _safe_float(raw_candidate.get('assignment_prob'), 0.0),
+            "predicted_ca": _safe_float(raw_candidate.get('predicted_ca'), _safe_float(client.get('predicted_ca'), 0.0)),
+            "utility_score": _safe_float(raw_candidate.get('utility_score'), 0.0)
+        })
+
+    return {
+        "client_key": client_key,
+        "client_code": str(client.get('client_code') or client.get('nbr_client') or client_key).strip(),
+        "nom": str(client.get('nom') or '').strip(),
+        "latitude": _safe_float(client.get('latitude'), None),
+        "longitude": _safe_float(client.get('longitude'), None),
+        "predicted_ca": max(0.0, _safe_float(client.get('predicted_ca'), 0.0)),
+        "distance_km": max(0.0, _safe_float(client.get('distance_km'), 0.0)),
+        "is_critical_coverage": bool(client.get('is_critical_coverage')),
+        "days_since_last_visit": max(0, _safe_int(client.get('days_since_last_visit'), 0)),
+        "planned_load_units_per_client": max(1, _safe_int(
+            client.get('planned_load_units_per_client') or
+            client.get('ia_qte_reco') or
+            client.get('qte_reco'),
+            1
+        )),
+        "historical_load_units_per_client": max(1, _safe_int(client.get('historical_load_units_per_client'), 1)),
+        "preferred_commercial": str(client.get('preferred_commercial') or client.get('recommended_commercial') or '').strip(),
+        "candidate_slots": sorted(
+            candidate_slots,
+            key=lambda item: (
+                item["utility_score"],
+                item["predicted_ca"],
+                item["assignment_prob"]
+            ),
+            reverse=True
+        )
+    }
+
+
+def _nearest_neighbor_client_keys(clients, depot_origin=None):
+    if not clients:
+        return []
+
+    depot_lat = _safe_float((depot_origin or {}).get('latitude'), None)
+    depot_lon = _safe_float((depot_origin or {}).get('longitude'), None)
+    current_lat = depot_lat
+    current_lon = depot_lon
+    remaining = clients[:]
+    ordered = []
+
+    while remaining:
+        if current_lat is None or current_lon is None:
+            remaining.sort(
+                key=lambda item: (
+                    0 if item.get('latitude') is not None and item.get('longitude') is not None else 1,
+                    -float(item.get('is_critical_coverage') or 0),
+                    -_safe_float(item.get('predicted_ca'), 0.0),
+                    -_safe_float(item.get('utility_score'), 0.0)
+                )
+            )
+            next_client = remaining.pop(0)
+        else:
+            scored = []
+            for item in remaining:
+                if item.get('latitude') is None or item.get('longitude') is None:
+                    distance = float('inf')
+                else:
+                    distance = _haversine_km(current_lat, current_lon, item.get('latitude'), item.get('longitude'))
+                    if distance is None:
+                        distance = float('inf')
+                scored.append((distance, item))
+
+            scored.sort(key=lambda pair: (pair[0], -_safe_float(pair[1].get('predicted_ca'), 0.0)))
+            next_client = scored[0][1]
+            remaining.remove(next_client)
+
+        ordered.append(next_client["client_key"])
+        current_lat = next_client.get('latitude', current_lat)
+        current_lon = next_client.get('longitude', current_lon)
+
+    return ordered
+
+
+@app.route('/api/optimize-coverage', methods=['POST'])
+def optimize_coverage_plan():
+    data = request.json or {}
+
+    try:
+        try:
+            from ortools.sat.python import cp_model
+        except Exception as import_error:
+            return jsonify({
+                "status": "error",
+                "message": f"OR-Tools indisponible: {import_error}. Installez `ortools` dans l'environnement Python de api_ia.py."
+            }), 503
+
+        min_visits = max(1, _safe_int(data.get('min_visits'), 20))
+        max_visits = max(min_visits, _safe_int(data.get('max_visits'), 30))
+        min_total_ca = max(0.0, _safe_float(data.get('min_total_ca'), 0.0))
+        max_solver_seconds = max(5.0, min(90.0, _safe_float(data.get('max_solver_seconds'), 20.0)))
+        max_candidate_slots = max(4, min(36, _safe_int(data.get('max_candidate_slots_per_client'), 24)))
+        depot_origin = data.get('depot_origin') if isinstance(data.get('depot_origin'), dict) else {}
+
+        raw_slots = data.get('slots') if isinstance(data.get('slots'), list) else []
+        raw_clients = data.get('clients') if isinstance(data.get('clients'), list) else []
+        total_clients = len(raw_clients)
+        total_slots = len(raw_slots)
+        average_needed = max(1, int(math.ceil(total_clients / max(total_slots, 1)))) if total_clients > 0 else 1
+        default_hard_max = max(max_visits, average_needed + 6, 30)
+
+        slots = []
+        slot_id_to_index = {}
+        for raw_slot in raw_slots:
+            normalized = _normalize_slot_entry(raw_slot, max_visits, default_hard_max)
+            if not normalized:
+                continue
+            slot_id_to_index[normalized["id"]] = len(slots)
+            slots.append(normalized)
+
+        clients = []
+        for raw_client in raw_clients:
+            normalized = _normalize_client_entry(raw_client)
+            if not normalized:
+                continue
+            if not normalized["candidate_slots"]:
+                continue
+            normalized["candidate_slots"] = normalized["candidate_slots"][:max_candidate_slots]
+            clients.append(normalized)
+
+        if not slots:
+            return jsonify({
+                "status": "error",
+                "message": "Aucun slot exploitable n'a ete fourni au solveur OR-Tools."
+            }), 400
+
+        if not clients:
+            return jsonify({
+                "status": "success",
+                "solution": {
+                    "solver_status": "EMPTY",
+                    "assigned_clients": 0,
+                    "unassigned_clients": 0,
+                    "critical_assigned": 0,
+                    "critical_unassigned": 0,
+                    "slot_assignments": [],
+                    "assigned_client_keys": [],
+                    "unassigned_client_keys": [],
+                    "total_predicted_ca": 0.0,
+                    "total_planned_units": 0.0,
+                    "total_capacity_clients": sum(slot["hard_max_clients"] for slot in slots),
+                    "total_capacity_units": sum(slot["truck_capacity_units"] for slot in slots),
+                    "notes": ["Aucun client candidat a optimiser."]
+                }
+            }), 200
+
+        model = cp_model.CpModel()
+        x_vars = {}
+        client_candidate_map = {}
+
+        for client_index, client in enumerate(clients):
+            normalized_candidates = []
+            for candidate in client["candidate_slots"]:
+                slot_index = slot_id_to_index.get(candidate["slot_id"])
+                if slot_index is None:
+                    continue
+
+                slot = slots[slot_index]
+                units = max(
+                    1,
+                    int(
+                        math.ceil(
+                            _safe_float(client.get("planned_load_units_per_client"), 0.0) or
+                            _safe_float(client.get("historical_load_units_per_client"), 0.0) or
+                            _safe_float(slot.get("load_units_per_client"), 1.0) or
+                            1.0
+                        )
+                    )
+                )
+                normalized_candidates.append({
+                    "slot_index": slot_index,
+                    "slot_id": slot["id"],
+                    "predicted_ca": max(0, int(round(_safe_float(candidate.get("predicted_ca"), client["predicted_ca"]) * 10))),
+                    "utility_score": int(round(_safe_float(candidate.get("utility_score"), 0.0) * 10)),
+                    "distance_penalty": int(round(max(0.0, client["distance_km"]) * 10)),
+                    "units": units
+                })
+
+            if not normalized_candidates:
+                continue
+
+            client_candidate_map[client_index] = normalized_candidates
+            for candidate in normalized_candidates:
+                slot_index = candidate["slot_index"]
+                x_vars[(client_index, slot_index)] = model.NewBoolVar(f"x_{client_index}_{slot_index}")
+
+        active_client_indexes = sorted(client_candidate_map.keys())
+        if not active_client_indexes:
+            return jsonify({
+                "status": "error",
+                "message": "Aucun client n'a de slot candidat exploitable pour OR-Tools."
+            }), 400
+
+        count_vars = {}
+        used_vars = {}
+        over_max_vars = {}
+        under_min_vars = {}
+        ca_shortfall_vars = {}
+
+        for client_index in active_client_indexes:
+            vars_for_client = [
+                x_vars[(client_index, candidate["slot_index"])]
+                for candidate in client_candidate_map[client_index]
+            ]
+            model.Add(sum(vars_for_client) <= 1)
+
+        for slot_index, slot in enumerate(slots):
+            slot_assignment_vars = []
+            slot_units_terms = []
+            slot_ca_terms = []
+
+            for client_index in active_client_indexes:
+                for candidate in client_candidate_map[client_index]:
+                    if candidate["slot_index"] != slot_index:
+                        continue
+                    variable = x_vars[(client_index, slot_index)]
+                    slot_assignment_vars.append(variable)
+                    slot_units_terms.append(candidate["units"] * variable)
+                    slot_ca_terms.append(candidate["predicted_ca"] * variable)
+
+            count_var = model.NewIntVar(0, max(1, len(active_client_indexes)), f"count_{slot_index}")
+            model.Add(count_var == sum(slot_assignment_vars))
+            model.Add(count_var <= max(1, slot["hard_max_clients"]))
+            count_vars[slot_index] = count_var
+
+            used_var = model.NewBoolVar(f"used_{slot_index}")
+            model.Add(count_var >= 1).OnlyEnforceIf(used_var)
+            model.Add(count_var == 0).OnlyEnforceIf(used_var.Not())
+            used_vars[slot_index] = used_var
+
+            if slot["truck_capacity_units"] > 0:
+                model.Add(sum(slot_units_terms) <= slot["truck_capacity_units"])
+
+            over_max = model.NewIntVar(0, max(1, slot["hard_max_clients"]), f"over_max_{slot_index}")
+            model.Add(over_max >= count_var - max(1, slot["requested_max_clients"]))
+            over_max_vars[slot_index] = over_max
+
+            under_min = model.NewIntVar(0, max(1, min_visits), f"under_min_{slot_index}")
+            model.Add(under_min >= (min_visits * used_var) - count_var)
+            under_min_vars[slot_index] = under_min
+
+            if min_total_ca > 0:
+                shortfall_cap = max(0, int(round(min_total_ca * 10)))
+                shortfall = model.NewIntVar(0, shortfall_cap, f"ca_shortfall_{slot_index}")
+                model.Add(sum(slot_ca_terms) + shortfall >= shortfall_cap * used_var)
+                ca_shortfall_vars[slot_index] = shortfall
+
+        objective_terms = []
+        for client_index in active_client_indexes:
+            client = clients[client_index]
+            critical_weight = 1_000_000 if client["is_critical_coverage"] else 200_000
+            for candidate in client_candidate_map[client_index]:
+                variable = x_vars[(client_index, candidate["slot_index"])]
+                objective_terms.append(critical_weight * variable)
+                objective_terms.append(candidate["predicted_ca"] * 20 * variable)
+                objective_terms.append(candidate["utility_score"] * 5 * variable)
+                objective_terms.append(-candidate["distance_penalty"] * variable)
+
+        for slot_index in range(len(slots)):
+            objective_terms.append(-over_max_vars[slot_index] * 2_000)
+            objective_terms.append(-under_min_vars[slot_index] * 1_000)
+            if slot_index in ca_shortfall_vars:
+                objective_terms.append(-ca_shortfall_vars[slot_index] * 10)
+
+        model.Maximize(sum(objective_terms))
+
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = max_solver_seconds
+        solver.parameters.num_search_workers = max(1, min(8, os.cpu_count() or 1))
+        solver.parameters.log_search_progress = False
+
+        status = solver.Solve(model)
+        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return jsonify({
+                "status": "error",
+                "message": "Le solveur OR-Tools n'a trouve aucune solution exploitable."
+            }), 422
+
+        solver_status = (
+            "OPTIMAL" if status == cp_model.OPTIMAL
+            else "FEASIBLE" if status == cp_model.FEASIBLE
+            else str(status)
+        )
+
+        slot_assignments = []
+        assigned_client_keys = []
+        unassigned_client_keys = []
+        total_predicted_ca = 0.0
+        total_planned_units = 0.0
+        critical_assigned = 0
+
+        for slot_index, slot in enumerate(slots):
+            assigned_clients = []
+            total_units_slot = 0
+            total_ca_slot = 0.0
+
+            for client_index in active_client_indexes:
+                matched_candidate = None
+                for candidate in client_candidate_map[client_index]:
+                    if candidate["slot_index"] == slot_index:
+                        matched_candidate = candidate
+                        break
+                if not matched_candidate:
+                    continue
+
+                variable = x_vars[(client_index, slot_index)]
+                if solver.Value(variable) != 1:
+                    continue
+
+                client = clients[client_index]
+                assigned_clients.append({
+                    "client_key": client["client_key"],
+                    "client_code": client["client_code"],
+                    "nom": client["nom"],
+                    "latitude": client["latitude"],
+                    "longitude": client["longitude"],
+                    "predicted_ca": client["predicted_ca"],
+                    "utility_score": matched_candidate["utility_score"],
+                    "is_critical_coverage": client["is_critical_coverage"]
+                })
+                assigned_client_keys.append(client["client_key"])
+                total_units_slot += matched_candidate["units"]
+                total_ca_slot += matched_candidate["predicted_ca"] / 10.0
+                if client["is_critical_coverage"]:
+                    critical_assigned += 1
+
+            if not assigned_clients:
+                continue
+
+            ordered_client_keys = _nearest_neighbor_client_keys(assigned_clients, depot_origin)
+            slot_assignments.append({
+                "slot_id": slot["id"],
+                "client_keys": ordered_client_keys,
+                "count": len(ordered_client_keys),
+                "total_predicted_ca": round(total_ca_slot, 2),
+                "total_units": float(total_units_slot),
+                "over_requested_max": int(solver.Value(over_max_vars[slot_index])),
+                "under_requested_min": int(solver.Value(under_min_vars[slot_index])),
+                "ca_shortfall": round((solver.Value(ca_shortfall_vars[slot_index]) / 10.0), 2) if slot_index in ca_shortfall_vars else 0.0
+            })
+            total_predicted_ca += total_ca_slot
+            total_planned_units += total_units_slot
+
+        assigned_client_key_set = set(assigned_client_keys)
+        for client_index in active_client_indexes:
+            client_key = clients[client_index]["client_key"]
+            if client_key not in assigned_client_key_set:
+                unassigned_client_keys.append(client_key)
+
+        critical_candidates = sum(1 for client in clients if client["is_critical_coverage"])
+        critical_unassigned = max(0, critical_candidates - critical_assigned)
+        block_sizes = [assignment["count"] for assignment in slot_assignments if assignment["count"] > 0]
+
+        notes = []
+        if unassigned_client_keys:
+            notes.append(
+                f"{len(unassigned_client_keys)} client(s) n'ont pas pu etre affectes sans depasser les contraintes du solveur."
+            )
+        if any(item["over_requested_max"] > 0 for item in slot_assignments):
+            notes.append("Certaines tournees depassent le max demande pour conserver une meilleure couverture.")
+        if any(item["under_requested_min"] > 0 for item in slot_assignments):
+            notes.append("Certaines tournees restent sous le minimum demande pour eviter de laisser des clients sans affectation.")
+        if min_total_ca > 0 and any(item["ca_shortfall"] > 0 for item in slot_assignments):
+            notes.append("Le seuil minimum de CA journalier n'est pas atteint sur tous les blocks.")
+
+        return jsonify({
+            "status": "success",
+            "solution": {
+                "solver_status": solver_status,
+                "assigned_clients": len(assigned_client_key_set),
+                "unassigned_clients": len(unassigned_client_keys),
+                "critical_assigned": critical_assigned,
+                "critical_unassigned": critical_unassigned,
+                "slot_assignments": slot_assignments,
+                "assigned_client_keys": sorted(assigned_client_key_set),
+                "unassigned_client_keys": unassigned_client_keys,
+                "total_predicted_ca": round(total_predicted_ca, 2),
+                "total_planned_units": round(float(total_planned_units), 2),
+                "total_capacity_clients": sum(slot["hard_max_clients"] for slot in slots),
+                "total_capacity_units": sum(slot["truck_capacity_units"] for slot in slots),
+                "actual_min_clients_per_block": min(block_sizes) if block_sizes else 0,
+                "actual_max_clients_per_block": max(block_sizes) if block_sizes else 0,
+                "actual_blocks_count": len(slot_assignments),
+                "objective_value": float(solver.ObjectiveValue()),
+                "notes": notes
+            }
+        }), 200
+
+    except Exception as error:
+        return jsonify({
+            "status": "error",
+            "message": f"Optimisation OR-Tools impossible: {error}"
+        }), 500
 
 
 if __name__ == '__main__':

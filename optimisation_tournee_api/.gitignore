@@ -1,4 +1,6 @@
 node_modules/
 .env
+__pycache__/
+*.pyc
 dataset_features_clients_jour.csv
 dist_utic*.sql
