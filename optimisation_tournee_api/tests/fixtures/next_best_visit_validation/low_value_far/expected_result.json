@@ -1,0 +1,13 @@
+{
+  "must_select_clients": [
+    "NEAR_OK"
+  ],
+  "must_not_select_clients": [
+    "FAR_LOW"
+  ],
+  "forbidden_reason_codes": {
+    "FAR_LOW": [
+      "HIGH_EXPECTED_CA"
+    ]
+  }
+}

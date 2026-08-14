@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 dataset_features_clients_jour.csv
 dist_utic*.sql
+.cache/

@@ -1,0 +1,14 @@
+{
+  "must_select_clients": [
+    "SALE_HIGH"
+  ],
+  "must_not_select_clients": [
+    "VIP_LOW"
+  ],
+  "relative_ranking": [
+    [
+      "SALE_HIGH",
+      "VIP_LOW"
+    ]
+  ]
+}

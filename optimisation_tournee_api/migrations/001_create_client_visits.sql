@@ -1,0 +1,20 @@
+CREATE TABLE client_visits (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    client_id BIGINT UNSIGNED NULL,
+    client_code VARCHAR(191) NOT NULL,
+    commercial_code VARCHAR(191) NOT NULL,
+    tournee_code VARCHAR(191) NULL,
+    planned_date DATE NULL,
+    check_in_at DATETIME NULL,
+    check_out_at DATETIME NULL,
+    check_in_latitude DECIMAL(10,7) NULL,
+    check_in_longitude DECIMAL(10,7) NULL,
+    validation_status VARCHAR(50) NOT NULL DEFAULT 'pending',
+    visit_result VARCHAR(50) NULL,
+    sale_amount DECIMAL(15,3) NULL,
+    created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_client_visits_client_id_date (client_id, check_in_at),
+    INDEX idx_client_visits_client_date (client_code, check_in_at),
+    INDEX idx_client_visits_commercial_date (commercial_code, check_in_at)
+);

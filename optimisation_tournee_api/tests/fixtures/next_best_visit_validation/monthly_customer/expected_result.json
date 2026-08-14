@@ -1,0 +1,8 @@
+{
+  "must_not_select_clients": [
+    "MONTH_001"
+  ],
+  "maximum_occurrences_in_horizon": {
+    "MONTH_001": 0
+  }
+}

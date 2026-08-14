@@ -1,0 +1,13 @@
+{
+  "scenario_id": "capacity_competition",
+  "planning_start_date": "2026-09-07",
+  "historical_cutoff_date": "2026-09-07",
+  "planning_horizon_days": 7,
+  "objective": "balanced",
+  "maximum_visits_per_day": 2,
+  "minimum_confidence": 0,
+  "availability_mode": "strict",
+  "max_days_without_contact": null,
+  "max_candidate_dates_per_client": 4,
+  "critical": true
+}

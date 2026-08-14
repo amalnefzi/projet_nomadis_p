@@ -1,0 +1,94 @@
+{
+  "clients": [
+    {
+      "client_id": "11",
+      "client_code": "WEEK_001",
+      "nom": "Client Weekly",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 62,
+      "latitude": 36.8,
+      "longitude": 10.1
+    }
+  ],
+  "sales_history": [
+    {
+      "client_id": "11",
+      "purchase_date": "2026-08-10",
+      "order_value": 180,
+      "order_quantity": 5,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "11",
+      "purchase_date": "2026-08-17",
+      "order_value": 180,
+      "order_quantity": 5,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "11",
+      "purchase_date": "2026-08-24",
+      "order_value": 180,
+      "order_quantity": 5,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "11",
+      "purchase_date": "2026-08-31",
+      "order_value": 180,
+      "order_quantity": 5,
+      "commercial_code": "C01"
+    }
+  ],
+  "visits_history": [],
+  "predictions": [
+    {
+      "client_id": "11",
+      "client_code": "WEEK_001",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 78,
+      "predicted_ca": 240,
+      "recommended_quantity": 5,
+      "model_confidence": 81,
+      "score": 79,
+      "vip": 60,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    }
+  ],
+  "availability": [],
+  "commercials": [
+    {
+      "value": "C01",
+      "label": "Commercial C01"
+    }
+  ],
+  "commercial_constraints": {
+    "commercials": {
+      "C01": {
+        "available_dates": [
+          "2026-09-07",
+          "2026-09-08",
+          "2026-09-09",
+          "2026-09-10",
+          "2026-09-11",
+          "2026-09-12",
+          "2026-09-13"
+        ],
+        "unavailable_dates": [],
+        "hard_max_visits_by_date": {
+          "2026-09-07": 2
+        }
+      }
+    },
+    "client_restrictions": {}
+  },
+  "shared_depot_origin": {
+    "latitude": 36.8065,
+    "longitude": 10.1815,
+    "nom": "Depot lab"
+  }
+}

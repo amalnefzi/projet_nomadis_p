@@ -1,0 +1,44 @@
+{
+  "clients": [
+    {
+      "client_id": "111",
+      "client_code": "NEW_001",
+      "nom": "New Prospect",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 30,
+      "latitude": 36.8,
+      "longitude": 10.1
+    }
+  ],
+  "sales_history": [],
+  "visits_history": [],
+  "predictions": [],
+  "availability": [],
+  "commercials": [
+    {
+      "value": "C01",
+      "label": "Commercial C01"
+    }
+  ],
+  "commercial_constraints": {
+    "commercials": {
+      "C01": {
+        "available_dates": [
+          "2026-09-07",
+          "2026-09-08"
+        ],
+        "unavailable_dates": [],
+        "hard_max_visits_by_date": {
+          "2026-09-07": 1
+        }
+      }
+    },
+    "client_restrictions": {}
+  },
+  "shared_depot_origin": {
+    "latitude": 36.8065,
+    "longitude": 10.1815,
+    "nom": "Depot lab"
+  }
+}

@@ -1,11 +1,19 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import axios from 'axios'
-import L from 'leaflet'
-import 'leaflet/dist/leaflet.css'
 import './App.css'
 import CoveragePlanner from './CoveragePlanner'
-
-const API = 'http://localhost:5000'
+import SalesCoveragePlanner from './SalesCoveragePlanner'
+import V2ValidationLab from './V2ValidationLab'
+import { formatCommercialZone } from './salesCoverageDetails.js'
+import { API_URL } from './apiConfig'
+import TourRouteMap from './TourRouteMap'
+import useOptimizedTourRoute from './useOptimizedTourRoute'
+import { buildPlannerModules } from './validationLabConfig'
+import {
+  buildGoogleMapsUrl,
+  formatDistanceMeters,
+  formatDurationSeconds
+} from './tourRouteUtils'
 
 const JOURS_TO_INDEX = {
   Dimanche: 0,
@@ -67,50 +75,6 @@ function resolveEffectiveDate(datePrecise, jourSemaine) {
   return formatLocalISODate(d)
 }
 
-function formatDuration(seconds) {
-  const totalMinutes = Math.round((seconds || 0) / 60)
-  const hours = Math.floor(totalMinutes / 60)
-  const minutes = totalMinutes % 60
-  if (hours <= 0) return `${minutes} min`
-  return `${hours} h ${minutes.toString().padStart(2, '0')}`
-}
-
-function formatDistance(meters) {
-  const km = (meters || 0) / 1000
-  return `${km.toFixed(km >= 10 ? 0 : 1)} km`
-}
-
-function buildOsrmStepText(step) {
-  const maneuver = step?.maneuver || {}
-  const type = maneuver.type || 'continue'
-  const modifier = maneuver.modifier || ''
-  const street = step?.name ? ` sur ${step.name}` : ''
-
-  if (type === 'depart') return `Demarrer${street}`
-  if (type === 'arrive') return 'Arriver a destination'
-  if (type === 'roundabout') return `Prendre le rond-point${street}`
-  if (type === 'merge') return `S'engager${street}`
-  if (type === 'new name') return `Continuer${street}`
-  if (type === 'fork') return `Prendre l'embranchement ${modifier}${street}`.trim()
-  if (type === 'end of road') return `Au bout de la route, tourner ${modifier}${street}`.trim()
-  if (type === 'turn') return `Tourner ${modifier}${street}`.trim()
-  return `Continuer${street}`
-}
-
-function buildGoogleMapsUrl(origin, stops) {
-  if (!stops.length) return '#'
-  const destination = stops[stops.length - 1]
-  const waypoints = stops
-    .slice(0, -1)
-    .map(stop => `${stop.latitude},${stop.longitude}`)
-    .join('|')
-  const originParam = origin
-    ? `origin=${origin.latitude},${origin.longitude}&`
-    : ''
-
-  return `https://www.google.com/maps/dir/?api=1&${originParam}destination=${destination.latitude},${destination.longitude}&travelmode=driving${waypoints ? `&waypoints=${encodeURIComponent(waypoints)}` : ''}`
-}
-
 function buildQuantitySplit(totalQuantity) {
   const qte = Math.max(0, Number(totalQuantity || 0))
   let agro = Math.floor(qte * 0.45)
@@ -122,9 +86,12 @@ function buildQuantitySplit(totalQuantity) {
 }
 
 function getClientSelectionKey(row) {
-  const rawKey = String(row?.canonical_client_key ?? row?.nbr_client ?? '').trim()
-  if (!rawKey) return ''
-  return rawKey.replace(/^0+/, '') || '0'
+  return String(
+    row?.client_id ??
+    row?.canonical_client_key ??
+    row?.nbr_client ??
+    ''
+  ).trim()
 }
 
 function App() {
@@ -145,20 +112,11 @@ function App() {
   const [validationLoading, setValidationLoading] = useState(false)
   const [isValidationModalOpen, setIsValidationModalOpen] = useState(false)
   const [manualOrderLocked, setManualOrderLocked] = useState(false)
-  const [routePlan, setRoutePlan] = useState({
-    loading: false,
-    error: null,
-    origin: null,
-    orderedStops: [],
-    geometry: [],
-    steps: [],
-    summary: null
-  })
-
   const joursSemaine = useMemo(
     () => ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'],
     []
   )
+  const plannerModules = useMemo(() => buildPlannerModules(), [])
 
   const [filtres, setFiltres] = useState({
     route: '',
@@ -172,20 +130,26 @@ function App() {
     jour_semaine: ''
   })
 
-  const mapRef = useRef(null)
-  const leafletMapRef = useRef(null)
-  const routeLayerRef = useRef(null)
-
   useEffect(() => {
-    axios.get(`${API}/api/tournees/options`).then(res => {
-      const r = res.data.routes || []
-      const c = res.data.commerciaux || []
+    let isMounted = true
+
+    axios.get(`${API_URL}/api/tournees/options`).then(res => {
+      if (!isMounted) return
+      const r = Array.isArray(res.data?.routes) ? res.data.routes : []
+      const c = Array.isArray(res.data?.commerciaux) ? res.data.commerciaux : []
       setOptions({ routes: r, commerciaux: c })
       if (r.length && !filtres.route) setFiltres(prev => ({ ...prev, route: r[0]?.value || '' }))
       if (c.length && !filtres.commercial) setFiltres(prev => ({ ...prev, commercial: c[0]?.value || '' }))
-    }).catch(() => {
-      setOptions({ routes: [{ value: '1', label: '1 - depot' }], commerciaux: [{ value: '1', label: 'Commercial 1' }] })
+    }).catch(error => {
+      if (!isMounted) return
+      console.error('Erreur chargement options tournees:', error)
+      setOptions({ routes: [], commerciaux: [] })
+      setErreur(error?.response?.data?.error || error?.message || 'Erreur chargement options tournees.')
     })
+
+    return () => {
+      isMounted = false
+    }
   }, [])
 
   useEffect(() => {
@@ -248,7 +212,7 @@ function App() {
       setTopClientsInput(committedTop === '' ? '' : String(committedTop))
       setTargetChiffreInput(committedTarget === '' ? '' : String(committedTarget))
 
-      const res = await axios.get(`${API}/api/tournees/plan`, {
+      const res = await axios.get(`${API_URL}/api/tournees/plan`, {
         params: {
           date_precise: effectiveDatePrecise,
           date_debut: periode?.date_debut,
@@ -278,7 +242,7 @@ function App() {
     if (window.confirm("Le systeme se met a jour automatiquement. Voulez-vous lancer un reentrainement manuel maintenant ?")) {
       setIsTraining(true)
       try {
-        const res = await axios.post(`${API}/api/train-ia`)
+        const res = await axios.post(`${API_URL}/api/train-ia`)
         alert(res.data.message)
       } catch (err) {
         alert(err?.response?.data?.message || "Le reentrainement manuel a echoue. L'application continue d'utiliser le dernier modele valide.")
@@ -377,7 +341,7 @@ function App() {
   const routingCandidates = useMemo(() => {
     return tourneesAffichees
       .map((row, idx) => ({
-        id: String(row.nbr_client),
+        id: String(row.client_id || row.canonical_client_key || row.nbr_client || ''),
         inputIndex: idx,
         nom: row.nom,
         adresse: row.adresse || 'Adresse non specifiee',
@@ -386,192 +350,15 @@ function App() {
       }))
       .filter(stop => Number.isFinite(stop.latitude) && Number.isFinite(stop.longitude))
   }, [tourneesAffichees])
-  const routingSignature = useMemo(
-    () => routingCandidates.map(stop => `${stop.id}:${stop.latitude}:${stop.longitude}`).join('|'),
-    [routingCandidates]
-  )
 
-  useEffect(() => {
-    let cancelled = false
-
-    async function buildRoutePlan() {
-      if (!routingCandidates.length) {
-        setRoutePlan({
-          loading: false,
-          error: null,
-          origin: depotOrigin || userLocation,
-          orderedStops: [],
-          geometry: [],
-          steps: [],
-          summary: null
-        })
-        return
-      }
-
-      setRoutePlan(prev => ({ ...prev, loading: true, error: null }))
-
-      const origin = depotOrigin
-        ? depotOrigin
-        : (userLocation && Number.isFinite(Number(userLocation.latitude)) && Number.isFinite(Number(userLocation.longitude)))
-            ? {
-                ...userLocation,
-                latitude: Number(userLocation.latitude),
-                longitude: Number(userLocation.longitude)
-              }
-            : null
-
-      try {
-        let orderedStops = routingCandidates
-
-        if (!manualOrderLocked) {
-          const inputStops = origin ? [origin, ...routingCandidates] : routingCandidates
-          const tripCoords = inputStops.map(stop => `${stop.longitude},${stop.latitude}`).join(';')
-          const tripUrl = `https://router.project-osrm.org/trip/v1/driving/${tripCoords}`
-          const tripParams = origin
-            ? { source: 'first', roundtrip: false, geometries: 'geojson', overview: 'false' }
-            : { source: 'any', roundtrip: false, geometries: 'geojson', overview: 'false' }
-
-          const tripRes = await axios.get(tripUrl, { params: tripParams })
-          const waypoints = tripRes.data?.waypoints || []
-          if (!waypoints.length) {
-            throw new Error("Aucun ordre de passage n'a ete trouve.")
-          }
-
-          const clientWaypoints = waypoints
-            .map((wp, index) => ({ ...wp, originalIndex: index }))
-            .filter(wp => !(origin && wp.originalIndex === 0))
-            .sort((a, b) => (a.waypoint_index ?? 0) - (b.waypoint_index ?? 0))
-
-          orderedStops = clientWaypoints.map(wp => inputStops[wp.originalIndex]).filter(Boolean)
-        }
-
-        const orderedWithOrigin = origin ? [origin, ...orderedStops] : orderedStops
-        const routeCoords = orderedWithOrigin.map(stop => `${stop.longitude},${stop.latitude}`).join(';')
-        const routeUrl = `https://router.project-osrm.org/route/v1/driving/${routeCoords}`
-        const routeRes = await axios.get(routeUrl, {
-          params: {
-            steps: true,
-            geometries: 'geojson',
-            overview: 'full'
-          }
-        })
-
-        const route = routeRes.data?.routes?.[0]
-        if (!route) {
-          throw new Error('Impossible de calculer un itineraire routier detaille.')
-        }
-
-        const geometry = (route.geometry?.coordinates || []).map(([lng, lat]) => ({ latitude: lat, longitude: lng }))
-        const steps = (route.legs || []).flatMap((leg, legIndex) =>
-          (leg.steps || []).map((step, stepIndex) => ({
-            id: `${legIndex}-${stepIndex}`,
-            text: buildOsrmStepText(step),
-            distance: step.distance || 0,
-            duration: step.duration || 0
-          }))
-        )
-
-        if (!cancelled) {
-          setRoutePlan({
-            loading: false,
-            error: null,
-            origin,
-            orderedStops: orderedStops.map((stop, index) => ({ ...stop, step: index + 1 })),
-            geometry,
-            steps,
-            summary: {
-              distance: route.distance || 0,
-              duration: route.duration || 0
-            }
-          })
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setRoutePlan({
-            loading: false,
-            error: "Itineraire detaille indisponible pour le moment. Affichage d'un trace simplifie.",
-            origin,
-            orderedStops: routingCandidates.map((stop, index) => ({ ...stop, step: index + 1 })),
-            geometry: [],
-            steps: [],
-            summary: null
-          })
-        }
-      }
-    }
-
-    buildRoutePlan()
-
-    return () => {
-      cancelled = true
-    }
-  }, [routingSignature, userLocation, depotOrigin, manualOrderLocked])
-
-  useEffect(() => {
-    if (!mapRef.current || !L) return
-
-    if (!leafletMapRef.current) {
-      leafletMapRef.current = L.map(mapRef.current, {
-        zoomControl: true,
-        attributionControl: false
-      })
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '© OpenStreetMap contributors'
-      }).addTo(leafletMapRef.current)
-    }
-
-    const map = leafletMapRef.current
-    if (!routeLayerRef.current) {
-      routeLayerRef.current = L.layerGroup().addTo(map)
-    }
-    routeLayerRef.current.clearLayers()
-
-    const routeMarkers = routePlan.orderedStops.length ? routePlan.orderedStops : itineraireGeo
-    const routeGeometry = routePlan.geometry.length ? routePlan.geometry : routeMarkers
-
-    if (routeMarkers.length === 0) {
-      map.setView([36.8, 10.1], 6)
-      return
-    }
-
-    if (routePlan.origin) {
-      const originMarker = L.circleMarker([routePlan.origin.latitude, routePlan.origin.longitude], {
-        radius: 8,
-        color: '#dc3545',
-        fillColor: '#dc3545',
-        fillOpacity: 0.95,
-        weight: 1
-      }).addTo(routeLayerRef.current)
-      originMarker.bindPopup(`<strong>Depart</strong><br/>${routePlan.origin.adresse}`)
-    }
-
-    const latlngs = routeGeometry.map(pt => [pt.latitude, pt.longitude])
-    const polyline = L.polyline(latlngs, { color: '#0d6efd', weight: 4, opacity: 0.85 })
-    polyline.addTo(routeLayerRef.current)
-
-    routeMarkers.forEach((pt, index) => {
-      const marker = L.circleMarker([pt.latitude, pt.longitude], {
-        radius: index === 0 ? 8 : 6,
-        color: index === 0 ? '#198754' : '#0d6efd',
-        fillColor: index === 0 ? '#198754' : '#0d6efd',
-        fillOpacity: 0.9,
-        weight: 1
-      }).addTo(routeLayerRef.current)
-
-      marker.bindPopup(`<strong>${index + 1}. ${pt.nom}</strong><br/>${pt.adresse}`)
-    })
-
-    try {
-      const boundsPoints = routePlan.origin
-        ? [[routePlan.origin.latitude, routePlan.origin.longitude], ...latlngs]
-        : latlngs
-      const bounds = L.latLngBounds(boundsPoints)
-      map.fitBounds(bounds, { padding: [40, 40] })
-      setTimeout(() => map.invalidateSize(), 200)
-    } catch (e) {
-      console.warn("Impossible d'ajuster les limites de la carte", e)
-    }
-  }, [itineraireGeo, routePlan])
+  const routePlan = useOptimizedTourRoute({
+    selected: true,
+    commercialCode: filtres.commercial,
+    date: effectiveDatePrecise,
+    stops: routingCandidates,
+    origin: depotOrigin || userLocation,
+    preserveOrder: manualOrderLocked
+  })
 
   const chiffreTotal = tourneesAffichees.reduce(
     (acc, curr) => acc + Number(curr.collecte_prevue ?? curr.chiffre_brut ?? parseFloat(curr.chiffre) ?? 0),
@@ -624,17 +411,19 @@ function App() {
 
   const buildValidationStops = () => {
     const rowsByClient = new Map(
-      tourneesAffichees.map((row, index) => [String(row.nbr_client || ''), { ...row, __index: index }])
+      tourneesAffichees.map((row, index) => [getClientSelectionKey(row), { ...row, __index: index }])
     )
 
     const routeStops = routePlan.orderedStops.length
       ? routePlan.orderedStops
           .map((stop, index) => {
-            const clientCode = String(stop.client_code || stop.id || '').trim()
-            const row = rowsByClient.get(clientCode)
-            if (!clientCode && !row) return null
+            const clientId = String(stop.client_id || stop.id || '').trim()
+            const clientCode = String(stop.client_code || '').trim()
+            const row = rowsByClient.get(clientId || clientCode)
+            if ((!clientId && !clientCode) && !row) return null
 
             return {
+              client_id: clientId || String(row?.client_id || '').trim(),
               client_code: clientCode || String(row?.nbr_client || '').trim(),
               client_name: row?.nom || stop.nom || '',
               adresse: row?.adresse || stop.adresse || '',
@@ -645,6 +434,7 @@ function App() {
           })
           .filter(Boolean)
       : tourneesAffichees.map((row, index) => ({
+          client_id: String(row.client_id || '').trim(),
           client_code: String(row.nbr_client || '').trim(),
           client_name: row.nom || '',
           adresse: row.adresse || '',
@@ -653,7 +443,7 @@ function App() {
           rang: index + 1
         }))
 
-    return routeStops.filter(stop => stop.client_code)
+    return routeStops.filter(stop => stop.client_id || stop.client_code)
   }
 
   const updateEditableRow = (rowIndex, updater) => {
@@ -803,7 +593,7 @@ function App() {
         stops
       }
 
-      const response = await axios.post(`${API}/api/tournees/plan/validate`, payload, {
+      const response = await axios.post(`${API_URL}/api/tournees/plan/validate`, payload, {
         timeout: 20000
       })
 
@@ -822,38 +612,39 @@ function App() {
   return (
     <div style={{ padding: '20px 40px', fontFamily: '"Segoe UI", Roboto, Helvetica, Arial, sans-serif', backgroundColor: '#f4f7fa', minHeight: '100vh', color: '#333' }}>
       <div style={{ display: 'flex', gap: '12px', marginBottom: '24px', flexWrap: 'wrap' }}>
-        <button
-          onClick={() => setActiveModule('dashboard')}
-          style={{
-            padding: '11px 18px',
-            borderRadius: '999px',
-            border: activeModule === 'dashboard' ? 'none' : '1px solid #cbd5e1',
-            backgroundColor: activeModule === 'dashboard' ? '#1a2b4c' : 'white',
-            color: activeModule === 'dashboard' ? 'white' : '#334155',
-            fontWeight: '700'
-          }}
-        >
-          Dashboard actuel
-        </button>
-        <button
-          onClick={() => setActiveModule('coverage')}
-          style={{
-            padding: '11px 18px',
-            borderRadius: '999px',
-            border: activeModule === 'coverage' ? 'none' : '1px solid #cbd5e1',
-            backgroundColor: activeModule === 'coverage' ? '#1c6dd0' : 'white',
-            color: activeModule === 'coverage' ? 'white' : '#334155',
-            fontWeight: '700'
-          }}
-        >
-          Plan couverture
-        </button>
+        {plannerModules.map(module => (
+          <button
+            key={module.id}
+            onClick={() => setActiveModule(module.id)}
+            style={{
+              padding: '11px 18px',
+              borderRadius: '999px',
+              border: activeModule === module.id ? 'none' : '1px solid #cbd5e1',
+              backgroundColor: activeModule === module.id
+                ? (module.id === 'dashboard' ? '#1a2b4c' : module.id === 'recovery' ? '#1c6dd0' : '#0f766e')
+                : 'white',
+              color: activeModule === module.id ? 'white' : '#334155',
+              fontWeight: '700'
+            }}
+          >
+            {module.label}
+          </button>
+        ))}
       </div>
 
-      {activeModule === 'coverage' ? (
-        <CoveragePlanner api={API} />
-      ) : (
-        <>
+      <div style={{ display: activeModule === 'recovery' ? 'block' : 'none' }}>
+        <CoveragePlanner api={API_URL} />
+      </div>
+
+      <div style={{ display: activeModule === 'sales' ? 'block' : 'none' }}>
+        <SalesCoveragePlanner />
+      </div>
+
+      <div style={{ display: activeModule === 'validation_lab' ? 'block' : 'none' }}>
+        <V2ValidationLab />
+      </div>
+
+      <div style={{ display: activeModule === 'dashboard' ? 'block' : 'none' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '30px' }}>
         <div>
           <h1 style={{ margin: 0, color: '#1a2b4c', fontSize: '28px' }}>Dashboard Optimisation - IA Nomadis</h1>
@@ -1309,7 +1100,7 @@ function App() {
                             </div>
                           </td>
                         )}
-                        <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef' }}>{row.commercia_zone}</td>
+                        <td style={{ padding: '10px 8px', borderBottom: '1px solid #e9ecef' }}>{formatCommercialZone(row)}</td>
                       </tr>
                     )
                   })
@@ -1435,7 +1226,7 @@ function App() {
               <h3 style={{ marginTop: 0, color: '#1a2b4c', borderBottom: '2px solid #f1f3f5', paddingBottom: '10px' }}>Itineraire Optimise</h3>
               <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '12px' }}>
                 <div style={{ padding: '8px 12px', borderRadius: '8px', backgroundColor: '#eef5ff', color: '#0d6efd', fontSize: '12px', fontWeight: '700' }}>
-                  {routePlan.summary ? `${formatDistance(routePlan.summary.distance)} - ${formatDuration(routePlan.summary.duration)}` : 'Trace simplifie'}
+                  {routePlan.summary ? `${formatDistanceMeters(routePlan.summary.distance)} - ${formatDurationSeconds(routePlan.summary.duration)}` : 'Trace simplifie'}
                 </div>
                 <div style={{ padding: '8px 12px', borderRadius: '8px', backgroundColor: '#f3f7f9', color: '#495057', fontSize: '12px', fontWeight: '700' }}>
                   {routePlan.origin
@@ -1443,18 +1234,8 @@ function App() {
                     : 'Depart: premier client optimise'}
                 </div>
               </div>
-              <div style={{ width: '100%', height: '360px', borderRadius: '12px', overflow: 'hidden', marginBottom: '20px', position: 'relative', backgroundColor: '#e9ecef' }}>
-                <div ref={mapRef} style={{ width: '100%', height: '100%' }} />
-                {!itineraireGeo.length && !routePlan.orderedStops.length && (
-                  <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#495057', fontSize: '14px', fontWeight: '600', backgroundColor: 'rgba(255,255,255,0.8)' }}>
-                    Pas de donnees geographiques disponibles pour le trace.
-                  </div>
-                )}
-                {routePlan.loading && (
-                  <div style={{ position: 'absolute', right: 12, top: 12, padding: '8px 12px', borderRadius: '8px', backgroundColor: 'rgba(13,110,253,0.92)', color: 'white', fontSize: '12px', fontWeight: '700' }}>
-                    Calcul de la route...
-                  </div>
-                )}
+              <div style={{ marginBottom: '20px' }}>
+                <TourRouteMap routePlan={routePlan} height={360} />
               </div>
               {routePlan.error && (
                 <div style={{ marginBottom: '12px', padding: '10px 12px', borderRadius: '8px', backgroundColor: '#fff3cd', color: '#8a6d3b', fontSize: '12px', fontWeight: '600' }}>
@@ -1502,7 +1283,7 @@ function App() {
                       <div key={step.id} style={{ marginBottom: '8px', fontSize: '13px', color: '#495057', lineHeight: 1.4 }}>
                         <strong>{step.text}</strong>
                         <div style={{ color: '#6c757d', fontSize: '12px' }}>
-                          {formatDistance(step.distance)} - {formatDuration(step.duration)}
+                          {formatDistanceMeters(step.distance)} - {formatDurationSeconds(step.duration)}
                         </div>
                       </div>
                     )) : (
@@ -1669,8 +1450,7 @@ function App() {
           </div>
         </div>
       )}
-        </>
-      )}
+      </div>
     </div>
   )
 }

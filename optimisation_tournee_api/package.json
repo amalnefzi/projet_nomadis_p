@@ -3,7 +3,14 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "pytest tests/test_coverage_optimizer.py && node --test tests/coverage_capacity_policy.test.cjs tests/client_identity_resolution.test.cjs",
+    "test:coverage-capacity": "node --test tests/coverage_capacity_policy.test.cjs",
+    "test:coverage-optimizer": "pytest tests/test_coverage_optimizer.py",
+    "test:client-identity": "node --test tests/client_identity_resolution.test.cjs",
+    "coverage-history-cache:stats": "node scripts/coverage_cache_cli.cjs history stats",
+    "coverage-history-cache:clear": "node scripts/coverage_cache_cli.cjs history clear",
+    "coverage-purchase-cache:stats": "node scripts/coverage_cache_cli.cjs purchase stats",
+    "coverage-purchase-cache:clear": "node scripts/coverage_cache_cli.cjs purchase clear"
   },
   "keywords": [],
   "author": "",

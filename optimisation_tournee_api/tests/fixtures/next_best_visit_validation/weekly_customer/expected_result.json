@@ -1,0 +1,11 @@
+{
+  "must_select_clients": [
+    "WEEK_001"
+  ],
+  "maximum_occurrences_in_horizon": {
+    "WEEK_001": 1
+  },
+  "expected_decision_mode": {
+    "WEEK_001": "predictive"
+  }
+}

@@ -1,0 +1,127 @@
+{
+  "clients": [
+    {
+      "client_id": "91",
+      "client_code": "FAR_LOW",
+      "nom": "Far Low",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 25,
+      "latitude": 37.2,
+      "longitude": 10.85
+    },
+    {
+      "client_id": "92",
+      "client_code": "NEAR_OK",
+      "nom": "Near High",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 60,
+      "latitude": 36.802,
+      "longitude": 10.102
+    }
+  ],
+  "sales_history": [
+    {
+      "client_id": "91",
+      "purchase_date": "2026-08-10",
+      "order_value": 50,
+      "order_quantity": 1,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "91",
+      "purchase_date": "2026-08-24",
+      "order_value": 50,
+      "order_quantity": 1,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "92",
+      "purchase_date": "2026-08-10",
+      "order_value": 240,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "92",
+      "purchase_date": "2026-08-17",
+      "order_value": 240,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "92",
+      "purchase_date": "2026-08-24",
+      "order_value": 240,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "92",
+      "purchase_date": "2026-08-31",
+      "order_value": 240,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    }
+  ],
+  "visits_history": [],
+  "predictions": [
+    {
+      "client_id": "91",
+      "client_code": "FAR_LOW",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 16,
+      "predicted_ca": 40,
+      "recommended_quantity": 1,
+      "model_confidence": 52,
+      "score": 22,
+      "vip": 28,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    },
+    {
+      "client_id": "92",
+      "client_code": "NEAR_OK",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 76,
+      "predicted_ca": 260,
+      "recommended_quantity": 6,
+      "model_confidence": 78,
+      "score": 77,
+      "vip": 54,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    }
+  ],
+  "availability": [],
+  "commercials": [
+    {
+      "value": "C01",
+      "label": "Commercial C01"
+    }
+  ],
+  "commercial_constraints": {
+    "commercials": {
+      "C01": {
+        "available_dates": [
+          "2026-09-07"
+        ],
+        "unavailable_dates": [],
+        "hard_max_visits_by_date": {
+          "2026-09-07": 1
+        }
+      }
+    },
+    "client_restrictions": {}
+  },
+  "shared_depot_origin": {
+    "latitude": 36.8065,
+    "longitude": 10.1815,
+    "nom": "Depot lab"
+  }
+}

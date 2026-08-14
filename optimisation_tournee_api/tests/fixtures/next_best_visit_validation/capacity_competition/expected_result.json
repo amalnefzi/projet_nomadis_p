@@ -1,0 +1,14 @@
+{
+  "must_select_clients": [
+    "CAP_A",
+    "CAP_B"
+  ],
+  "must_not_select_clients": [
+    "CAP_C"
+  ],
+  "required_reason_codes": {
+    "CAP_C": [
+      "CAPACITY_REACHED"
+    ]
+  }
+}

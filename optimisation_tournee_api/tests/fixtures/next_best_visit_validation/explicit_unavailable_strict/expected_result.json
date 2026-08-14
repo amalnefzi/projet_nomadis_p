@@ -1,0 +1,15 @@
+{
+  "must_select_clients": [
+    "UNAV_STRICT"
+  ],
+  "allowed_dates_by_client": {
+    "UNAV_STRICT": [
+      "2026-09-09"
+    ]
+  },
+  "forbidden_dates_by_client": {
+    "UNAV_STRICT": [
+      "2026-09-08"
+    ]
+  }
+}

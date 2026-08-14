@@ -1,0 +1,109 @@
+{
+  "clients": [
+    {
+      "client_id": "51",
+      "client_code": "DECLINE_001",
+      "nom": "Declining Client",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 52,
+      "latitude": 36.8,
+      "longitude": 10.1
+    }
+  ],
+  "sales_history": [
+    {
+      "client_id": "51",
+      "purchase_date": "2026-08-08",
+      "order_value": 220,
+      "order_quantity": 5,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "51",
+      "purchase_date": "2026-08-17",
+      "order_value": 220,
+      "order_quantity": 5,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "51",
+      "purchase_date": "2026-08-26",
+      "order_value": 220,
+      "order_quantity": 5,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "51",
+      "purchase_date": "2026-04-10",
+      "order_value": 260,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "51",
+      "purchase_date": "2026-04-30",
+      "order_value": 260,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "51",
+      "purchase_date": "2026-05-20",
+      "order_value": 260,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "51",
+      "purchase_date": "2026-06-09",
+      "order_value": 260,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    }
+  ],
+  "visits_history": [],
+  "predictions": [
+    {
+      "client_id": "51",
+      "client_code": "DECLINE_001",
+      "candidate_date": "2026-09-09",
+      "purchase_probability": 44,
+      "predicted_ca": 120,
+      "recommended_quantity": 3,
+      "model_confidence": 68,
+      "score": 52,
+      "vip": 54,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    }
+  ],
+  "availability": [],
+  "commercials": [
+    {
+      "value": "C01",
+      "label": "Commercial C01"
+    }
+  ],
+  "commercial_constraints": {
+    "commercials": {
+      "C01": {
+        "available_dates": [
+          "2026-09-07",
+          "2026-09-08",
+          "2026-09-09",
+          "2026-09-10"
+        ],
+        "unavailable_dates": []
+      }
+    },
+    "client_restrictions": {}
+  },
+  "shared_depot_origin": {
+    "latitude": 36.8065,
+    "longitude": 10.1815,
+    "nom": "Depot lab"
+  }
+}

@@ -1,0 +1,247 @@
+{
+  "clients": [
+    {
+      "client_id": "101",
+      "client_code": "CLUSTER_A",
+      "nom": "Cluster A",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 72,
+      "latitude": 36.81,
+      "longitude": 10.18
+    },
+    {
+      "client_id": "102",
+      "client_code": "CLUSTER_B",
+      "nom": "Cluster B",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 68,
+      "latitude": 36.812,
+      "longitude": 10.182
+    },
+    {
+      "client_id": "103",
+      "client_code": "CLUSTER_C",
+      "nom": "Cluster C",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 46,
+      "latitude": 36.811,
+      "longitude": 10.181
+    },
+    {
+      "client_id": "104",
+      "client_code": "FAR_MED",
+      "nom": "Far Medium",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 46,
+      "latitude": 36.98,
+      "longitude": 10.48
+    }
+  ],
+  "sales_history": [
+    {
+      "client_id": "101",
+      "purchase_date": "2026-08-10",
+      "order_value": 260,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "101",
+      "purchase_date": "2026-08-17",
+      "order_value": 260,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "101",
+      "purchase_date": "2026-08-24",
+      "order_value": 260,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "101",
+      "purchase_date": "2026-08-31",
+      "order_value": 260,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "102",
+      "purchase_date": "2026-08-10",
+      "order_value": 255,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "102",
+      "purchase_date": "2026-08-17",
+      "order_value": 255,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "102",
+      "purchase_date": "2026-08-24",
+      "order_value": 255,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "102",
+      "purchase_date": "2026-08-31",
+      "order_value": 255,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "103",
+      "purchase_date": "2026-08-10",
+      "order_value": 150,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "103",
+      "purchase_date": "2026-08-17",
+      "order_value": 150,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "103",
+      "purchase_date": "2026-08-24",
+      "order_value": 150,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "103",
+      "purchase_date": "2026-08-31",
+      "order_value": 150,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "104",
+      "purchase_date": "2026-08-10",
+      "order_value": 145,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "104",
+      "purchase_date": "2026-08-17",
+      "order_value": 145,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "104",
+      "purchase_date": "2026-08-24",
+      "order_value": 145,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "104",
+      "purchase_date": "2026-08-31",
+      "order_value": 145,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    }
+  ],
+  "visits_history": [],
+  "predictions": [
+    {
+      "client_id": "101",
+      "client_code": "CLUSTER_A",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 86,
+      "predicted_ca": 320,
+      "recommended_quantity": 7,
+      "model_confidence": 84,
+      "score": 86,
+      "vip": 70,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    },
+    {
+      "client_id": "102",
+      "client_code": "CLUSTER_B",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 84,
+      "predicted_ca": 315,
+      "recommended_quantity": 7,
+      "model_confidence": 84,
+      "score": 84,
+      "vip": 68,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    },
+    {
+      "client_id": "103",
+      "client_code": "CLUSTER_C",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 54,
+      "predicted_ca": 150,
+      "recommended_quantity": 4,
+      "model_confidence": 74,
+      "score": 58,
+      "vip": 44,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    },
+    {
+      "client_id": "104",
+      "client_code": "FAR_MED",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 55,
+      "predicted_ca": 150,
+      "recommended_quantity": 4,
+      "model_confidence": 74,
+      "score": 57,
+      "vip": 44,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    }
+  ],
+  "availability": [],
+  "commercials": [
+    {
+      "value": "C01",
+      "label": "Commercial C01"
+    }
+  ],
+  "commercial_constraints": {
+    "commercials": {
+      "C01": {
+        "available_dates": [
+          "2026-09-07"
+        ],
+        "unavailable_dates": [],
+        "hard_max_visits_by_date": {
+          "2026-09-07": 3
+        }
+      }
+    },
+    "client_restrictions": {}
+  },
+  "shared_depot_origin": {
+    "latitude": 36.8065,
+    "longitude": 10.1815,
+    "nom": "Depot lab"
+  }
+}

@@ -1,0 +1,113 @@
+{
+  "clients": [
+    {
+      "client_id": "141",
+      "client_code": "UNAV_STRICT",
+      "nom": "Unavailable Tuesday",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 60,
+      "latitude": 36.8,
+      "longitude": 10.1
+    }
+  ],
+  "sales_history": [
+    {
+      "client_id": "141",
+      "purchase_date": "2026-08-11",
+      "order_value": 210,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "141",
+      "purchase_date": "2026-08-18",
+      "order_value": 210,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "141",
+      "purchase_date": "2026-08-25",
+      "order_value": 210,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "141",
+      "purchase_date": "2026-09-01",
+      "order_value": 210,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    }
+  ],
+  "visits_history": [],
+  "predictions": [
+    {
+      "client_id": "141",
+      "client_code": "UNAV_STRICT",
+      "candidate_date": "2026-09-08",
+      "purchase_probability": 88,
+      "predicted_ca": 310,
+      "recommended_quantity": 6,
+      "model_confidence": 85,
+      "score": 88,
+      "vip": 66,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    },
+    {
+      "client_id": "141",
+      "client_code": "UNAV_STRICT",
+      "candidate_date": "2026-09-09",
+      "purchase_probability": 74,
+      "predicted_ca": 250,
+      "recommended_quantity": 5,
+      "model_confidence": 78,
+      "score": 76,
+      "vip": 66,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    }
+  ],
+  "availability": [
+    {
+      "client_id": "141",
+      "client_code": "UNAV_STRICT",
+      "date": "2026-09-08",
+      "status": "explicit_unavailable",
+      "source": "fixture_availability"
+    }
+  ],
+  "commercials": [
+    {
+      "value": "C01",
+      "label": "Commercial C01"
+    }
+  ],
+  "commercial_constraints": {
+    "commercials": {
+      "C01": {
+        "available_dates": [
+          "2026-09-08",
+          "2026-09-09",
+          "2026-09-10"
+        ],
+        "unavailable_dates": [],
+        "hard_max_visits_by_date": {
+          "2026-09-09": 1
+        }
+      }
+    },
+    "client_restrictions": {}
+  },
+  "shared_depot_origin": {
+    "latitude": 36.8065,
+    "longitude": 10.1815,
+    "nom": "Depot lab"
+  }
+}
