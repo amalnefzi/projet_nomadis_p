@@ -23,6 +23,14 @@ FEATURE_STORE_BUILD_TIMEOUT_SECONDS = max(
     60,
     int(os.getenv('NOMADIS_FEATURE_STORE_BUILD_TIMEOUT_SECONDS', '1800') or '1800')
 )
+FEATURE_STORE_INSERT_BATCH_SIZE = max(
+    1,
+    int(os.getenv('NOMADIS_FEATURE_STORE_INSERT_BATCH_SIZE', '1000') or '1000')
+)
+FEATURE_STORE_CLEANUP_BATCH_SIZE = max(
+    1,
+    int(os.getenv('NOMADIS_FEATURE_STORE_CLEANUP_BATCH_SIZE', '5000') or '5000')
+)
 
 FEATURE_STORE_BASE_COLUMNS = [
     'client_code',
@@ -326,8 +334,125 @@ def _mark_feature_store_state(engine, *, status, reason=None, error_message=None
         })
 
 
+def _iter_feature_store_row_batches(rows, batch_size):
+    if rows is None or rows.empty:
+        return
+    total_rows = len(rows)
+    for offset in range(0, total_rows, batch_size):
+        yield rows.iloc[offset:offset + batch_size].copy()
+
+
+def _append_feature_store_rows_batch(engine, batch):
+    if batch is None or batch.empty:
+        return
+    with engine.begin() as connection:
+        batch.to_sql(
+            FEATURE_STORE_ROWS_TABLE,
+            con=connection,
+            if_exists='append',
+            index=False,
+            method='multi',
+        )
+
+
+def _delete_feature_store_version_rows_in_batches(engine, feature_state_version, batch_size=FEATURE_STORE_CLEANUP_BATCH_SIZE):
+    while True:
+        with engine.begin() as connection:
+            id_rows = connection.execute(text(f"""
+                SELECT id
+                FROM {FEATURE_STORE_ROWS_TABLE}
+                WHERE feature_state_version = :feature_state_version
+                ORDER BY id
+                LIMIT {int(batch_size)}
+            """), {
+                'feature_state_version': feature_state_version,
+            }).fetchall()
+            ids = [row[0] for row in id_rows]
+            if not ids:
+                return
+
+            delete_params = {}
+            placeholders = []
+            for index, row_id in enumerate(ids):
+                key = f'id_{index}'
+                delete_params[key] = row_id
+                placeholders.append(f':{key}')
+
+            connection.execute(text(f"""
+                DELETE FROM {FEATURE_STORE_ROWS_TABLE}
+                WHERE id IN ({', '.join(placeholders)})
+            """), delete_params)
+
+
+def _activate_feature_store_version(
+    engine,
+    *,
+    feature_state_version,
+    source_summary,
+    source_max_date,
+    row_count,
+    client_count,
+    computed_at,
+    reason,
+):
+    with engine.begin() as connection:
+        connection.execute(text(f"""
+            UPDATE {FEATURE_STORE_STATE_TABLE}
+            SET active_feature_schema_version = :active_feature_schema_version,
+                active_feature_state_version = :active_feature_state_version,
+                active_source_data_watermark = :active_source_data_watermark,
+                active_source_max_date = :active_source_max_date,
+                active_row_count = :active_row_count,
+                active_client_count = :active_client_count,
+                active_computed_at = :active_computed_at,
+                active_source_summary_json = :active_source_summary_json,
+                status = 'ready',
+                rebuild_reason = :rebuild_reason,
+                rebuild_started_at = NULL,
+                last_completed_at = :last_completed_at,
+                error_message = NULL
+            WHERE state_key = :state_key
+        """), {
+            'active_feature_schema_version': FEATURE_SCHEMA_VERSION,
+            'active_feature_state_version': feature_state_version,
+            'active_source_data_watermark': source_summary.get('watermark'),
+            'active_source_max_date': source_max_date,
+            'active_row_count': row_count,
+            'active_client_count': client_count,
+            'active_computed_at': computed_at.strftime('%Y-%m-%d %H:%M:%S'),
+            'active_source_summary_json': _serialize_json(source_summary),
+            'rebuild_reason': reason,
+            'last_completed_at': computed_at.strftime('%Y-%m-%d %H:%M:%S'),
+            'state_key': FEATURE_STORE_STATE_KEY,
+        })
+
+
+def _cleanup_inactive_feature_store_versions(
+    engine,
+    active_feature_state_version,
+    batch_size=FEATURE_STORE_CLEANUP_BATCH_SIZE,
+):
+    with engine.connect() as connection:
+        version_rows = connection.execute(text(f"""
+            SELECT DISTINCT feature_state_version
+            FROM {FEATURE_STORE_ROWS_TABLE}
+            WHERE feature_state_version <> :feature_state_version
+            ORDER BY feature_state_version
+        """), {
+            'feature_state_version': active_feature_state_version,
+        }).fetchall()
+
+    for version_row in version_rows:
+        _delete_feature_store_version_rows_in_batches(
+            engine,
+            version_row[0],
+            batch_size=batch_size,
+        )
+
+
 def persist_feature_store_snapshot(engine, bundle, source_summary, reason='manual'):
     ensure_feature_store_tables(engine)
+    current_state = read_feature_store_state(engine)
     features = bundle.get('features')
     if features is None:
         features = pd.DataFrame()
@@ -362,57 +487,35 @@ def persist_feature_store_snapshot(engine, bundle, source_summary, reason='manua
 
     row_count = int(len(rows))
     client_count = int(rows['client_code'].nunique()) if row_count else 0
+    active_feature_state_version = current_state.get('active_feature_state_version')
 
-    with engine.begin() as connection:
-        connection.execute(text(f"""
-            DELETE FROM {FEATURE_STORE_ROWS_TABLE}
-            WHERE feature_state_version = :feature_state_version
-        """), {'feature_state_version': feature_state_version})
+    if feature_state_version != active_feature_state_version:
+        _delete_feature_store_version_rows_in_batches(
+            engine,
+            feature_state_version,
+            batch_size=FEATURE_STORE_CLEANUP_BATCH_SIZE,
+        )
+        for batch in _iter_feature_store_row_batches(rows, FEATURE_STORE_INSERT_BATCH_SIZE):
+            _append_feature_store_rows_batch(engine, batch)
 
-        if row_count:
-            rows.to_sql(
-                FEATURE_STORE_ROWS_TABLE,
-                con=connection,
-                if_exists='append',
-                index=False,
-                chunksize=1000,
-                method='multi',
-            )
-
-        connection.execute(text(f"""
-            UPDATE {FEATURE_STORE_STATE_TABLE}
-            SET active_feature_schema_version = :active_feature_schema_version,
-                active_feature_state_version = :active_feature_state_version,
-                active_source_data_watermark = :active_source_data_watermark,
-                active_source_max_date = :active_source_max_date,
-                active_row_count = :active_row_count,
-                active_client_count = :active_client_count,
-                active_computed_at = :active_computed_at,
-                active_source_summary_json = :active_source_summary_json,
-                status = 'ready',
-                rebuild_reason = :rebuild_reason,
-                rebuild_started_at = NULL,
-                last_completed_at = :last_completed_at,
-                error_message = NULL
-            WHERE state_key = :state_key
-        """), {
-            'active_feature_schema_version': FEATURE_SCHEMA_VERSION,
-            'active_feature_state_version': feature_state_version,
-            'active_source_data_watermark': source_summary.get('watermark'),
-            'active_source_max_date': source_max_date,
-            'active_row_count': row_count,
-            'active_client_count': client_count,
-            'active_computed_at': computed_at.strftime('%Y-%m-%d %H:%M:%S'),
-            'active_source_summary_json': _serialize_json(source_summary),
-            'rebuild_reason': reason,
-            'last_completed_at': computed_at.strftime('%Y-%m-%d %H:%M:%S'),
-            'state_key': FEATURE_STORE_STATE_KEY,
-        })
-
-        connection.execute(text(f"""
-            DELETE FROM {FEATURE_STORE_ROWS_TABLE}
-            WHERE feature_state_version <> :feature_state_version
-        """), {'feature_state_version': feature_state_version})
+    _activate_feature_store_version(
+        engine,
+        feature_state_version=feature_state_version,
+        source_summary=source_summary,
+        source_max_date=source_max_date,
+        row_count=row_count,
+        client_count=client_count,
+        computed_at=computed_at,
+        reason=reason,
+    )
+    try:
+        _cleanup_inactive_feature_store_versions(
+            engine,
+            feature_state_version,
+            batch_size=FEATURE_STORE_CLEANUP_BATCH_SIZE,
+        )
+    except Exception:
+        pass
 
     return {
         'feature_state_version': feature_state_version,

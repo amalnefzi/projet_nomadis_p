@@ -61,6 +61,7 @@ async function runNextBestVisitProfileRebuildNow({
     normalizeSalesHistoryRowsForClients,
     queryVisitHistoryRowsForClients,
     normalizeVisitHistoryRowsForClients,
+    planningStartDate: planningStartDate || null,
     historicalCutoffDate: historicalCutoffDate || null
   })
 }
@@ -138,7 +139,7 @@ async function ensureNextBestVisitProfilesReady({
     }
   }
 
-  if (snapshotState.status === 'ready') {
+  if (snapshotState.status === 'ready' && !forceRetry) {
     return {
       status: 'ready',
       snapshotState,

@@ -7,10 +7,12 @@ const {
 } = require('../next_best_visit_versions')
 const {
   readProfileSnapshotState,
+  resolveProfileVersionHistoricalCutoffDate,
   resolveRequiredHistoricalCutoffDate
 } = require('../next_best_visit_profile_snapshot_store')
 const {
   ensureNextBestVisitProfilesReady,
+  runNextBestVisitProfileRebuildNow,
   __testables: readinessTestables
 } = require('../next_best_visit_profile_readiness')
 
@@ -89,6 +91,75 @@ function createSnapshotStateQueryMock({
   return queryAsync
 }
 
+function createRebuildQueryMock({
+  sourceFingerprint,
+  activeClients = []
+}) {
+  const persistedProfilePayloads = []
+  const persistedSnapshots = []
+
+  async function queryAsync(sql, params = []) {
+    const normalizedSql = String(sql || '').replace(/\s+/g, ' ').trim()
+
+    if (normalizedSql.startsWith('CREATE TABLE IF NOT EXISTS next_best_visit_profile_snapshot_state')) {
+      return []
+    }
+    if (normalizedSql.startsWith('CREATE TABLE IF NOT EXISTS next_best_visit_profile_snapshots')) {
+      return []
+    }
+    if (normalizedSql.startsWith('CREATE TABLE IF NOT EXISTS next_best_visit_client_profiles')) {
+      return []
+    }
+    if (normalizedSql.startsWith('INSERT INTO next_best_visit_profile_snapshot_state')) {
+      return []
+    }
+    if (normalizedSql.startsWith('UPDATE next_best_visit_profile_snapshot_state SET rebuild_status = \'rebuilding\'')) {
+      return []
+    }
+    if (normalizedSql.startsWith('SELECT (SELECT COUNT(*) FROM clients c')) {
+      return [sourceFingerprint]
+    }
+    if (normalizedSql.startsWith('SELECT c.id AS client_id,')) {
+      return activeClients
+    }
+    if (normalizedSql.startsWith('INSERT INTO next_best_visit_profile_snapshots')) {
+      persistedSnapshots.push({
+        profile_version: params[0],
+        source_data_version: params[1],
+        profile_schema_version: params[2],
+        cadence_algorithm_version: params[3],
+        historical_cutoff_date: params[4],
+        clients_count: params[5]
+      })
+      return []
+    }
+    if (normalizedSql.startsWith('DELETE FROM next_best_visit_client_profiles')) {
+      return []
+    }
+    if (normalizedSql.startsWith('INSERT INTO next_best_visit_client_profiles')) {
+      for (let index = 0; index < params.length; index += 21) {
+        persistedProfilePayloads.push(JSON.parse(params[index + 18]))
+      }
+      return []
+    }
+    if (normalizedSql.startsWith('UPDATE next_best_visit_profile_snapshots SET is_active = CASE WHEN profile_version = ? THEN 1 ELSE 0 END')) {
+      return []
+    }
+    if (normalizedSql.startsWith('UPDATE next_best_visit_profile_snapshot_state SET active_profile_version = ?,')) {
+      return []
+    }
+    if (normalizedSql.startsWith('UPDATE next_best_visit_profile_snapshot_state SET rebuild_status = ?')) {
+      return []
+    }
+
+    return []
+  }
+
+  queryAsync.__persistedProfilePayloads = persistedProfilePayloads
+  queryAsync.__persistedSnapshots = persistedSnapshots
+  return queryAsync
+}
+
 test('changing planning_start_date alone with no newer data keeps the active snapshot ready', async () => {
   const baseFingerprint = {
     active_clients_count: 2,
@@ -147,6 +218,203 @@ test('changing planning_start_date alone with no newer data keeps the active sna
   assert.equal(laterPlanningState.status, 'ready')
   assert.equal(laterPlanningState.required_historical_cutoff_date, '2026-08-09')
   assert.equal(laterPlanningState.required_profile_version, profileVersion)
+})
+
+test('planning_start_date-driven rebuild uses the planning cutoff instead of a future source max sale date', async () => {
+  const sourceFingerprint = {
+    active_clients_count: 1,
+    max_client_id: '927',
+    sales_rows_count: 1,
+    max_sale_date: '2035-02-15',
+    visits_rows_count: 0,
+    max_visit_date: null
+  }
+  const queryAsync = createRebuildQueryMock({
+    sourceFingerprint,
+    activeClients: [{
+      client_id: '927',
+      client_code: '00927',
+      nom: 'Client 00927'
+    }]
+  })
+  const salesReferenceDates = []
+  const visitReferenceDates = []
+
+  const result = await runNextBestVisitProfileRebuildNow({
+    queryAsync,
+    withTransaction: async handler => handler({}),
+    querySalesHistoryRowsForClients: async ({ referenceDate }) => {
+      salesReferenceDates.push(referenceDate)
+      return { rows: [], activeIndexes: [] }
+    },
+    normalizeSalesHistoryRowsForClients: () => new Map([
+      ['927', [{
+        purchase_date: '2025-12-23',
+        order_value: 100,
+        order_quantity: 1
+      }]]
+    ]),
+    queryVisitHistoryRowsForClients: async ({ referenceDate }) => {
+      visitReferenceDates.push(referenceDate)
+      return { rows: [], activeIndexes: [] }
+    },
+    normalizeVisitHistoryRowsForClients: () => new Map(),
+    planningStartDate: '2026-08-14',
+    historicalCutoffDate: null,
+    readProfileSnapshotStateImpl: async () => ({
+      status: 'missing'
+    })
+  })
+
+  assert.equal(result.status, 'success')
+  assert.deepEqual(salesReferenceDates, ['2026-08-13'])
+  assert.deepEqual(visitReferenceDates, ['2026-08-13'])
+  assert.notEqual(salesReferenceDates[0], '2035-02-15')
+  assert.equal(queryAsync.__persistedProfilePayloads.length, 1)
+  assert.equal(queryAsync.__persistedSnapshots.length, 1)
+  assert.equal(queryAsync.__persistedSnapshots[0].historical_cutoff_date, '2026-08-13')
+  assert.equal(
+    queryAsync.__persistedSnapshots[0].profile_version,
+    buildNextBestVisitProfileVersion({
+      sourceDataVersion: sourceFingerprint.source_data_version,
+      historicalCutoffDate: resolveProfileVersionHistoricalCutoffDate({
+        historicalCutoffDate: '2026-08-13',
+        sourceFingerprint
+      })
+    })
+  )
+  assert.equal(queryAsync.__persistedProfilePayloads[0].last_purchase_date, '2025-12-23')
+  assert.equal(queryAsync.__persistedProfilePayloads[0].days_since_last_purchase, 233)
+})
+
+test('required cutoff advances from D-1 2026-08-13 to D-1 2026-08-14 as planning date moves from 2026-08-14 to 2026-08-15', () => {
+  const sourceFingerprint = {
+    active_clients_count: 1,
+    max_client_id: '233',
+    sales_rows_count: 12,
+    max_sale_date: '2026-08-14',
+    visits_rows_count: 2,
+    max_visit_date: '2026-08-12'
+  }
+
+  assert.equal(resolveRequiredHistoricalCutoffDate({
+    planningStartDate: '2026-08-14',
+    historicalCutoffDate: null,
+    sourceFingerprint
+  }), '2026-08-13')
+
+  assert.equal(resolveRequiredHistoricalCutoffDate({
+    planningStartDate: '2026-08-15',
+    historicalCutoffDate: null,
+    sourceFingerprint
+  }), '2026-08-14')
+})
+
+test('snapshot built for cutoff 2026-08-13 becomes stale when plan 2026-08-15 requires cutoff 2026-08-14', async () => {
+  const sourceFingerprint = {
+    active_clients_count: 1,
+    max_client_id: '233',
+    sales_rows_count: 12,
+    max_sale_date: '2026-08-14',
+    visits_rows_count: 2,
+    max_visit_date: '2026-08-12'
+  }
+  const sourceDataVersion = buildNextBestVisitSourceDataVersion(sourceFingerprint)
+  const cutoff13ProfileVersion = buildNextBestVisitProfileVersion({
+    sourceDataVersion,
+    historicalCutoffDate: resolveProfileVersionHistoricalCutoffDate({
+      historicalCutoffDate: '2026-08-13',
+      sourceFingerprint
+    })
+  })
+  const queryAsync = createSnapshotStateQueryMock({
+    sourceFingerprint,
+    stateRow: {
+      scope_key: 'default',
+      active_profile_version: cutoff13ProfileVersion,
+      rebuild_status: 'ready',
+      latest_error_message: null,
+      rebuilding_started_at: null,
+      last_completed_at: '2026-08-13 08:00:00'
+    },
+    activeSnapshotRow: {
+      profile_version: cutoff13ProfileVersion,
+      source_data_version: sourceDataVersion,
+      profile_schema_version: '2026-08-04-d3-profile-schema-v2',
+      cadence_algorithm_version: '2026-08-04-d3-cadence-algorithm-v1',
+      historical_cutoff_date: '2026-08-13',
+      snapshot_status: 'ready',
+      clients_count: 1,
+      computed_at: '2026-08-13 08:00:00',
+      source_metrics_json: JSON.stringify(sourceFingerprint),
+      timings_json: JSON.stringify({}),
+      error_message: null,
+      is_active: 1
+    }
+  })
+
+  const snapshotState = await readProfileSnapshotState(queryAsync, {
+    planningStartDate: '2026-08-15'
+  })
+
+  assert.equal(snapshotState.required_historical_cutoff_date, '2026-08-14')
+  assert.equal(snapshotState.status, 'stale')
+  assert.notEqual(snapshotState.required_profile_version, cutoff13ProfileVersion)
+})
+
+test('explicit historical cutoff is preserved for required cutoff and rebuilt snapshot persistence', async () => {
+  const sourceFingerprint = {
+    active_clients_count: 1,
+    max_client_id: '233',
+    sales_rows_count: 12,
+    max_sale_date: '2026-08-14',
+    visits_rows_count: 2,
+    max_visit_date: '2026-08-12'
+  }
+  assert.equal(resolveRequiredHistoricalCutoffDate({
+    planningStartDate: '2026-08-15',
+    historicalCutoffDate: '2026-08-12',
+    sourceFingerprint
+  }), '2026-08-12')
+
+  const queryAsync = createRebuildQueryMock({
+    sourceFingerprint,
+    activeClients: [{
+      client_id: '233',
+      client_code: '00233',
+      nom: 'Client 00233'
+    }]
+  })
+
+  const result = await runNextBestVisitProfileRebuildNow({
+    queryAsync,
+    withTransaction: async handler => handler({}),
+    querySalesHistoryRowsForClients: async ({ referenceDate }) => {
+      assert.equal(referenceDate, '2026-08-12')
+      return { rows: [], activeIndexes: [] }
+    },
+    normalizeSalesHistoryRowsForClients: () => new Map([
+      ['233', [{
+        purchase_date: '2026-08-03',
+        order_value: 100,
+        order_quantity: 1
+      }]]
+    ]),
+    queryVisitHistoryRowsForClients: async ({ referenceDate }) => {
+      assert.equal(referenceDate, '2026-08-12')
+      return { rows: [], activeIndexes: [] }
+    },
+    normalizeVisitHistoryRowsForClients: () => new Map(),
+    planningStartDate: '2026-08-15',
+    historicalCutoffDate: '2026-08-12',
+    readProfileSnapshotStateImpl: async () => ({
+      status: 'missing'
+    })
+  })
+
+  assert.equal(result.historical_cutoff_date, '2026-08-12')
+  assert.equal(queryAsync.__persistedSnapshots.length, 1)
+  assert.equal(queryAsync.__persistedSnapshots[0].historical_cutoff_date, '2026-08-12')
 })
 
 test('READY snapshot plus planning_start_date next day stays ready with no rebuild when snapshot already covers latest source data', async () => {
@@ -849,6 +1117,79 @@ test('retry after failure starts a new rebuild', async () => {
   })
 
   assert.equal(result.status, 'building')
+  assert.equal(rebuildCalls, 1)
+  const inFlightPromise = readinessTestables.getInFlightRebuildState().promise
+  deferred.resolve({ status: 'success' })
+  await inFlightPromise
+})
+
+test('ready snapshot without forceRetry returns ready without starting a rebuild', async () => {
+  readinessTestables.resetNextBestVisitProfileReadinessStateForTests()
+  let rebuildCalls = 0
+
+  const result = await ensureNextBestVisitProfilesReady({
+    queryAsync: async () => [],
+    planningStartDate: '2026-08-20',
+    forceRetry: false,
+    readProfileSnapshotStateImpl: async () => ({
+      status: 'ready',
+      required_profile_version: 'profile-ready',
+      required_historical_cutoff_date: '2026-08-12',
+      source_fingerprint: {
+        source_data_version: 'source-v2'
+      },
+      snapshot: {
+        profile_version: 'profile-ready'
+      },
+      rebuilding_started_at: null
+    }),
+    rebuildNowImpl: async () => {
+      rebuildCalls += 1
+      return { status: 'success' }
+    }
+  })
+
+  assert.equal(result.status, 'ready')
+  assert.equal(result.rebuildStarted, false)
+  assert.equal(result.reusedInFlightRebuild, false)
+  assert.equal(rebuildCalls, 0)
+})
+
+test('ready snapshot with forceRetry starts the rebuild path', async () => {
+  readinessTestables.resetNextBestVisitProfileReadinessStateForTests()
+  const deferred = createDeferred()
+  let rebuildCalls = 0
+
+  const result = await ensureNextBestVisitProfilesReady({
+    queryAsync: async () => [],
+    withTransaction: async handler => handler({}),
+    querySalesHistoryRowsForClients: async () => [],
+    normalizeSalesHistoryRowsForClients: () => new Map(),
+    queryVisitHistoryRowsForClients: async () => [],
+    normalizeVisitHistoryRowsForClients: () => new Map(),
+    planningStartDate: '2026-08-20',
+    forceRetry: true,
+    readProfileSnapshotStateImpl: async () => ({
+      status: 'ready',
+      required_profile_version: 'profile-ready',
+      required_historical_cutoff_date: '2026-08-12',
+      source_fingerprint: {
+        source_data_version: 'source-v2'
+      },
+      snapshot: {
+        profile_version: 'profile-ready'
+      },
+      rebuilding_started_at: null
+    }),
+    rebuildNowImpl: async () => {
+      rebuildCalls += 1
+      return deferred.promise
+    }
+  })
+
+  assert.equal(result.status, 'building')
+  assert.equal(result.rebuildStarted, true)
+  assert.equal(result.reusedInFlightRebuild, false)
   assert.equal(rebuildCalls, 1)
   const inFlightPromise = readinessTestables.getInFlightRebuildState().promise
   deferred.resolve({ status: 'success' })

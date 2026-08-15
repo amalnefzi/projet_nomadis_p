@@ -5,7 +5,7 @@ from unittest import mock
 from datetime import date
 
 import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 
 
 API_DIR = Path(__file__).resolve().parents[1]
@@ -13,11 +13,13 @@ if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
 import api_ia  # noqa: E402
+import nomadis_feature_store as feature_store_module  # noqa: E402
 from nomadis_feature_store import (  # noqa: E402
     FEATURE_SCHEMA_VERSION,
     build_feature_store_source_summary,
     compute_effective_history_cutoff,
     feature_store_covers_target_date,
+    load_active_feature_store_frame,
     persist_feature_store_snapshot,
     feature_store_is_current,
 )
@@ -41,6 +43,187 @@ class NomadisFeatureStoreServingTest(unittest.TestCase):
         api_ia.feature_store_state = self.original_feature_store_state
         api_ia.feature_store_refresh_thread = self.original_feature_store_refresh_thread
         api_ia.feature_store_refresh_last_result = self.original_feature_store_refresh_last_result
+
+    def _create_feature_store_engine(self):
+        engine = create_engine("sqlite:///:memory:")
+        with engine.begin() as connection:
+            connection.exec_driver_sql("""
+                CREATE TABLE nomadis_client_feature_store (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    feature_state_version TEXT NOT NULL,
+                    feature_schema_version TEXT NOT NULL,
+                    source_data_watermark TEXT NOT NULL,
+                    source_max_date TEXT,
+                    computed_at TEXT,
+                    client_code TEXT NOT NULL,
+                    date_doc TEXT NOT NULL,
+                    region TEXT,
+                    delegation TEXT,
+                    routing_code TEXT,
+                    home_commercial TEXT,
+                    potentiel REAL,
+                    ca_jour REAL,
+                    qte_jour REAL,
+                    docs_jour REAL,
+                    line_items_jour REAL,
+                    product_refs_jour REAL,
+                    achat_target INTEGER,
+                    jour_semaine INTEGER,
+                    day_of_month INTEGER,
+                    week_of_month INTEGER,
+                    days_to_month_end INTEGER,
+                    is_month_start INTEGER,
+                    is_month_end INTEGER,
+                    nbr_visites_hist REAL,
+                    nbr_visites_jour REAL,
+                    days_since_last_order REAL,
+                    vente_last REAL,
+                    qte_last REAL,
+                    docs_last REAL,
+                    line_items_last REAL,
+                    product_refs_last REAL,
+                    vente_avg_3 REAL,
+                    qte_avg_3 REAL,
+                    docs_avg_3 REAL,
+                    line_items_avg_3 REAL,
+                    product_refs_avg_3 REAL,
+                    ca_last_7d REAL,
+                    ca_last_30d REAL,
+                    ca_last_60d REAL,
+                    ca_last_90d REAL,
+                    qte_last_7d REAL,
+                    qte_last_30d REAL,
+                    qte_last_60d REAL,
+                    qte_last_90d REAL,
+                    docs_last_30d REAL,
+                    docs_last_90d REAL,
+                    line_items_last_30d REAL,
+                    line_items_last_90d REAL,
+                    product_refs_last_30d REAL,
+                    product_refs_last_90d REAL,
+                    orders_last_7d REAL,
+                    orders_last_30d REAL,
+                    orders_last_60d REAL,
+                    orders_last_90d REAL,
+                    avg_ca_per_order_90d REAL,
+                    avg_qte_per_order_90d REAL,
+                    avg_docs_per_order_90d REAL,
+                    avg_line_items_per_order_90d REAL,
+                    avg_product_refs_per_order_90d REAL,
+                    weekday_purchase_rate REAL,
+                    days_since_last_same_weekday_order REAL,
+                    days_between_last_orders REAL,
+                    avg_days_between_orders_5 REAL,
+                    order_gap_ratio REAL,
+                    recent_ca_trend REAL,
+                    recent_qte_trend REAL,
+                    avg_price_hist REAL,
+                    month INTEGER,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            """)
+            connection.exec_driver_sql("""
+                CREATE TABLE nomadis_feature_store_state (
+                    state_key TEXT PRIMARY KEY,
+                    active_feature_schema_version TEXT,
+                    active_feature_state_version TEXT,
+                    active_source_data_watermark TEXT,
+                    active_source_max_date TEXT,
+                    active_row_count INTEGER,
+                    active_client_count INTEGER,
+                    active_computed_at TEXT,
+                    active_source_summary_json TEXT,
+                    status TEXT NOT NULL DEFAULT 'missing',
+                    rebuild_reason TEXT,
+                    rebuild_started_at TEXT,
+                    last_completed_at TEXT,
+                    error_message TEXT
+                )
+            """)
+            connection.exec_driver_sql("""
+                INSERT INTO nomadis_feature_store_state (state_key, status)
+                VALUES ('active', 'missing')
+            """)
+        return engine
+
+    def _build_feature_rows(self, row_count, *, day="2026-08-11", client_start=158):
+        rows = []
+        base_date = pd.Timestamp(day)
+        for index in range(row_count):
+            rows.append({
+                "client_code": str(client_start + index).zfill(5),
+                "date": base_date + pd.Timedelta(days=index % 2),
+                "region": "GT",
+                "delegation": "Ariana",
+                "routing_code": "1",
+                "home_commercial": "1",
+                "potentiel": 12.0 + index,
+                "vente_nette": 44.7 + index,
+                "qte_totale": 9.6 + index,
+                "achat_target": 1,
+                "jour_semaine": 2,
+                "day_of_month": 11 + (index % 2),
+                "week_of_month": 2,
+                "days_to_month_end": 20 - (index % 2),
+                "is_month_start": 0,
+                "is_month_end": 0,
+                "nbr_visites_hist": 8,
+                "nbr_visites_jour": 4,
+                "days_since_last_order": 1,
+                "vente_last": 233.013 + index,
+                "qte_last": 24 + index,
+                "docs_last": 1,
+                "line_items_last": 2,
+                "product_refs_last": 2,
+                "vente_avg_3": 163.0 + index,
+                "qte_avg_3": 12.0 + index,
+                "docs_avg_3": 1.0,
+                "line_items_avg_3": 2.0,
+                "product_refs_avg_3": 2.0,
+                "ca_last_7d": 233.013 + index,
+                "ca_last_30d": 233.013 + index,
+                "ca_last_60d": 233.013 + index,
+                "ca_last_90d": 233.013 + index,
+                "qte_last_7d": 24.0 + index,
+                "qte_last_30d": 24.0 + index,
+                "qte_last_60d": 24.0 + index,
+                "qte_last_90d": 24.0 + index,
+                "docs_last_30d": 1.0,
+                "docs_last_90d": 1.0,
+                "line_items_last_30d": 2.0,
+                "line_items_last_90d": 2.0,
+                "product_refs_last_30d": 2.0,
+                "product_refs_last_90d": 2.0,
+                "orders_last_7d": 1.0,
+                "orders_last_30d": 1.0,
+                "orders_last_60d": 1.0,
+                "orders_last_90d": 1.0,
+                "avg_ca_per_order_90d": 233.013 + index,
+                "avg_qte_per_order_90d": 24.0 + index,
+                "avg_docs_per_order_90d": 1.0,
+                "avg_line_items_per_order_90d": 2.0,
+                "avg_product_refs_per_order_90d": 2.0,
+                "weekday_purchase_rate": 0.5,
+                "days_since_last_same_weekday_order": 7.0,
+                "days_between_last_orders": 7.0,
+                "avg_days_between_orders_5": 7.0,
+                "order_gap_ratio": 1.0,
+                "recent_ca_trend": 0.1,
+                "recent_qte_trend": 0.1,
+                "avg_price_hist": 7.35,
+                "month": 8,
+            })
+        return pd.DataFrame(rows)
+
+    def _persist_snapshot_for_test(self, engine, features, source_summary, reason):
+        with mock.patch("nomadis_feature_store.ensure_feature_store_tables", autospec=True):
+            return persist_feature_store_snapshot(
+                engine,
+                {"features": features},
+                source_summary,
+                reason=reason,
+            )
 
     def test_feature_store_current_depends_on_active_snapshot_and_watermark(self):
         source_summary = {"watermark": "sha1:abc"}
@@ -372,6 +555,255 @@ class NomadisFeatureStoreServingTest(unittest.TestCase):
         )
         self.assertEqual(payload["status"], "success")
         self.assertEqual(payload["meta"]["history_cutoff_date"], "2026-08-11")
+
+    def test_persist_feature_store_snapshot_commits_large_frames_in_multiple_batches(self):
+        engine = self._create_feature_store_engine()
+        self._persist_snapshot_for_test(
+            engine,
+            self._build_feature_rows(1, day="2026-08-10", client_start=1),
+            {
+                "watermark": "sha1:old",
+                "source_max_date": "2026-08-10",
+                "serving_horizon_end_date": "2026-12-09",
+            },
+            reason="seed_old",
+        )
+
+        commit_count = {"value": 0}
+
+        @event.listens_for(engine, "commit")
+        def _count_commits(_connection):
+            commit_count["value"] += 1
+
+        original_append = feature_store_module._append_feature_store_rows_batch
+        with mock.patch("nomadis_feature_store.ensure_feature_store_tables", autospec=True), \
+             mock.patch.object(feature_store_module, "FEATURE_STORE_INSERT_BATCH_SIZE", 2), \
+             mock.patch.object(feature_store_module, "FEATURE_STORE_CLEANUP_BATCH_SIZE", 2), \
+             mock.patch.object(feature_store_module, "_append_feature_store_rows_batch", wraps=original_append) as append_mock:
+            persisted = persist_feature_store_snapshot(
+                engine,
+                {"features": self._build_feature_rows(5, day="2026-08-11", client_start=200)},
+                {
+                    "watermark": "sha1:new",
+                    "source_max_date": "2026-08-11",
+                    "serving_horizon_end_date": "2026-12-10",
+                },
+                reason="batched_refresh",
+            )
+
+            state = feature_store_module.read_feature_store_state(engine)
+
+        self.assertEqual(append_mock.call_count, 3)
+        self.assertGreaterEqual(commit_count["value"], 4)
+        self.assertEqual(state["active_feature_state_version"], persisted["feature_state_version"])
+        loaded_rows = pd.read_sql("SELECT * FROM nomadis_client_feature_store", engine)
+        self.assertEqual(len(loaded_rows), 5)
+
+    def test_persist_feature_store_snapshot_switches_only_after_complete_insert_success(self):
+        engine = self._create_feature_store_engine()
+        old_persisted = self._persist_snapshot_for_test(
+            engine,
+            self._build_feature_rows(1, day="2026-08-10", client_start=10),
+            {
+                "watermark": "sha1:old",
+                "source_max_date": "2026-08-10",
+                "serving_horizon_end_date": "2026-12-09",
+            },
+            reason="seed_old",
+        )
+        new_source_summary = {
+            "watermark": "sha1:new",
+            "source_max_date": "2026-08-11",
+            "serving_horizon_end_date": "2026-12-10",
+        }
+        new_features = self._build_feature_rows(5, day="2026-08-11", client_start=300)
+        expected_new_version = feature_store_module.build_feature_store_state_version(new_source_summary)
+        original_activate = feature_store_module._activate_feature_store_version
+
+        def _assert_before_switch(*args, **kwargs):
+            state_before_switch = feature_store_module.read_feature_store_state(engine)
+            self.assertEqual(
+                state_before_switch["active_feature_state_version"],
+                old_persisted["feature_state_version"],
+            )
+            new_version_rows = pd.read_sql(
+                "SELECT COUNT(*) AS row_count FROM nomadis_client_feature_store WHERE feature_state_version = ?",
+                engine,
+                params=(expected_new_version,),
+            )
+            self.assertEqual(int(new_version_rows.iloc[0]["row_count"]), len(new_features))
+            return original_activate(*args, **kwargs)
+
+        with mock.patch("nomadis_feature_store.ensure_feature_store_tables", autospec=True), \
+             mock.patch.object(feature_store_module, "FEATURE_STORE_INSERT_BATCH_SIZE", 2), \
+             mock.patch.object(feature_store_module, "_activate_feature_store_version", side_effect=_assert_before_switch):
+            persisted = persist_feature_store_snapshot(
+                engine,
+                {"features": new_features},
+                new_source_summary,
+                reason="switch_after_success",
+            )
+
+            state = feature_store_module.read_feature_store_state(engine)
+        self.assertEqual(state["active_feature_state_version"], persisted["feature_state_version"])
+
+    def test_persist_feature_store_snapshot_failure_mid_insert_keeps_old_active_version(self):
+        engine = self._create_feature_store_engine()
+        old_persisted = self._persist_snapshot_for_test(
+            engine,
+            self._build_feature_rows(1, day="2026-08-10", client_start=20),
+            {
+                "watermark": "sha1:old",
+                "source_max_date": "2026-08-10",
+                "serving_horizon_end_date": "2026-12-09",
+            },
+            reason="seed_old",
+        )
+        new_source_summary = {
+            "watermark": "sha1:failure",
+            "source_max_date": "2026-08-11",
+            "serving_horizon_end_date": "2026-12-10",
+        }
+        expected_new_version = feature_store_module.build_feature_store_state_version(new_source_summary)
+        original_append = feature_store_module._append_feature_store_rows_batch
+        append_call_count = {"value": 0}
+
+        def _flaky_append(batch_engine, batch):
+            append_call_count["value"] += 1
+            if append_call_count["value"] == 2:
+                raise RuntimeError("simulated batch failure")
+            return original_append(batch_engine, batch)
+
+        with mock.patch("nomadis_feature_store.ensure_feature_store_tables", autospec=True), \
+             mock.patch.object(feature_store_module, "FEATURE_STORE_INSERT_BATCH_SIZE", 2), \
+             mock.patch.object(feature_store_module, "_append_feature_store_rows_batch", side_effect=_flaky_append):
+            with self.assertRaisesRegex(RuntimeError, "simulated batch failure"):
+                persist_feature_store_snapshot(
+                    engine,
+                    {"features": self._build_feature_rows(5, day="2026-08-11", client_start=400)},
+                    new_source_summary,
+                    reason="mid_insert_failure",
+                )
+
+            state = feature_store_module.read_feature_store_state(engine)
+            active_rows, active_state = load_active_feature_store_frame(engine)
+
+        self.assertEqual(
+            state["active_feature_state_version"],
+            old_persisted["feature_state_version"],
+        )
+        self.assertEqual(active_state["active_feature_state_version"], old_persisted["feature_state_version"])
+        self.assertEqual(len(active_rows), 1)
+        partial_rows = pd.read_sql(
+            "SELECT COUNT(*) AS row_count FROM nomadis_client_feature_store WHERE feature_state_version = ?",
+            engine,
+            params=(expected_new_version,),
+        )
+        self.assertEqual(int(partial_rows.iloc[0]["row_count"]), 2)
+
+    def test_load_active_feature_store_frame_reads_new_active_version_after_batched_persist(self):
+        engine = self._create_feature_store_engine()
+        self._persist_snapshot_for_test(
+            engine,
+            self._build_feature_rows(1, day="2026-08-10", client_start=30),
+            {
+                "watermark": "sha1:old",
+                "source_max_date": "2026-08-10",
+                "serving_horizon_end_date": "2026-12-09",
+            },
+            reason="seed_old",
+        )
+
+        with mock.patch("nomadis_feature_store.ensure_feature_store_tables", autospec=True), \
+             mock.patch.object(feature_store_module, "FEATURE_STORE_INSERT_BATCH_SIZE", 2):
+            persisted = persist_feature_store_snapshot(
+                engine,
+                {"features": self._build_feature_rows(4, day="2026-08-11", client_start=500)},
+                {
+                    "watermark": "sha1:active",
+                    "source_max_date": "2026-08-11",
+                    "serving_horizon_end_date": "2026-12-10",
+                },
+                reason="load_active_after_success",
+            )
+
+            active_rows, state = load_active_feature_store_frame(engine)
+        self.assertEqual(state["active_feature_state_version"], persisted["feature_state_version"])
+        self.assertEqual(len(active_rows), 4)
+        self.assertIn("history_date", active_rows.columns)
+
+    def test_persist_feature_store_snapshot_does_not_rewrite_rows_when_target_version_is_already_active(self):
+        engine = self._create_feature_store_engine()
+        source_summary = {
+            "watermark": "sha1:same",
+            "source_max_date": "2026-08-11",
+            "serving_horizon_end_date": "2026-12-10",
+        }
+        initial_persisted = self._persist_snapshot_for_test(
+            engine,
+            self._build_feature_rows(2, day="2026-08-11", client_start=600),
+            source_summary,
+            reason="seed_same_version",
+        )
+        original_rows = pd.read_sql(
+            "SELECT client_code, date_doc, feature_state_version FROM nomadis_client_feature_store ORDER BY client_code, date_doc",
+            engine,
+        )
+
+        with mock.patch("nomadis_feature_store.ensure_feature_store_tables", autospec=True), \
+             mock.patch.object(feature_store_module, "_append_feature_store_rows_batch") as append_mock, \
+             mock.patch.object(feature_store_module, "_delete_feature_store_version_rows_in_batches") as delete_mock:
+            persisted = persist_feature_store_snapshot(
+                engine,
+                {"features": self._build_feature_rows(2, day="2026-08-11", client_start=600)},
+                source_summary,
+                reason="same_version_refresh",
+            )
+
+        append_mock.assert_not_called()
+        deleted_versions = [call.args[1] for call in delete_mock.call_args_list]
+        self.assertNotIn(initial_persisted["feature_state_version"], deleted_versions)
+        reloaded_rows = pd.read_sql(
+            "SELECT client_code, date_doc, feature_state_version FROM nomadis_client_feature_store ORDER BY client_code, date_doc",
+            engine,
+        )
+        pd.testing.assert_frame_equal(original_rows, reloaded_rows)
+        self.assertEqual(persisted["feature_state_version"], initial_persisted["feature_state_version"])
+
+    def test_persist_feature_store_snapshot_cleanup_failure_after_activation_keeps_ready_state(self):
+        engine = self._create_feature_store_engine()
+        self._persist_snapshot_for_test(
+            engine,
+            self._build_feature_rows(1, day="2026-08-10", client_start=700),
+            {
+                "watermark": "sha1:old",
+                "source_max_date": "2026-08-10",
+                "serving_horizon_end_date": "2026-12-09",
+            },
+            reason="seed_old",
+        )
+        source_summary = {
+            "watermark": "sha1:cleanup",
+            "source_max_date": "2026-08-11",
+            "serving_horizon_end_date": "2026-12-10",
+        }
+
+        with mock.patch("nomadis_feature_store.ensure_feature_store_tables", autospec=True), \
+             mock.patch.object(feature_store_module, "_cleanup_inactive_feature_store_versions", side_effect=RuntimeError("simulated cleanup failure")):
+            persisted = persist_feature_store_snapshot(
+                engine,
+                {"features": self._build_feature_rows(3, day="2026-08-11", client_start=800)},
+                source_summary,
+                reason="cleanup_failure_after_activation",
+            )
+            state = feature_store_module.read_feature_store_state(engine)
+            active_rows, active_state = load_active_feature_store_frame(engine)
+
+        self.assertEqual(state["status"], "ready")
+        self.assertEqual(state["active_feature_state_version"], persisted["feature_state_version"])
+        self.assertEqual(active_state["status"], "ready")
+        self.assertEqual(active_state["active_feature_state_version"], persisted["feature_state_version"])
+        self.assertEqual(len(active_rows), 3)
 
     def test_persist_feature_store_snapshot_handles_duplicate_columns(self):
         engine = create_engine("sqlite:///:memory:")

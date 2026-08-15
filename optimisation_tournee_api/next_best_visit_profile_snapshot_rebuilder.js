@@ -8,6 +8,7 @@ const {
   markProfileSnapshotRebuildFailed,
   markProfileSnapshotRebuildStarted,
   persistProfileSnapshot,
+  resolveRequiredHistoricalCutoffDate,
   resolveProfileVersionHistoricalCutoffDate
 } = require('./next_best_visit_profile_snapshot_store')
 
@@ -59,6 +60,7 @@ async function rebuildNextBestVisitProfileSnapshot({
   normalizeSalesHistoryRowsForClients,
   queryVisitHistoryRowsForClients,
   normalizeVisitHistoryRowsForClients,
+  planningStartDate = null,
   historicalCutoffDate = null
 }) {
   if (typeof queryAsync !== 'function') {
@@ -80,7 +82,12 @@ async function rebuildNextBestVisitProfileSnapshot({
 
   try {
     const sourceFingerprint = await perf.run('source_data_version_check', async () => computeNextBestVisitSourceFingerprint(queryAsync))
-    const referenceDate = historicalCutoffDate || sourceFingerprint.max_sale_date || '2026-08-04'
+    const effectiveHistoricalCutoffDate = resolveRequiredHistoricalCutoffDate({
+      planningStartDate,
+      historicalCutoffDate,
+      sourceFingerprint
+    }) || '2026-08-04'
+    const referenceDate = effectiveHistoricalCutoffDate
     const activeClients = await perf.run('load_active_clients', async () => loadActiveClientsForProfileSnapshot(queryAsync))
     const salesHistoryByClientId = await perf.run('load_sales_history', async () => {
       const { rows, activeIndexes } = await perf.run('sales_history_query_ms', async () => querySalesHistoryRowsForClients({
@@ -112,7 +119,7 @@ async function rebuildNextBestVisitProfileSnapshot({
       maxDaysWithoutContact: null
     })))
     const profileVersionHistoricalCutoffDate = resolveProfileVersionHistoricalCutoffDate({
-      historicalCutoffDate,
+      historicalCutoffDate: effectiveHistoricalCutoffDate,
       sourceFingerprint
     })
     const profileVersion = buildNextBestVisitProfileVersion({
@@ -126,7 +133,7 @@ async function rebuildNextBestVisitProfileSnapshot({
         connection,
         profileVersion,
         sourceDataVersion: sourceFingerprint.source_data_version,
-        historicalCutoffDate,
+        historicalCutoffDate: effectiveHistoricalCutoffDate,
         cadenceProfiles,
         sourceMetrics: sourceFingerprint,
         timings: {
@@ -140,7 +147,7 @@ async function rebuildNextBestVisitProfileSnapshot({
       profile_snapshot_status: 'ready',
       profile_version: profileVersion,
       source_data_version: sourceFingerprint.source_data_version,
-      historical_cutoff_date: historicalCutoffDate || null,
+      historical_cutoff_date: effectiveHistoricalCutoffDate || null,
       active_clients_count: Array.isArray(activeClients) ? activeClients.length : 0,
       cadence_profiles_count: Array.isArray(cadenceProfiles) ? cadenceProfiles.length : 0,
       timings: {

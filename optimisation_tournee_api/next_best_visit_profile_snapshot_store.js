@@ -496,7 +496,7 @@ async function readProfileSnapshotState(queryAsync, {
     sourceFingerprint
   })
   const requiredProfileVersionHistoricalCutoffDate = resolveProfileVersionHistoricalCutoffDate({
-    historicalCutoffDate,
+    historicalCutoffDate: requiredHistoricalCutoffDate,
     sourceFingerprint
   })
   const requiredProfileVersion = buildNextBestVisitProfileVersion({
