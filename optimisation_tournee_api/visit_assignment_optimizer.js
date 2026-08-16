@@ -322,6 +322,19 @@ function computeAssignmentMetrics(opportunity = {}, slot = {}, minimumVisitsPref
   }
 }
 
+function resolveHistoricalCommercialCircuitDistance(opportunity = {}, slot = {}) {
+  const distancesByCommercialCode = opportunity?.commercial_circuit_distances_km
+  if (!distancesByCommercialCode || typeof distancesByCommercialCode !== 'object') return null
+  const distanceKm = Number(distancesByCommercialCode[String(slot?.commercial_code || '').trim()])
+  return Number.isFinite(distanceKm) ? distanceKm : null
+}
+
+function matchesHistoricalCommercialContinuity(opportunity = {}, slot = {}) {
+  const continuityCode = String(opportunity?.historical_commercial_continuity_code || '').trim()
+  if (!continuityCode) return false
+  return continuityCode === String(slot?.commercial_code || '').trim()
+}
+
 function shouldRejectLowSignalExploration(opportunity = {}, selectedSlot = {}, minimumVisitsPreference = 0) {
   if (!isLowSignalExploration(opportunity)) return false
   const selectedLowSignalCount = selectedSlot.visits.filter(visit => isLowSignalExploration(visit)).length
@@ -335,6 +348,26 @@ function shouldRejectLowSignalExploration(opportunity = {}, selectedSlot = {}, m
 }
 
 function compareSlotsForOpportunity(opportunity = {}, left = {}, right = {}, minimumVisitsPreference = 0) {
+  const leftCircuitDistanceKm = resolveHistoricalCommercialCircuitDistance(opportunity, left)
+  const rightCircuitDistanceKm = resolveHistoricalCommercialCircuitDistance(opportunity, right)
+  const leftHasCircuitDistance = Number.isFinite(leftCircuitDistanceKm)
+  const rightHasCircuitDistance = Number.isFinite(rightCircuitDistanceKm)
+
+  if (leftHasCircuitDistance || rightHasCircuitDistance) {
+    if (leftHasCircuitDistance !== rightHasCircuitDistance) {
+      return leftHasCircuitDistance ? -1 : 1
+    }
+    const circuitDistanceDelta = Number(leftCircuitDistanceKm || 0) - Number(rightCircuitDistanceKm || 0)
+    if (circuitDistanceDelta !== 0) return circuitDistanceDelta
+  }
+
+    const leftContinuity = matchesHistoricalCommercialContinuity(opportunity, left)
+  const rightContinuity = matchesHistoricalCommercialContinuity(opportunity, right)
+
+  if (leftContinuity !== rightContinuity) {
+    return leftContinuity ? -1 : 1
+  }
+
   const leftMetrics = computeAssignmentMetrics(opportunity, left, minimumVisitsPreference)
   const rightMetrics = computeAssignmentMetrics(opportunity, right, minimumVisitsPreference)
   const minimumPreference = Number(minimumVisitsPreference || 0)
@@ -357,6 +390,7 @@ function compareSlotsForOpportunity(opportunity = {}, left = {}, right = {}, min
   const caGapLeft = (Number(left.min_daily_ca_target || 0) - Number(left.expected_order_value_total || 0))
   const caGapRight = (Number(right.min_daily_ca_target || 0) - Number(right.expected_order_value_total || 0))
   if (caGapLeft !== caGapRight) return caGapRight - caGapLeft
+ 
   return String(left.slot_id || '').localeCompare(String(right.slot_id || ''))
 }
 
@@ -554,6 +588,8 @@ function assignVisitOpportunities({
       .map(slotId => slotsById.get(slotId))
       .sort((left, right) => compareSlotsForOpportunity(opportunity, left, right, minimumVisitsPreference))[0]
     const selectedSlotMetrics = computeAssignmentMetrics(opportunity, selectedSlot, minimumVisitsPreference)
+    const selectedCircuitDistanceKm = resolveHistoricalCommercialCircuitDistance(opportunity, selectedSlot)
+    const historicalCommercialContinuity = matchesHistoricalCommercialContinuity(opportunity, selectedSlot)
 
     if (shouldRejectLowSignalExploration(opportunity, selectedSlot, minimumVisitsPreference)) {
       recordClientRejection(opportunity, ['LOW_EFFECTIVE_SCORE'])
@@ -572,6 +608,9 @@ function assignVisitOpportunities({
       shifted_within_recommended_window: selectedSlot.date !== String(opportunity.preferred_date || opportunity.candidate_date || ''),
       commercial_code: selectedSlot.commercial_code,
       commercial_label: selectedSlot.commercial_label,
+      circuit_distance_km: Number.isFinite(selectedCircuitDistanceKm) ? roundScore(selectedCircuitDistanceKm) : null,
+      circuit_assignment_source: Number.isFinite(selectedCircuitDistanceKm) ? 'historical_commercial_circuit' : null,
+      historical_commercial_continuity: historicalCommercialContinuity,
       explanation_codes: explained.explanation_codes,
       explanation_reasons: explained.explanation_reasons
     }

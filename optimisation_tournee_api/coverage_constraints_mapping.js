@@ -59,14 +59,14 @@ const COVERAGE_CONSTRAINTS_MAPPING = Object.freeze({
     source_label: null
   },
   client_restrictions: {
-    table: 'clients',
-    client_id_column: 'id',
-    allowed_commercial_codes_column: 'user_code',
+    table: null,
+    client_id_column: null,
+    allowed_commercial_codes_column: null,
     denied_commercial_codes_column: null,
-    deleted_at_column: 'deleted_at',
-    active_column: 'isactif',
-    active_value: '1',
-    source_label: 'clients.user_code'
+    deleted_at_column: null,
+    active_column: null,
+    active_value: null,
+    source_label: null
   }
 })
 

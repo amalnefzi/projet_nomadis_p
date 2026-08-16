@@ -57,6 +57,23 @@ function roundScore(value) {
   return Math.round(Number(value || 0) * 10) / 10
 }
 
+function toOptionalFiniteNumber(value) {
+  if (value === null || value === undefined || value === '') return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const values = [lat1, lon1, lat2, lon2].map(Number)
+  if (values.some(value => !Number.isFinite(value))) return null
+  const [aLat, aLon, bLat, bLon] = values.map(value => value * (Math.PI / 180))
+  const dLat = bLat - aLat
+  const dLon = bLon - aLon
+  const h = Math.sin(dLat / 2) ** 2 +
+    Math.cos(aLat) * Math.cos(bLat) * (Math.sin(dLon / 2) ** 2)
+  return 6371 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h))
+}
+
 function normalizeNullablePositiveInt(value) {
   if (value === null || value === undefined || value === '') return null
   const parsed = Number.parseInt(value, 10)
@@ -126,19 +143,212 @@ function buildCompatibleCommercialCodesByClientId(clients = [], selectedCommerci
   ;(Array.isArray(clients) ? clients : []).forEach(client => {
     const clientId = String(client.client_id || '')
     const restriction = coverageConstraints?.client_restrictions?.[clientId] || null
-    const explicitAllowed = Array.isArray(restriction?.allowed_commercial_codes)
-      ? restriction.allowed_commercial_codes.filter(code => selectedCodes.has(code))
+    const deniedCodes = Array.isArray(restriction?.denied_commercial_codes)
+      ? restriction.denied_commercial_codes
+        .map(code => String(code || '').trim())
+        .filter(code => selectedCodes.has(code))
       : []
-    const fallbackCode = String(client.resolved_commercial_code || client.user_code || '').trim()
-    const compatibleCodes = explicitAllowed.length
+    const deniedCodeSet = new Set(deniedCodes)
+    const rawAllowedCodes = Array.isArray(restriction?.allowed_commercial_codes)
+      ? restriction.allowed_commercial_codes
+        .map(code => String(code || '').trim())
+        .filter(Boolean)
+      : null
+    const hasExplicitAllowedRestriction = Array.isArray(rawAllowedCodes) && rawAllowedCodes.length > 0
+    const explicitAllowed = hasExplicitAllowedRestriction
+      ? rawAllowedCodes.filter(code => selectedCodes.has(code) && !deniedCodeSet.has(code))
+      : []
+    const compatibleCodes = hasExplicitAllowedRestriction
       ? explicitAllowed
-      : (fallbackCode && selectedCodes.has(fallbackCode)
-        ? [fallbackCode]
-        : [...selectedCodes])
+      : [...selectedCodes].filter(code => !deniedCodeSet.has(code))
     map.set(clientId, [...new Set(compatibleCodes)].sort())
   })
 
   return map
+}
+
+function resolveHistoricalCommercialContinuityCode(client = {}) {
+  return String(client.resolved_commercial_code || client.user_code || '').trim() || null
+}
+
+function resolveDominantHistoricalCommercialCode({
+  historyRows = [],
+  selectedCodeSet = new Set(),
+  referenceDate = null
+} = {}) {
+  const statsByCommercialCode = new Map()
+
+  ;(Array.isArray(historyRows) ? historyRows : []).forEach(row => {
+    const purchaseDate = normalizeDateOnly(row?.purchase_date)
+    if (!purchaseDate) return
+    if (referenceDate && purchaseDate > referenceDate) return
+
+    const commercialCode = String(row?.commercial_code || '').trim()
+    if (!commercialCode || !selectedCodeSet.has(commercialCode)) return
+
+    const stats = statsByCommercialCode.get(commercialCode) || {
+      salesCount: 0,
+      mostRecentSaleDate: null
+    }
+    stats.salesCount += 1
+    if (!stats.mostRecentSaleDate || purchaseDate > stats.mostRecentSaleDate) {
+      stats.mostRecentSaleDate = purchaseDate
+    }
+    statsByCommercialCode.set(commercialCode, stats)
+  })
+
+  if (!statsByCommercialCode.size) return null
+
+  return [...statsByCommercialCode.entries()]
+    .sort(([leftCode, leftStats], [rightCode, rightStats]) => {
+      const salesCountDelta = Number(rightStats.salesCount || 0) - Number(leftStats.salesCount || 0)
+      if (salesCountDelta !== 0) return salesCountDelta
+
+      const recencyDelta = String(rightStats.mostRecentSaleDate || '').localeCompare(String(leftStats.mostRecentSaleDate || ''))
+      if (recencyDelta !== 0) return recencyDelta
+
+      return String(leftCode || '').localeCompare(String(rightCode || ''))
+    })[0][0]
+}
+
+function buildHistoricalCommercialCircuitProfileByCode({
+  clients = [],
+  salesHistoryByClientId = new Map(),
+  selectedCommercials = [],
+  referenceDate = null
+} = {}) {
+  const selectedCodeSet = new Set(
+    (Array.isArray(selectedCommercials) ? selectedCommercials : [])
+      .map(item => String(item?.value || item?.code || '').trim())
+      .filter(Boolean)
+  )
+  const normalizedReferenceDate = normalizeDateOnly(referenceDate)
+  const pointsByCommercialCode = new Map()
+
+  ;(Array.isArray(clients) ? clients : []).forEach(client => {
+    const clientId = String(client?.client_id || '').trim()
+    const latitude = toOptionalFiniteNumber(client?.latitude)
+    const longitude = toOptionalFiniteNumber(client?.longitude)
+    if (!clientId || latitude == null || longitude == null) return
+
+    const historyRows = salesHistoryByClientId instanceof Map
+      ? (salesHistoryByClientId.get(clientId) || [])
+      : []
+    const dominantCommercialCode = resolveDominantHistoricalCommercialCode({
+      historyRows,
+      selectedCodeSet,
+      referenceDate: normalizedReferenceDate
+    })
+    if (!dominantCommercialCode) return
+
+    const pointsByClientId = pointsByCommercialCode.get(dominantCommercialCode) || new Map()
+    if (!pointsByClientId.has(clientId)) {
+      pointsByClientId.set(clientId, {
+        client_id: clientId,
+        latitude,
+        longitude
+      })
+    }
+    pointsByCommercialCode.set(dominantCommercialCode, pointsByClientId)
+  })
+
+  return new Map(
+    [...pointsByCommercialCode.entries()].map(([commercialCode, pointsByClientId]) => [
+      commercialCode,
+      [...pointsByClientId.values()]
+    ])
+  )
+}
+
+function computeCommercialCircuitDistanceKmForClient({
+  client = {},
+  commercialCode = '',
+  historicalCommercialCircuitProfileByCode = new Map()
+} = {}) {
+  const clientId = String(client?.client_id || '').trim()
+  const latitude = toOptionalFiniteNumber(client?.latitude)
+  const longitude = toOptionalFiniteNumber(client?.longitude)
+  if (!clientId || latitude == null || longitude == null) return null
+
+  const candidatePoints = historicalCommercialCircuitProfileByCode instanceof Map
+    ? (historicalCommercialCircuitProfileByCode.get(String(commercialCode || '').trim()) || [])
+    : []
+  const nearestDistances = (Array.isArray(candidatePoints) ? candidatePoints : [])
+    .filter(point => String(point?.client_id || '').trim() !== clientId)
+    .map(point => haversineKm(latitude, longitude, point?.latitude, point?.longitude))
+    .filter(Number.isFinite)
+    .sort((left, right) => left - right)
+    .slice(0, 3)
+
+  if (!nearestDistances.length) return null
+  return roundScore(nearestDistances.reduce((sum, value) => sum + value, 0) / nearestDistances.length)
+}
+
+function buildHistoricalCommercialCircuitDistanceByClientId({
+  clients = [],
+  compatibleCommercialCodesByClientId = new Map(),
+  historicalCommercialCircuitProfileByCode = new Map()
+} = {}) {
+  const distancesByClientId = new Map()
+
+  ;(Array.isArray(clients) ? clients : []).forEach(client => {
+    const clientId = String(client?.client_id || '').trim()
+    if (!clientId) return
+    const compatibleCommercialCodes = compatibleCommercialCodesByClientId instanceof Map
+      ? (compatibleCommercialCodesByClientId.get(clientId) || [])
+      : []
+    const distancesByCommercialCode = {}
+    compatibleCommercialCodes.forEach(commercialCode => {
+      const distanceKm = computeCommercialCircuitDistanceKmForClient({
+        client,
+        commercialCode,
+        historicalCommercialCircuitProfileByCode
+      })
+      if (Number.isFinite(distanceKm)) {
+        distancesByCommercialCode[commercialCode] = distanceKm
+      }
+    })
+    distancesByClientId.set(clientId, distancesByCommercialCode)
+  })
+
+  return distancesByClientId
+}
+
+function attachHistoricalCommercialCircuitDiagnostics({
+  opportunities = [],
+  clients = [],
+  compatibleCommercialCodesByClientId = new Map(),
+  salesHistoryByClientId = new Map(),
+  selectedCommercials = [],
+  referenceDate = null
+} = {}) {
+  const historicalCommercialCircuitProfileByCode = buildHistoricalCommercialCircuitProfileByCode({
+    clients,
+    salesHistoryByClientId,
+    selectedCommercials,
+    referenceDate
+  })
+  const distancesByClientId = buildHistoricalCommercialCircuitDistanceByClientId({
+    clients,
+    compatibleCommercialCodesByClientId,
+    historicalCommercialCircuitProfileByCode
+  })
+  const clientsById = new Map(
+    (Array.isArray(clients) ? clients : [])
+      .map(client => [String(client?.client_id || '').trim(), client])
+      .filter(([clientId]) => clientId)
+  )
+
+  return (Array.isArray(opportunities) ? opportunities : []).map(opportunity => {
+    const clientId = String(opportunity?.client_id || '').trim()
+    const client = clientsById.get(clientId) || {}
+    const commercialCircuitDistancesKm = distancesByClientId.get(clientId) || {}
+    return {
+      ...opportunity,
+      commercial_circuit_distances_km: { ...commercialCircuitDistancesKm },
+      historical_commercial_continuity_code: resolveHistoricalCommercialContinuityCode(client)
+    }
+  })
 }
 
 function buildPortfolioCandidateWindow(profile = {}, candidateDateEntries = []) {
@@ -1576,7 +1786,15 @@ async function generateNextBestVisitPlanFromData({
       availabilityByClientDate
     }
   }))
-  const opportunitiesWithPortfolio = opportunities.map(opportunity => {
+  const opportunitiesWithCommercialCircuit = attachHistoricalCommercialCircuitDiagnostics({
+    opportunities,
+    clients,
+    compatibleCommercialCodesByClientId,
+    salesHistoryByClientId,
+    selectedCommercials,
+    referenceDate: normalizedRequestContext.historicalCutoffDate || normalizedRequestContext.startDate
+  })
+  const opportunitiesWithPortfolio = opportunitiesWithCommercialCircuit.map(opportunity => {
     const portfolioDecision = preAssignmentPortfolioByClientId.get(String(opportunity.client_id || '').trim()) || {}
     return {
       ...opportunity,
@@ -1804,10 +2022,14 @@ module.exports = {
   buildCandidateDateEntriesByClientId,
   buildClientScopePayload,
   buildCompatibleCommercialCodesByClientId,
+  buildHistoricalCommercialCircuitProfileByCode,
+  buildHistoricalCommercialCircuitDistanceByClientId,
+  computeCommercialCircuitDistanceKmForClient,
   buildDepotByCommercialDate,
   buildClientFinalDecisions,
   buildPredictionResolverFromRecords,
   buildSummary,
+  attachHistoricalCommercialCircuitDiagnostics,
   computeOpportunityScoring,
   createPerfTracker,
   detectProbabilityUnit,

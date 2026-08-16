@@ -313,6 +313,127 @@ async function fetchSalesHistoryForClients({
   })
 }
 
+async function queryCommercialCircuitHistoryRowsForClients({
+  queryAsync,
+  activeClients = [],
+  referenceDate,
+  commercialCodes = []
+}) {
+  const activeIndexes = buildActiveClientIndexes(activeClients)
+  const exactCodes = activeIndexes.activeClients
+    .map(client => normalizeExactClientCode(client.client_code))
+    .filter(Boolean)
+  const normalizedCodes = [...new Set(
+    activeIndexes.activeClients
+      .map(client => normalizeHistoricalClientCode(client.client_code))
+      .filter(Boolean)
+  )]
+
+  if (!exactCodes.length) {
+    return { rows: [], activeIndexes }
+  }
+
+  const historyFilter = buildHistoryFilter({
+    exactColumn: 'TRIM(e.client_code)',
+    normalizedColumn: buildHistoryNormalizedCodeExpression('e.client_code'),
+    exactCodes,
+    normalizedCodes
+  })
+
+  const selectedCodes = [...new Set(
+    (Array.isArray(commercialCodes) ? commercialCodes : [])
+      .map(code => String(code || '').trim())
+      .filter(Boolean)
+  )]
+
+  const commercialFilter = buildOptionalInClause(
+    "COALESCE(NULLIF(TRIM(e.commercial_code), ''), NULLIF(TRIM(e.user_code), ''))",
+    selectedCodes
+  )
+
+  const rows = await queryAsync(
+    `
+      SELECT
+        TRIM(e.client_code) AS historical_client_code,
+        DATE(e.date) AS purchase_date,
+        COALESCE(
+          NULLIF(TRIM(e.commercial_code), ''),
+          NULLIF(TRIM(e.user_code), '')
+        ) AS commercial_code
+      FROM entetecommercials e
+      WHERE e.deleted_at IS NULL
+        AND e.type IN ('facture', 'bl', 'blf')
+        AND DATE(e.date) <= ?
+        ${commercialFilter.clause ? `AND ${commercialFilter.clause}` : ''}
+        ${historyFilter.sql}
+      ORDER BY DATE(e.date) ASC, e.code ASC
+    `,
+    [
+      referenceDate,
+      ...commercialFilter.params,
+      ...historyFilter.params
+    ]
+  )
+
+  return {
+    rows: Array.isArray(rows) ? rows : [],
+    activeIndexes
+  }
+}
+
+function normalizeCommercialCircuitHistoryRowsForClients({
+  rows = [],
+  activeIndexes
+} = {}) {
+  const map = new Map()
+
+  ;(Array.isArray(rows) ? rows : []).forEach(row => {
+    const match = resolveHistoricalClientMatch(
+      row.historical_client_code,
+      activeIndexes
+    )
+
+    if (!['exact_match', 'unique_normalized_match'].includes(match.status)) {
+      return
+    }
+
+    const clientId = normalizeClientId(match.client_id)
+    const purchaseDate = normalizeDateOnly(row.purchase_date)
+    const commercialCode = String(row.commercial_code || '').trim()
+
+    if (!clientId || !purchaseDate || !commercialCode) return
+
+    const list = map.get(clientId) || []
+    list.push({
+      purchase_date: purchaseDate,
+      commercial_code: commercialCode
+    })
+    map.set(clientId, list)
+  })
+
+  return map
+}
+
+async function fetchCommercialCircuitHistoryForClients({
+  queryAsync,
+  activeClients = [],
+  referenceDate,
+  commercialCodes = []
+}) {
+  const { rows, activeIndexes } =
+    await queryCommercialCircuitHistoryRowsForClients({
+      queryAsync,
+      activeClients,
+      referenceDate,
+      commercialCodes
+    })
+
+  return normalizeCommercialCircuitHistoryRowsForClients({
+    rows,
+    activeIndexes
+  })
+}
+
 async function querySalesProductHistoryRowsForClients({
   queryAsync,
   activeClients = [],
@@ -1356,13 +1477,14 @@ async function generateNextBestVisitPlan(rawBody = {}, dependencies = {}) {
     return decorateNextBestVisitPayload(buildSnapshotUnavailablePayload(snapshotState, requestContext), perf.stages())
   }
 
+  let salesHistoryByClientId = new Map()
   const cadenceProfiles = await perf.run('load_profile_snapshot', async () => {
     if (Array.isArray(snapshotState?.cadenceProfiles)) {
       return snapshotState.cadenceProfiles
     }
     if (allowInlineProfileBuild) {
       const historyReferenceDate = requestContext.historicalCutoffDate || requestContext.startDate
-      const [salesHistoryByClientId, visitHistoryByClientId] = await Promise.all([
+      const [loadedSalesHistoryByClientId, visitHistoryByClientId] = await Promise.all([
         fetchSalesHistoryForClients({
           queryAsync,
           activeClients: clients,
@@ -1374,9 +1496,10 @@ async function generateNextBestVisitPlan(rawBody = {}, dependencies = {}) {
           referenceDate: historyReferenceDate
         })
       ])
+      salesHistoryByClientId = loadedSalesHistoryByClientId
       return buildCadenceProfiles({
         clients,
-        salesHistoryByClientId,
+        salesHistoryByClientId: loadedSalesHistoryByClientId,
         visitHistoryByClientId,
         referenceDate: historyReferenceDate,
         maxDaysWithoutContact: requestContext.maxDaysWithoutContact
@@ -1392,6 +1515,7 @@ async function generateNextBestVisitPlan(rawBody = {}, dependencies = {}) {
     }
     return rows
   })
+
 
   const predictionModelVersion = buildNextBestVisitPredictionModelVersion(path.resolve(__dirname))
   const canonicalFeatureIdentity = typeof queryAsync === 'function'
@@ -1445,7 +1569,24 @@ async function generateNextBestVisitPlan(rawBody = {}, dependencies = {}) {
       }
     }, perf.stages())
   }
+if (!(salesHistoryByClientId instanceof Map) || !salesHistoryByClientId.size) {
+  const circuitReferenceDate = normalizeDateOnly(
+    snapshotState?.snapshot?.historical_cutoff_date ||
+    snapshotState?.required_historical_cutoff_date ||
+    requestContext.historicalCutoffDate ||
+    requestContext.startDate
+  )
 
+  salesHistoryByClientId = await perf.run(
+    'load_commercial_circuit_history',
+    async () => fetchCommercialCircuitHistoryForClients({
+      queryAsync,
+      activeClients: clients,
+      referenceDate: circuitReferenceDate,
+      commercialCodes: selectedCommercials.map(item => item.value)
+    })
+  )
+}
   const batchPredictionFetcher = typeof fetchAiPredictionsForClientBatch === 'function'
     ? buildCachedBatchPredictionResolver({
         queryAsync,
@@ -1487,6 +1628,7 @@ async function generateNextBestVisitPlan(rawBody = {}, dependencies = {}) {
     cadenceProfiles,
     selectedCommercials,
     coverageConstraints,
+    salesHistoryByClientId,
     predictionResolver: batchPredictionFetcher,
     sharedDepotOrigin,
     cacheStatus: 'plan_miss',
