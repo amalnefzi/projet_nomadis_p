@@ -1,0 +1,20 @@
+{
+  "must_select_clients": [
+    "NEW_001"
+  ],
+  "expected_decision_mode": {
+    "NEW_001": "exploration"
+  },
+  "expected_null_fields": {
+    "NEW_001": [
+      "purchase_probability",
+      "predicted_ca",
+      "recommended_quantity"
+    ]
+  },
+  "required_reason_codes": {
+    "NEW_001": [
+      "EXPLORATION_VISIT"
+    ]
+  }
+}

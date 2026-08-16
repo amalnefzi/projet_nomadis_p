@@ -1,0 +1,97 @@
+{
+  "clients": [
+    {
+      "client_id": "61",
+      "client_code": "DECLINE_002",
+      "nom": "Declining Reactivate",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 52,
+      "latitude": 36.8,
+      "longitude": 10.1
+    }
+  ],
+  "sales_history": [
+    {
+      "client_id": "61",
+      "purchase_date": "2026-04-10",
+      "order_value": 200,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "61",
+      "purchase_date": "2026-05-10",
+      "order_value": 200,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "61",
+      "purchase_date": "2026-06-09",
+      "order_value": 200,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "61",
+      "purchase_date": "2026-07-09",
+      "order_value": 200,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "61",
+      "purchase_date": "2026-08-23",
+      "order_value": 200,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    }
+  ],
+  "visits_history": [],
+  "predictions": [
+    {
+      "client_id": "61",
+      "client_code": "DECLINE_002",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 58,
+      "predicted_ca": 150,
+      "recommended_quantity": 4,
+      "model_confidence": 66,
+      "score": 61,
+      "vip": 52,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    }
+  ],
+  "availability": [],
+  "commercials": [
+    {
+      "value": "C01",
+      "label": "Commercial C01"
+    }
+  ],
+  "commercial_constraints": {
+    "commercials": {
+      "C01": {
+        "available_dates": [
+          "2026-09-07",
+          "2026-09-08",
+          "2026-09-09"
+        ],
+        "unavailable_dates": [],
+        "hard_max_visits_by_date": {
+          "2026-09-07": 1
+        }
+      }
+    },
+    "client_restrictions": {}
+  },
+  "shared_depot_origin": {
+    "latitude": 36.8065,
+    "longitude": 10.1815,
+    "nom": "Depot lab"
+  }
+}

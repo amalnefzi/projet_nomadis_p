@@ -1,0 +1,18 @@
+{
+  "must_select_clients": [
+    "NULL_001"
+  ],
+  "expected_null_fields": {
+    "NULL_001": [
+      "purchase_probability",
+      "predicted_ca",
+      "recommended_quantity"
+    ]
+  },
+  "forbidden_reason_codes": {
+    "NULL_001": [
+      "HIGH_EXPECTED_CA",
+      "HIGH_PURCHASE_PROBABILITY"
+    ]
+  }
+}

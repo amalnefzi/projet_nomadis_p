@@ -1,0 +1,247 @@
+{
+  "clients": [
+    {
+      "client_id": "301",
+      "client_code": "OBJ_SALES",
+      "nom": "Sales Focus",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 34,
+      "latitude": 37.12,
+      "longitude": 10.76
+    },
+    {
+      "client_id": "302",
+      "client_code": "OBJ_RISK",
+      "nom": "Risk Focus",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 72,
+      "latitude": 36.812,
+      "longitude": 10.182
+    },
+    {
+      "client_id": "303",
+      "client_code": "OBJ_NEAR",
+      "nom": "Near Balanced",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 58,
+      "latitude": 36.811,
+      "longitude": 10.181
+    },
+    {
+      "client_id": "304",
+      "client_code": "OBJ_VIP",
+      "nom": "Commercial Priority",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 100,
+      "latitude": 36.85,
+      "longitude": 10.23
+    }
+  ],
+  "sales_history": [
+    {
+      "client_id": "301",
+      "purchase_date": "2026-08-10",
+      "order_value": 210,
+      "order_quantity": 8,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "301",
+      "purchase_date": "2026-08-17",
+      "order_value": 210,
+      "order_quantity": 8,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "301",
+      "purchase_date": "2026-08-24",
+      "order_value": 210,
+      "order_quantity": 8,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "301",
+      "purchase_date": "2026-08-31",
+      "order_value": 210,
+      "order_quantity": 8,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "302",
+      "purchase_date": "2026-04-10",
+      "order_value": 100,
+      "order_quantity": 3,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "302",
+      "purchase_date": "2026-05-10",
+      "order_value": 100,
+      "order_quantity": 3,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "302",
+      "purchase_date": "2026-06-09",
+      "order_value": 100,
+      "order_quantity": 3,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "302",
+      "purchase_date": "2026-07-09",
+      "order_value": 100,
+      "order_quantity": 3,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "303",
+      "purchase_date": "2026-08-10",
+      "order_value": 190,
+      "order_quantity": 5,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "303",
+      "purchase_date": "2026-08-17",
+      "order_value": 190,
+      "order_quantity": 5,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "303",
+      "purchase_date": "2026-08-24",
+      "order_value": 190,
+      "order_quantity": 5,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "303",
+      "purchase_date": "2026-08-31",
+      "order_value": 190,
+      "order_quantity": 5,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "304",
+      "purchase_date": "2026-08-10",
+      "order_value": 210,
+      "order_quantity": 5,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "304",
+      "purchase_date": "2026-08-17",
+      "order_value": 210,
+      "order_quantity": 5,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "304",
+      "purchase_date": "2026-08-24",
+      "order_value": 210,
+      "order_quantity": 5,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "304",
+      "purchase_date": "2026-08-31",
+      "order_value": 210,
+      "order_quantity": 5,
+      "commercial_code": "C01"
+    }
+  ],
+  "predictions": [
+    {
+      "client_id": "301",
+      "client_code": "OBJ_SALES",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 86,
+      "predicted_ca": 300,
+      "recommended_quantity": 9,
+      "model_confidence": 84,
+      "score": 85,
+      "vip": 48,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    },
+    {
+      "client_id": "302",
+      "client_code": "OBJ_RISK",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 54,
+      "predicted_ca": 145,
+      "recommended_quantity": 4,
+      "model_confidence": 72,
+      "score": 60,
+      "vip": 64,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    },
+    {
+      "client_id": "303",
+      "client_code": "OBJ_NEAR",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 79,
+      "predicted_ca": 255,
+      "recommended_quantity": 6,
+      "model_confidence": 80,
+      "score": 80,
+      "vip": 58,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    },
+    {
+      "client_id": "304",
+      "client_code": "OBJ_VIP",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 80,
+      "predicted_ca": 285,
+      "recommended_quantity": 6,
+      "model_confidence": 81,
+      "score": 81,
+      "vip": 99,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    }
+  ],
+  "visits_history": [],
+  "availability": [],
+  "commercials": [
+    {
+      "value": "C01",
+      "label": "Commercial C01"
+    }
+  ],
+  "commercial_constraints": {
+    "commercials": {
+      "C01": {
+        "available_dates": [
+          "2026-09-07"
+        ],
+        "unavailable_dates": [],
+        "hard_max_visits_by_date": {
+          "2026-09-07": 1
+        }
+      }
+    },
+    "client_restrictions": {}
+  },
+  "shared_depot_origin": {
+    "latitude": 36.8065,
+    "longitude": 10.1815,
+    "nom": "Depot lab"
+  }
+}

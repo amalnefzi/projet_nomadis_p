@@ -1,0 +1,14 @@
+{
+  "must_select_clients": [
+    "LIGHT_001"
+  ],
+  "expected_decision_mode": {
+    "LIGHT_001": "hybrid"
+  },
+  "expected_confidence_range": {
+    "LIGHT_001": {
+      "min": 10,
+      "max": 25
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "expected_known_fields": {
+    "DECLINE_001": [
+      "inactivity_risk"
+    ]
+  },
+  "expected_decision_mode": {
+    "DECLINE_001": "predictive"
+  }
+}

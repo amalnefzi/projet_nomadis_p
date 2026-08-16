@@ -1,0 +1,12 @@
+{
+  "must_select_clients": [
+    "DET_A",
+    "DET_B"
+  ],
+  "relative_ranking": [
+    [
+      "DET_A",
+      "DET_B"
+    ]
+  ]
+}

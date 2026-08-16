@@ -1,0 +1,10 @@
+{
+  "must_select_clients": [
+    "DECLINE_002"
+  ],
+  "expected_known_fields": {
+    "DECLINE_002": [
+      "inactivity_risk"
+    ]
+  }
+}

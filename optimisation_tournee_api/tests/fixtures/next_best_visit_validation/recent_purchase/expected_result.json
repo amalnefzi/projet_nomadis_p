@@ -1,0 +1,19 @@
+{
+  "must_select_clients": [
+    "RECENT_002"
+  ],
+  "must_not_select_clients": [
+    "RECENT_001"
+  ],
+  "required_reason_codes": {
+    "RECENT_001": [
+      "RECENT_PURCHASE_DEPRIORITIZED"
+    ]
+  },
+  "relative_ranking": [
+    [
+      "RECENT_002",
+      "RECENT_001"
+    ]
+  ]
+}

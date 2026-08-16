@@ -1,0 +1,141 @@
+{
+  "clients": [
+    {
+      "client_id": "201",
+      "client_code": "DET_A",
+      "nom": "Deterministic A",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 58,
+      "latitude": 36.8,
+      "longitude": 10.1
+    },
+    {
+      "client_id": "202",
+      "client_code": "DET_B",
+      "nom": "Deterministic B",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 56,
+      "latitude": 36.801,
+      "longitude": 10.101
+    }
+  ],
+  "sales_history": [
+    {
+      "client_id": "201",
+      "purchase_date": "2026-08-10",
+      "order_value": 180,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "201",
+      "purchase_date": "2026-08-17",
+      "order_value": 180,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "201",
+      "purchase_date": "2026-08-24",
+      "order_value": 180,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "201",
+      "purchase_date": "2026-08-31",
+      "order_value": 180,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "202",
+      "purchase_date": "2026-08-10",
+      "order_value": 170,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "202",
+      "purchase_date": "2026-08-17",
+      "order_value": 170,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "202",
+      "purchase_date": "2026-08-24",
+      "order_value": 170,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "202",
+      "purchase_date": "2026-08-31",
+      "order_value": 170,
+      "order_quantity": 4,
+      "commercial_code": "C01"
+    }
+  ],
+  "visits_history": [],
+  "predictions": [
+    {
+      "client_id": "201",
+      "client_code": "DET_A",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 71,
+      "predicted_ca": 210,
+      "recommended_quantity": 4,
+      "model_confidence": 77,
+      "score": 72,
+      "vip": 57,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    },
+    {
+      "client_id": "202",
+      "client_code": "DET_B",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 68,
+      "predicted_ca": 205,
+      "recommended_quantity": 4,
+      "model_confidence": 77,
+      "score": 69,
+      "vip": 56,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    }
+  ],
+  "availability": [],
+  "commercials": [
+    {
+      "value": "C01",
+      "label": "Commercial C01"
+    }
+  ],
+  "commercial_constraints": {
+    "commercials": {
+      "C01": {
+        "available_dates": [
+          "2026-09-07"
+        ],
+        "unavailable_dates": [],
+        "hard_max_visits_by_date": {
+          "2026-09-07": 2
+        }
+      }
+    },
+    "client_restrictions": {}
+  },
+  "shared_depot_origin": {
+    "latitude": 36.8065,
+    "longitude": 10.1815,
+    "nom": "Depot lab"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "must_select_clients": [
+    "GROW_001"
+  ],
+  "expected_known_fields": {
+    "GROW_001": [
+      "customer_activity_trend",
+      "recommended_visit_interval_days"
+    ]
+  },
+  "expected_decision_mode": {
+    "GROW_001": "predictive"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "must_select_clients": [
+    "FREQ_001"
+  ],
+  "allowed_dates_by_client": {
+    "FREQ_001": [
+      "2026-09-07",
+      "2026-09-10",
+      "2026-09-12",
+      "2026-09-13"
+    ]
+  },
+  "forbidden_dates_by_client": {
+    "FREQ_001": [
+      "2026-09-11"
+    ]
+  },
+  "minimum_occurrences_in_horizon": {
+    "FREQ_001": 3
+  },
+  "maximum_occurrences_per_day": {
+    "FREQ_001": 1
+  },
+  "expected_decision_mode": {
+    "FREQ_001": "predictive"
+  },
+  "required_reason_codes": {
+    "FREQ_001": [
+      "HIGH_PURCHASE_PROBABILITY"
+    ]
+  }
+}

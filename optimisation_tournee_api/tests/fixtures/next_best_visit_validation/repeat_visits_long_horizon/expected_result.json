@@ -1,0 +1,11 @@
+{
+  "must_select_clients": [
+    "REPEAT_001"
+  ],
+  "maximum_occurrences_per_day": {
+    "REPEAT_001": 1
+  },
+  "minimum_occurrences_in_horizon": {
+    "REPEAT_001": 3
+  }
+}

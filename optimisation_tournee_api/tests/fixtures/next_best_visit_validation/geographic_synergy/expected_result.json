@@ -1,0 +1,10 @@
+{
+  "must_select_clients": [
+    "CLUSTER_A",
+    "CLUSTER_B",
+    "CLUSTER_C"
+  ],
+  "must_not_select_clients": [
+    "FAR_MED"
+  ]
+}

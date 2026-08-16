@@ -1,0 +1,11 @@
+{
+  "must_select_clients": [
+    "PROB_HIGH"
+  ],
+  "relative_ranking": [
+    [
+      "PROB_HIGH",
+      "VIP_MID"
+    ]
+  ]
+}

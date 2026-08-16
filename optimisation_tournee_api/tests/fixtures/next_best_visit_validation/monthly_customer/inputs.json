@@ -1,0 +1,75 @@
+{
+  "clients": [
+    {
+      "client_id": "21",
+      "client_code": "MONTH_001",
+      "nom": "Client Monthly",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 48,
+      "latitude": 36.8,
+      "longitude": 10.1
+    }
+  ],
+  "sales_history": [
+    {
+      "client_id": "21",
+      "purchase_date": "2026-06-03",
+      "order_value": 260,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "21",
+      "purchase_date": "2026-07-04",
+      "order_value": 260,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "21",
+      "purchase_date": "2026-08-04",
+      "order_value": 260,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "21",
+      "purchase_date": "2026-09-01",
+      "order_value": 260,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    }
+  ],
+  "visits_history": [],
+  "predictions": [],
+  "availability": [],
+  "commercials": [
+    {
+      "value": "C01",
+      "label": "Commercial C01"
+    }
+  ],
+  "commercial_constraints": {
+    "commercials": {
+      "C01": {
+        "available_dates": [
+          "2026-09-07",
+          "2026-09-08",
+          "2026-09-09",
+          "2026-09-10",
+          "2026-09-11",
+          "2026-09-12",
+          "2026-09-13"
+        ],
+        "unavailable_dates": []
+      }
+    },
+    "client_restrictions": {}
+  },
+  "shared_depot_origin": {
+    "latitude": 36.8065,
+    "longitude": 10.1815,
+    "nom": "Depot lab"
+  }
+}

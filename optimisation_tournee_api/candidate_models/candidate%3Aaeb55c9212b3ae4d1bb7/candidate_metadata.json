@@ -1,0 +1,83 @@
+{
+  "candidate_version": "candidate:aeb55c9212b3ae4d1bb7",
+  "trained_at": "2026-08-10T17:46:37.242357+00:00",
+  "training_data_cutoff": "2026-08-13",
+  "feedback_rows_used": 27,
+  "feedback_rows_holdout": 7,
+  "current_model": {
+    "purchase_probability": {
+      "comparable_count": 7,
+      "positive_count": 7,
+      "negative_count": 0,
+      "auc": null,
+      "logloss": 3.777111,
+      "bias": -0.883738
+    },
+    "ca_if_buy": {
+      "comparable_count": 7,
+      "mae": 4.671292,
+      "rmse": 5.14975,
+      "bias": -1.988072,
+      "mape_valid_count": 7,
+      "mape": 8.123221
+    },
+    "quantity_if_buy": {
+      "comparable_count": 7,
+      "mae": 3.4655,
+      "rmse": 3.923232,
+      "bias": 3.366211,
+      "mape_valid_count": 7,
+      "mape": 27.292129
+    }
+  },
+  "candidate_model": {
+    "purchase_probability": {
+      "comparable_count": 7,
+      "positive_count": 7,
+      "negative_count": 0,
+      "auc": null,
+      "logloss": 3.846164,
+      "bias": -0.886809
+    },
+    "ca_if_buy": {
+      "comparable_count": 7,
+      "mae": 6.750867,
+      "rmse": 7.145873,
+      "bias": -0.994555,
+      "mape_valid_count": 7,
+      "mape": 13.401896
+    },
+    "quantity_if_buy": {
+      "comparable_count": 7,
+      "mae": 3.596006,
+      "rmse": 4.503454,
+      "bias": -3.349623,
+      "mape_valid_count": 7,
+      "mape": 27.543022
+    }
+  },
+  "delta": {
+    "purchase_probability": {
+      "logloss": 0.069053,
+      "bias": -0.003071
+    },
+    "ca_if_buy": {
+      "mae": 2.079575,
+      "rmse": 1.996123,
+      "bias": 0.993517,
+      "mape": 5.278675
+    },
+    "quantity_if_buy": {
+      "mae": 0.130506,
+      "rmse": 0.580222,
+      "bias": -6.715834,
+      "mape": 0.250893
+    }
+  },
+  "recommendation": "current_better",
+  "targets_retrained": [
+    "ca_if_buy",
+    "purchase_probability",
+    "quantity_if_buy"
+  ]
+}

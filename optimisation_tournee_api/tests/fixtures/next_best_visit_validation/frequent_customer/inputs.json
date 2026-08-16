@@ -1,0 +1,170 @@
+{
+  "clients": [
+    {
+      "client_id": "1",
+      "client_code": "FREQ_001",
+      "nom": "Client Frequent",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 78,
+      "latitude": 36.8,
+      "longitude": 10.1
+    },
+    {
+      "client_id": "2",
+      "client_code": "FREQ_002",
+      "nom": "Client Nearby",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 40,
+      "latitude": 36.801,
+      "longitude": 10.101
+    }
+  ],
+  "sales_history": [
+    {
+      "client_id": "1",
+      "purchase_date": "2026-08-20",
+      "order_value": 210,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "1",
+      "purchase_date": "2026-08-24",
+      "order_value": 210,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "1",
+      "purchase_date": "2026-08-27",
+      "order_value": 210,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "1",
+      "purchase_date": "2026-08-31",
+      "order_value": 210,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "1",
+      "purchase_date": "2026-09-03",
+      "order_value": 210,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "2",
+      "purchase_date": "2026-08-10",
+      "order_value": 90,
+      "order_quantity": 2,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "2",
+      "purchase_date": "2026-08-17",
+      "order_value": 90,
+      "order_quantity": 2,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "2",
+      "purchase_date": "2026-08-24",
+      "order_value": 90,
+      "order_quantity": 2,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "2",
+      "purchase_date": "2026-08-31",
+      "order_value": 90,
+      "order_quantity": 2,
+      "commercial_code": "C01"
+    }
+  ],
+  "visits_history": [],
+  "predictions": [
+    {
+      "client_id": "1",
+      "client_code": "FREQ_001",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 84,
+      "predicted_ca": 320,
+      "recommended_quantity": 6,
+      "model_confidence": 88,
+      "score": 86,
+      "vip": 70,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    },
+    {
+      "client_id": "1",
+      "client_code": "FREQ_001",
+      "candidate_date": "2026-09-10",
+      "purchase_probability": 79,
+      "predicted_ca": 310,
+      "recommended_quantity": 5,
+      "model_confidence": 87,
+      "score": 83,
+      "vip": 70,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    },
+    {
+      "client_id": "2",
+      "client_code": "FREQ_002",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 35,
+      "predicted_ca": 80,
+      "recommended_quantity": 2,
+      "model_confidence": 55,
+      "score": 40,
+      "vip": 38,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    }
+  ],
+  "availability": [],
+  "commercials": [
+    {
+      "value": "C01",
+      "label": "Commercial C01"
+    }
+  ],
+  "commercial_constraints": {
+    "commercials": {
+      "C01": {
+        "available_dates": [
+          "2026-09-07",
+          "2026-09-08",
+          "2026-09-09",
+          "2026-09-10",
+          "2026-09-11",
+          "2026-09-12",
+          "2026-09-13"
+        ],
+        "unavailable_dates": [],
+        "hard_max_visits_by_date": {
+          "2026-09-07": 2,
+          "2026-09-10": 2
+        }
+      }
+    },
+    "client_restrictions": {}
+  },
+  "shared_depot_origin": {
+    "latitude": 36.8065,
+    "longitude": 10.1815,
+    "nom": "Depot lab"
+  }
+}

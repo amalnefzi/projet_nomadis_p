@@ -1,0 +1,194 @@
+{
+  "clients": [
+    {
+      "client_id": "181",
+      "client_code": "CAP_A",
+      "nom": "Capacity A",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 72,
+      "latitude": 36.8,
+      "longitude": 10.1
+    },
+    {
+      "client_id": "182",
+      "client_code": "CAP_B",
+      "nom": "Capacity B",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 68,
+      "latitude": 36.801,
+      "longitude": 10.101
+    },
+    {
+      "client_id": "183",
+      "client_code": "CAP_C",
+      "nom": "Capacity C",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 54,
+      "latitude": 36.802,
+      "longitude": 10.102
+    }
+  ],
+  "sales_history": [
+    {
+      "client_id": "181",
+      "purchase_date": "2026-08-10",
+      "order_value": 260,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "181",
+      "purchase_date": "2026-08-17",
+      "order_value": 260,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "181",
+      "purchase_date": "2026-08-24",
+      "order_value": 260,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "181",
+      "purchase_date": "2026-08-31",
+      "order_value": 260,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "182",
+      "purchase_date": "2026-08-10",
+      "order_value": 240,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "182",
+      "purchase_date": "2026-08-17",
+      "order_value": 240,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "182",
+      "purchase_date": "2026-08-24",
+      "order_value": 240,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "182",
+      "purchase_date": "2026-08-31",
+      "order_value": 240,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "183",
+      "purchase_date": "2026-08-10",
+      "order_value": 120,
+      "order_quantity": 3,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "183",
+      "purchase_date": "2026-08-17",
+      "order_value": 120,
+      "order_quantity": 3,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "183",
+      "purchase_date": "2026-08-24",
+      "order_value": 120,
+      "order_quantity": 3,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "183",
+      "purchase_date": "2026-08-31",
+      "order_value": 120,
+      "order_quantity": 3,
+      "commercial_code": "C01"
+    }
+  ],
+  "visits_history": [],
+  "predictions": [
+    {
+      "client_id": "181",
+      "client_code": "CAP_A",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 86,
+      "predicted_ca": 330,
+      "recommended_quantity": 7,
+      "model_confidence": 84,
+      "score": 87,
+      "vip": 68,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    },
+    {
+      "client_id": "182",
+      "client_code": "CAP_B",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 81,
+      "predicted_ca": 290,
+      "recommended_quantity": 6,
+      "model_confidence": 81,
+      "score": 82,
+      "vip": 62,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    },
+    {
+      "client_id": "183",
+      "client_code": "CAP_C",
+      "candidate_date": "2026-09-07",
+      "purchase_probability": 49,
+      "predicted_ca": 130,
+      "recommended_quantity": 3,
+      "model_confidence": 66,
+      "score": 50,
+      "vip": 48,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    }
+  ],
+  "availability": [],
+  "commercials": [
+    {
+      "value": "C01",
+      "label": "Commercial C01"
+    }
+  ],
+  "commercial_constraints": {
+    "commercials": {
+      "C01": {
+        "available_dates": [
+          "2026-09-07"
+        ],
+        "unavailable_dates": [],
+        "hard_max_visits_by_date": {
+          "2026-09-07": 2
+        }
+      }
+    },
+    "client_restrictions": {}
+  },
+  "shared_depot_origin": {
+    "latitude": 36.8065,
+    "longitude": 10.1815,
+    "nom": "Depot lab"
+  }
+}

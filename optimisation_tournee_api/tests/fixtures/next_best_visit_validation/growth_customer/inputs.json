@@ -1,0 +1,105 @@
+{
+  "clients": [
+    {
+      "client_id": "41",
+      "client_code": "GROW_001",
+      "nom": "Growing Client",
+      "user_code": "C01",
+      "resolved_commercial_code": "C01",
+      "potentiel": 66,
+      "latitude": 36.8,
+      "longitude": 10.1
+    }
+  ],
+  "sales_history": [
+    {
+      "client_id": "41",
+      "purchase_date": "2026-05-10",
+      "order_value": 90,
+      "order_quantity": 2,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "41",
+      "purchase_date": "2026-06-04",
+      "order_value": 90,
+      "order_quantity": 2,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "41",
+      "purchase_date": "2026-07-29",
+      "order_value": 150,
+      "order_quantity": 5,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "41",
+      "purchase_date": "2026-08-12",
+      "order_value": 185,
+      "order_quantity": 6,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "41",
+      "purchase_date": "2026-08-23",
+      "order_value": 220,
+      "order_quantity": 7,
+      "commercial_code": "C01"
+    },
+    {
+      "client_id": "41",
+      "purchase_date": "2026-08-31",
+      "order_value": 255,
+      "order_quantity": 8,
+      "commercial_code": "C01"
+    }
+  ],
+  "visits_history": [],
+  "predictions": [
+    {
+      "client_id": "41",
+      "client_code": "GROW_001",
+      "candidate_date": "2026-09-08",
+      "purchase_probability": 83,
+      "predicted_ca": 340,
+      "recommended_quantity": 7,
+      "model_confidence": 84,
+      "score": 84,
+      "vip": 67,
+      "probability_model_only": null,
+      "habit_score": null,
+      "recency_score": null,
+      "prediction_source": "fixture_prediction"
+    }
+  ],
+  "availability": [],
+  "commercials": [
+    {
+      "value": "C01",
+      "label": "Commercial C01"
+    }
+  ],
+  "commercial_constraints": {
+    "commercials": {
+      "C01": {
+        "available_dates": [
+          "2026-09-07",
+          "2026-09-08",
+          "2026-09-09",
+          "2026-09-10"
+        ],
+        "unavailable_dates": [],
+        "hard_max_visits_by_date": {
+          "2026-09-08": 1
+        }
+      }
+    },
+    "client_restrictions": {}
+  },
+  "shared_depot_origin": {
+    "latitude": 36.8065,
+    "longitude": 10.1815,
+    "nom": "Depot lab"
+  }
+}

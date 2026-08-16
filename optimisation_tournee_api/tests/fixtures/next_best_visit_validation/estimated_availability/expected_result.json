@@ -1,0 +1,15 @@
+{
+  "must_select_clients": [
+    "EST_001"
+  ],
+  "expected_known_fields": {
+    "EST_001": [
+      "availability_status"
+    ]
+  },
+  "forbidden_reason_codes": {
+    "EST_001": [
+      "EXPLICITLY_AVAILABLE"
+    ]
+  }
+}
