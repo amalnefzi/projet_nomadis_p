@@ -448,15 +448,118 @@ class NomadisFeatureStoreServingTest(unittest.TestCase):
             "active_feature_state_version": "sha1:old",
             "active_source_data_watermark": "sha1:old",
         }
-        with mock.patch.object(api_ia, "get_feature_store_engine", return_value=object()), \
-             mock.patch.object(api_ia, "build_feature_store_source_summary", return_value=source_summary), \
-             mock.patch.object(api_ia, "read_feature_store_state", return_value=stale_state), \
-             mock.patch.object(api_ia, "feature_store_build_expired", return_value=True), \
-             mock.patch.object(api_ia, "refresh_feature_store_singleflight", return_value={"status": "building", "reason": "startup"}) as refresh_mock:
-            result = api_ia.schedule_feature_store_refresh_if_needed(reason="startup")
+
+        with (
+            mock.patch.object(
+                api_ia,
+                "get_feature_store_engine",
+                return_value=object()
+            ),
+            mock.patch.object(
+                api_ia,
+                "build_feature_store_source_summary",
+                return_value=source_summary
+            ),
+            mock.patch.object(
+                api_ia,
+                "read_feature_store_state",
+                return_value=stale_state
+            ),
+            mock.patch.object(
+                api_ia,
+                "feature_store_build_expired",
+                return_value=True
+            ),
+            mock.patch.object(
+                api_ia,
+                "refresh_feature_store_singleflight",
+                return_value={
+                    "status": "building",
+                    "reason": "startup"
+                }
+            ) as refresh_mock
+        ):
+            result = api_ia.schedule_feature_store_refresh_if_needed(
+                reason="startup"
+            )
 
         self.assertEqual(result["status"], "building")
         refresh_mock.assert_called_once()
+
+    def test_prediction_uses_covered_snapshot_without_waiting_for_daily_refresh(self):
+        source_summary = {
+            "watermark": "sha1:new-day",
+            "source_max_date": "2026-08-16",
+            "serving_horizon_end_date": "2026-12-14",
+        }
+        state = {
+            "status": "ready",
+            "active_feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "active_feature_state_version": "sha1:old-state",
+            "active_source_data_watermark": "sha1:previous-day",
+            "active_source_max_date": "2026-08-15",
+            "active_source_summary": {
+                "serving_horizon_end_date": "2026-12-13"
+            },
+        }
+
+        api_ia.prediction_history_source = (
+            "canonical_feature_store"
+        )
+
+        with (
+            mock.patch.object(
+                api_ia,
+                "get_feature_store_engine",
+                return_value=object()
+            ),
+            mock.patch.object(
+                api_ia,
+                "build_feature_store_source_summary",
+                return_value=source_summary
+            ),
+            mock.patch.object(
+                api_ia,
+                "read_feature_store_state",
+                return_value=state
+            ),
+            mock.patch.object(
+                api_ia,
+                "refresh_feature_store_singleflight",
+                return_value={
+                    "status": "building",
+                    "reason": (
+                        "prediction_request_stale_snapshot"
+                    )
+                }
+            ) as refresh_mock,
+            mock.patch.object(
+                api_ia,
+                "load_prediction_history",
+                return_value=pd.DataFrame()
+            )
+        ):
+            result = (
+                api_ia.ensure_feature_store_ready_for_target_date(
+                    "2026-08-17"
+                )
+            )
+
+        self.assertEqual(result["status"], "ready_stale")
+        self.assertEqual(
+            result["effective_cutoff"],
+            "2026-08-15"
+        )
+        self.assertEqual(
+            result["warning"],
+            "canonical_feature_store_refresh_scheduled"
+        )
+        refresh_mock.assert_called_once_with(
+            reason="prediction_request_stale_snapshot",
+            force=False,
+            wait=False,
+            target_date="2026-08-17"
+        )
 
     def test_refresh_feature_store_singleflight_wait_reuses_inflight_thread(self):
         active_thread = mock.Mock()

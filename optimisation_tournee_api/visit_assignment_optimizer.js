@@ -341,57 +341,154 @@ function shouldRejectLowSignalExploration(opportunity = {}, selectedSlot = {}, m
   const capReached = selectedLowSignalCount >= resolveLowSignalExplorationCap(selectedSlot)
   if (!capReached) return false
   if (isObligationGradeStatus(opportunity.portfolio_status)) return false
-  if (isTargetFillStatus(opportunity.portfolio_status) && Number(selectedSlot.visits.length || 0) < Number(minimumVisitsPreference || 0)) {
-    return false
-  }
+  const canFillTarget =
+  isTargetFillStatus(opportunity.portfolio_status) ||
+  isExplorationStatus(
+    opportunity.portfolio_status,
+    opportunity
+  )
+
+if (
+  canFillTarget &&
+  Number(selectedSlot.visits.length || 0) <
+    Number(minimumVisitsPreference || 0)
+) {
+  return false
+}
   return true
 }
 
-function compareSlotsForOpportunity(opportunity = {}, left = {}, right = {}, minimumVisitsPreference = 0) {
-  const leftCircuitDistanceKm = resolveHistoricalCommercialCircuitDistance(opportunity, left)
-  const rightCircuitDistanceKm = resolveHistoricalCommercialCircuitDistance(opportunity, right)
-  const leftHasCircuitDistance = Number.isFinite(leftCircuitDistanceKm)
-  const rightHasCircuitDistance = Number.isFinite(rightCircuitDistanceKm)
+function compareSlotsForOpportunity(
+  opportunity = {},
+  left = {},
+  right = {},
+  minimumVisitsPreference = 0
+) {
+  const leftMetrics = computeAssignmentMetrics(
+    opportunity,
+    left,
+    minimumVisitsPreference
+  )
+
+  const rightMetrics = computeAssignmentMetrics(
+    opportunity,
+    right,
+    minimumVisitsPreference
+  )
+
+  const minimumPreference = Number(
+    minimumVisitsPreference || 0
+  )
+
+  const leftUnderfill = Math.max(
+    0,
+    minimumPreference - Number(left.visits.length || 0)
+  )
+
+  const rightUnderfill = Math.max(
+    0,
+    minimumPreference - Number(right.visits.length || 0)
+  )
+
+  const currentLoadDelta =
+    Number(left.visits.length || 0) -
+    Number(right.visits.length || 0)
+
+  const shouldBalanceTowardTarget =
+    isTargetFillStatus(opportunity.portfolio_status) ||
+    isExplorationStatus(
+      opportunity.portfolio_status,
+      opportunity
+    )
+
+  if (
+    shouldBalanceTowardTarget &&
+    rightUnderfill !== leftUnderfill
+  ) {
+    return rightUnderfill - leftUnderfill
+  }
+
+  const leftCircuitDistanceKm =
+    resolveHistoricalCommercialCircuitDistance(
+      opportunity,
+      left
+    )
+
+  const rightCircuitDistanceKm =
+    resolveHistoricalCommercialCircuitDistance(
+      opportunity,
+      right
+    )
+
+  const leftHasCircuitDistance =
+    Number.isFinite(leftCircuitDistanceKm)
+
+  const rightHasCircuitDistance =
+    Number.isFinite(rightCircuitDistanceKm)
 
   if (leftHasCircuitDistance || rightHasCircuitDistance) {
     if (leftHasCircuitDistance !== rightHasCircuitDistance) {
       return leftHasCircuitDistance ? -1 : 1
     }
-    const circuitDistanceDelta = Number(leftCircuitDistanceKm || 0) - Number(rightCircuitDistanceKm || 0)
-    if (circuitDistanceDelta !== 0) return circuitDistanceDelta
+
+    const circuitDistanceDelta =
+      Number(leftCircuitDistanceKm || 0) -
+      Number(rightCircuitDistanceKm || 0)
+
+    if (circuitDistanceDelta !== 0) {
+      return circuitDistanceDelta
+    }
+  } else if (currentLoadDelta !== 0) {
+    return currentLoadDelta
   }
 
-    const leftContinuity = matchesHistoricalCommercialContinuity(opportunity, left)
-  const rightContinuity = matchesHistoricalCommercialContinuity(opportunity, right)
+  const leftContinuity =
+    matchesHistoricalCommercialContinuity(
+      opportunity,
+      left
+    )
+
+  const rightContinuity =
+    matchesHistoricalCommercialContinuity(
+      opportunity,
+      right
+    )
 
   if (leftContinuity !== rightContinuity) {
     return leftContinuity ? -1 : 1
   }
 
-  const leftMetrics = computeAssignmentMetrics(opportunity, left, minimumVisitsPreference)
-  const rightMetrics = computeAssignmentMetrics(opportunity, right, minimumVisitsPreference)
-  const minimumPreference = Number(minimumVisitsPreference || 0)
-  const leftUnderfill = Math.max(0, minimumPreference - Number(left.visits.length || 0))
-  const rightUnderfill = Math.max(0, minimumPreference - Number(right.visits.length || 0))
+  const scoreDelta =
+    Number(rightMetrics.effectiveScore || 0) -
+    Number(leftMetrics.effectiveScore || 0)
 
-  if (isTargetFillStatus(opportunity.portfolio_status)) {
-    if (rightUnderfill !== leftUnderfill) return rightUnderfill - leftUnderfill
+  if (scoreDelta !== 0) {
+    return scoreDelta
   }
 
-  const scoreDelta = Number(rightMetrics.effectiveScore || 0) - Number(leftMetrics.effectiveScore || 0)
-  if (scoreDelta !== 0) return scoreDelta
-
-  if (!isTargetFillStatus(opportunity.portfolio_status) && rightUnderfill !== leftUnderfill) {
+  if (rightUnderfill !== leftUnderfill) {
     return rightUnderfill - leftUnderfill
   }
 
-  const currentLoadDelta = Number(left.visits.length) - Number(right.visits.length)
-  if (currentLoadDelta !== 0) return currentLoadDelta
-  const caGapLeft = (Number(left.min_daily_ca_target || 0) - Number(left.expected_order_value_total || 0))
-  const caGapRight = (Number(right.min_daily_ca_target || 0) - Number(right.expected_order_value_total || 0))
-  if (caGapLeft !== caGapRight) return caGapRight - caGapLeft
- 
-  return String(left.slot_id || '').localeCompare(String(right.slot_id || ''))
+  if (currentLoadDelta !== 0) {
+    return currentLoadDelta
+  }
+
+  const caGapLeft =
+    Number(left.min_daily_ca_target || 0) -
+    Number(left.expected_order_value_total || 0)
+
+  const caGapRight =
+    Number(right.min_daily_ca_target || 0) -
+    Number(right.expected_order_value_total || 0)
+
+  if (caGapLeft !== caGapRight) {
+    return caGapRight - caGapLeft
+  }
+
+  return String(left.slot_id || '').localeCompare(
+    String(right.slot_id || '')
+  )
 }
 
 function isLowSignalExploration(opportunity = {}) {

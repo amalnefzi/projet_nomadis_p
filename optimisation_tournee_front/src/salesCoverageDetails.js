@@ -488,6 +488,10 @@ export function extractSalesPlanView(responseData = {}) {
     portfolioSummary: responseData?.portfolio_summary && typeof responseData.portfolio_summary === 'object'
       ? responseData.portfolio_summary
       : {},
+    portfolioFeasibility: responseData?.portfolio_feasibility &&
+      typeof responseData.portfolio_feasibility === 'object'
+      ? responseData.portfolio_feasibility
+      : {},
     summary: responseData?.summary && typeof responseData.summary === 'object'
       ? responseData.summary
       : {},
@@ -677,26 +681,146 @@ export function buildSalesPortfolioSummary(planView = {}) {
 }
 
 export function buildSalesExecutionSummary(planView = {}, filters = {}, selectedCommercialCodes = []) {
-  const horizonDays = Number(planView?.summary?.planning_horizon_days ?? planView?.requestContext?.planning_horizon_days ?? filters?.period_days ?? 0)
-  const selectedCommercialsCount = selectedCommercialCodes.length || Number(planView?.clientScope?.selected_commercial_codes_count ?? 0)
-  const targetPerDay = Math.max(0, Number.parseInt(filters?.min_clients, 10) || 0)
+  const horizonDays = Number(
+    planView?.summary?.planning_horizon_days ??
+    planView?.requestContext?.planning_horizon_days ??
+    filters?.period_days ??
+    0
+  )
+
+  const selectedCommercialsCount =
+    selectedCommercialCodes.length ||
+    Number(planView?.clientScope?.selected_commercial_codes_count ?? 0)
+
+  const targetPerDay = Math.max(
+    0,
+    Number.parseInt(filters?.min_clients, 10) || 0
+  )
+
   const maximumPerDay = String(filters?.max_clients || '').trim() === ''
     ? 0
     : Math.max(0, Number.parseInt(filters?.max_clients, 10) || 0)
-  const capacityPrecheck = planView?.capacityPrecheck && typeof planView.capacityPrecheck === 'object'
-    ? planView.capacityPrecheck
-    : {}
+
+  const portfolioFeasibility =
+    planView?.portfolioFeasibility &&
+    typeof planView.portfolioFeasibility === 'object'
+      ? planView.portfolioFeasibility
+      : {}
+
+  const capacityPrecheck =
+    planView?.capacityPrecheck &&
+    typeof planView.capacityPrecheck === 'object'
+      ? planView.capacityPrecheck
+      : {}
+
+  const hasPortfolioFeasibility =
+    Object.keys(portfolioFeasibility).length > 0
+
+  const toNullableNumber = value => {
+    if (value === null || value === undefined || value === '') {
+      return null
+    }
+
+    const numericValue = Number(value)
+    return Number.isFinite(numericValue) ? numericValue : null
+  }
+
+  const computedTargetCapacity =
+    selectedCommercialsCount * horizonDays * targetPerDay
+
+  const computedMaximumCapacity =
+    maximumPerDay > 0
+      ? selectedCommercialsCount * horizonDays * maximumPerDay
+      : null
+
+  const maximumCapacity = hasPortfolioFeasibility
+    ? toNullableNumber(portfolioFeasibility.maximum_capacity)
+    : computedMaximumCapacity
+
+  const strictCapacity = hasPortfolioFeasibility
+    ? maximumCapacity
+    : toNullableNumber(capacityPrecheck.strict_capacity)
+
+
+    const selectedVisitsCount = Number(
+  planView?.summary?.selected_visits_count ??
+  planView?.summary?.recommended_visits_count ??
+  0
+)
+
+const selectedUniqueClientsCount = Number(
+  planView?.summary?.selected_unique_clients_count ??
+  selectedVisitsCount
+)
+
+const requiredVisitsCount = hasPortfolioFeasibility
+  ? toNullableNumber(
+      portfolioFeasibility.required_visits_in_horizon
+    )
+  : toNullableNumber(capacityPrecheck.required_visits_count)
+
+const selectedRequiredClientsCount =
+  hasPortfolioFeasibility
+    ? toNullableNumber(
+        portfolioFeasibility
+          .selected_required_clients_count
+      )
+    : null
+
+const backendPlanningGap =
+  hasPortfolioFeasibility
+    ? toNullableNumber(
+        portfolioFeasibility
+          .required_unplanned_clients_count
+      )
+    : null
+
+const planningGap = backendPlanningGap !== null
+  ? backendPlanningGap
+  : requiredVisitsCount === null
+    ? null
+    : Math.max(
+        0,
+        requiredVisitsCount -
+          selectedUniqueClientsCount
+      )
 
   return {
-    selectedVisitsCount: Number(planView?.summary?.selected_visits_count ?? planView?.summary?.recommended_visits_count ?? 0),
+    selectedVisitsCount,
+    selectedUniqueClientsCount,
+    selectedRequiredClientsCount,
+
     selectedCommercialsCount,
     horizonDays,
-    targetCapacity: selectedCommercialsCount * horizonDays * targetPerDay,
-    maximumCapacity: selectedCommercialsCount * horizonDays * maximumPerDay,
-    requiredVisitsCount: Number(capacityPrecheck.required_visits_count ?? 0),
-    strictCapacity: Number(capacityPrecheck.strict_capacity ?? 0),
-    capacityDeficit: Number(capacityPrecheck.capacity_deficit ?? 0),
-    feasibilityStatus: String(capacityPrecheck.feasibility_status || 'unknown').trim() || 'unknown'
+
+    targetCapacity:
+      toNullableNumber(portfolioFeasibility.target_capacity) ??
+      computedTargetCapacity,
+
+    maximumCapacity,
+
+    requiredVisitsCount,
+    planningGap,
+
+    strictCapacity,
+
+    capacityDeficit: hasPortfolioFeasibility
+      ? toNullableNumber(portfolioFeasibility.capacity_deficit)
+      : toNullableNumber(capacityPrecheck.capacity_deficit),
+
+    capacitySurplus:
+      toNullableNumber(portfolioFeasibility.capacity_surplus),
+
+    recommendedMinimumHorizonDays:
+      toNullableNumber(
+        portfolioFeasibility.recommended_minimum_horizon_days
+      ),
+
+    feasibilityStatus: String(
+      portfolioFeasibility.feasibility_status ||
+      capacityPrecheck.feasibility_status ||
+      'unknown'
+    ).trim() || 'unknown'
   }
 }
 

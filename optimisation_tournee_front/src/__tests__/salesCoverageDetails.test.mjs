@@ -673,6 +673,60 @@ test('execution summary recomputes target and maximum capacity from the selected
   assert.equal(summary.strictCapacity, 28)
 })
 
+test('execution summary uses portfolio feasibility returned by sales v2', () => {
+  const planView = extractSalesPlanView({
+    portfolio_feasibility: {
+      required_visits_in_horizon: 65,
+      selected_required_clients_count: 30,
+      required_unplanned_clients_count: 35,
+      target_capacity: 84,
+      maximum_capacity: 112,
+      capacity_deficit: 0,
+      capacity_surplus: 47,
+      recommended_minimum_horizon_days: null,
+      feasibility_status: 'feasible'
+    },
+    summary: {
+      selected_visits_count: 40,
+      selected_unique_clients_count: 35,
+      planning_horizon_days: 14
+    },
+    client_scope: {
+      selected_commercial_codes_count: 2
+    },
+    blocks: []
+  })
+
+  const summary = buildSalesExecutionSummary(
+    planView,
+    {
+      period_days: '14',
+      min_clients: '1',
+      max_clients: '1'
+    },
+    []
+  )
+
+  assert.equal(
+    planView.portfolioFeasibility.required_visits_in_horizon,
+    65
+  )
+
+  assert.equal(summary.selectedVisitsCount, 40)
+  assert.equal(summary.selectedUniqueClientsCount, 35)
+
+  assert.equal(summary.selectedRequiredClientsCount, 30)
+  assert.equal(summary.requiredVisitsCount, 65)
+  assert.equal(summary.planningGap, 35)
+  assert.equal(summary.targetCapacity, 84)
+  assert.equal(summary.maximumCapacity, 112)
+  assert.equal(summary.strictCapacity, 112)
+  assert.equal(summary.capacityDeficit, 0)
+  assert.equal(summary.capacitySurplus, 47)
+  assert.equal(summary.recommendedMinimumHorizonDays, null)
+  assert.equal(summary.feasibilityStatus, 'feasible')
+})
+
 test('portfolio summary keeps every active client classified without residual bucket', () => {
   const summary = buildSalesPortfolioSummary({
     clientFinalDecisions: {

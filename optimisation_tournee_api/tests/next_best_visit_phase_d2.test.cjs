@@ -233,6 +233,9 @@ test('portfolio metadata attaches to every active client and exposes summary/fea
   const candidateDateEntriesByClientId = new Map([
     ['1', [{
       client_id: '1',
+      decision_mode: 'predictive',
+      purchase_count: 4,
+      history_depth: 12,
       candidate_date: '2026-08-04',
       preferred_date: '2026-08-04',
       earliest_allowed_date: '2026-08-04',
@@ -242,6 +245,9 @@ test('portfolio metadata attaches to every active client and exposes summary/fea
     }]],
     ['2', [{
       client_id: '2',
+      decision_mode: 'hybrid',
+      purchase_count: 2,
+      history_depth: 6,
       candidate_date: '2026-08-05',
       preferred_date: '2026-08-05',
       earliest_allowed_date: '2026-08-05',
@@ -254,27 +260,33 @@ test('portfolio metadata attaches to every active client and exposes summary/fea
     ['1', ['2026-08-04']],
     ['2', ['2026-08-05']]
   ])
-  const cadenceProfiles = [
-    {
-      client_id: '1',
-      recommended_visit_interval_days: 7,
-      next_purchase_date_estimate: '2026-08-04',
-      next_purchase_window_start: '2026-08-04',
-      next_purchase_window_end: '2026-08-04',
-      cadence_confidence: 0.85,
-      purchase_prediction_known: true,
-      purchase_prediction_score: 60
-    },
-    {
-      client_id: '2',
-      recommended_visit_interval_days: 14,
-      next_purchase_date_estimate: '2026-08-05',
-      next_purchase_window_start: '2026-08-05',
-      next_purchase_window_end: '2026-08-05',
-      cadence_confidence: 0.65,
-      purchase_prediction_known: false
-    }
-  ]
+const cadenceProfiles = [
+  {
+    client_id: '1',
+    decision_mode: 'predictive',
+    purchase_count: 4,
+    history_depth: 12,
+    recommended_visit_interval_days: 7,
+    next_purchase_date_estimate: '2026-08-04',
+    next_purchase_window_start: '2026-08-04',
+    next_purchase_window_end: '2026-08-04',
+    cadence_confidence: 0.85,
+    purchase_prediction_known: true,
+    purchase_prediction_score: 60
+  },
+  {
+    client_id: '2',
+    decision_mode: 'hybrid',
+    purchase_count: 2,
+    history_depth: 6,
+    recommended_visit_interval_days: 14,
+    next_purchase_date_estimate: '2026-08-05',
+    next_purchase_window_start: '2026-08-05',
+    next_purchase_window_end: '2026-08-05',
+    cadence_confidence: 0.65,
+    purchase_prediction_known: false
+  }
+]
   const selectedCommercials = [{ value: 'C01', label: 'Commercial C01' }]
   const compatibleCommercialCodesByClientId = new Map([
     ['1', ['C01']],

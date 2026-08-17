@@ -64,6 +64,69 @@ function makeOpportunity(overrides = {}) {
   }
 }
 
+test('overdue client gets a recovery date when its next window is outside the horizon', () => {
+  const planningDates = [
+    '2026-08-16',
+    '2026-08-17',
+    '2026-08-18',
+    '2026-08-19',
+    '2026-08-20'
+  ]
+
+  const profiles = [
+    {
+      client_id: 'overdue-client',
+      client_code: 'OVD001',
+      decision_mode: 'predictive',
+      purchase_count: 5,
+      history_depth: 20,
+      cadence_confidence: 0.85,
+      recommended_visit_interval_days: 14,
+      last_purchase_date: '2026-06-01',
+      days_since_last_purchase: 76,
+      next_purchase_date_estimate: '2026-09-10',
+      next_purchase_window_start: '2026-09-10',
+      next_purchase_window_end: '2026-09-10',
+      usual_purchase_weekdays: []
+    }
+  ]
+
+  const entriesByClient =
+    buildCandidateDateEntriesByClientId(
+      profiles,
+      {
+        startDate: '2026-08-16',
+        planningHorizonDays: planningDates.length,
+        maxCandidateDatesPerClient: 4,
+        maxDaysWithoutContact: null
+      },
+      planningDates,
+      [
+        makeClient(
+          'overdue-client',
+          'OVD001'
+        )
+      ]
+    )
+
+  const entries =
+    entriesByClient.get('overdue-client') || []
+
+  assert.equal(entries.length, 1)
+  assert.equal(
+    planningDates.includes(entries[0].candidate_date),
+    true
+  )
+  assert.equal(
+    entries[0].candidate_date_source,
+    'overdue_recovery'
+  )
+  assert.equal(
+    entries[0].date_flexibility_type,
+    'flexible_window'
+  )
+})
+
 test('exploration windows are deterministic and do not all collapse on planning start date', () => {
   const profiles = [
     makeExplorationProfile('1', '00152'),
