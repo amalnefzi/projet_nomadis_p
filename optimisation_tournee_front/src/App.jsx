@@ -138,8 +138,16 @@ function App() {
       const r = Array.isArray(res.data?.routes) ? res.data.routes : []
       const c = Array.isArray(res.data?.commerciaux) ? res.data.commerciaux : []
       setOptions({ routes: r, commerciaux: c })
-      if (r.length && !filtres.route) setFiltres(prev => ({ ...prev, route: r[0]?.value || '' }))
-      if (c.length && !filtres.commercial) setFiltres(prev => ({ ...prev, commercial: c[0]?.value || '' }))
+      setFiltres(prev => {
+        let next = prev
+        if (r.length && !prev.route) {
+          next = { ...next, route: r[0]?.value || '' }
+        }
+        if (c.length && !prev.commercial) {
+          next = { ...next, commercial: c[0]?.value || '' }
+        }
+        return next
+      })
     }).catch(error => {
       if (!isMounted) return
       console.error('Erreur chargement options tournees:', error)
@@ -280,23 +288,6 @@ function App() {
   const modeTournee = donneesTournee?.mode || filtres.mode_tournee || 'vente'
   const isRecouvrementMode = modeTournee === 'recouvrement'
 
-  const itineraireGeo = useMemo(() => {
-    const fromApi = (donneesTournee?.itineraire_geo || []).filter(pt => pt.latitude != null && pt.longitude != null)
-    if (fromApi.length) return fromApi
-    return (donneesTournee?.tournees || [])
-      .map((row, idx) => ({
-        step: idx + 1,
-        client_code: row.nbr_client,
-        nom: row.nom,
-        adresse: row.adresse || 'Adresse non specifiee',
-        latitude: row.latitude,
-        longitude: row.longitude,
-        score_ia: row.score_ia,
-        qte_reco: row.qte_reco
-      }))
-      .filter(pt => pt.latitude != null && pt.longitude != null)
-  }, [donneesTournee])
-
   const depotOrigin = useMemo(() => {
     const rawDepot = donneesTournee?.depot_origin
     if (!rawDepot) return null
@@ -365,7 +356,6 @@ function App() {
     0
   )
   const quantiteTotalCamion = chargeTotale.agro + chargeTotale.chips + chargeTotale.bureautique
-  const plafondTotal = tourneesAffichees.reduce((acc, curr) => acc + (Number(curr.plafond_credit) || 0), 0)
   const encoursTotalRecouvrement = tourneesAffichees.reduce((acc, curr) => acc + (Number(curr.encours_credit) || 0), 0)
   const montantMoyenRecouvrement = tourneesAffichees.length ? encoursTotalRecouvrement / tourneesAffichees.length : 0
   const recouvrementList = useMemo(

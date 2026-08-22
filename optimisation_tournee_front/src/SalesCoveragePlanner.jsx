@@ -13,7 +13,6 @@ import {
 import {
   SALES_COVERAGE_FORM_FIELDS,
   aggregateSalesLoadingPrediction,
-  buildExpectedCaMetric,
   buildHighProbabilityMetric,
   buildSalesClientRows,
   buildSalesCoveragePayload,
@@ -264,12 +263,15 @@ export default function SalesCoveragePlanner() {
     loadReadiness()
   }, [loadReadiness])
 
-  const currentCoverageDefaults = optionsState.coverageDefaults || {
-    objective_mode: 'balanced',
-    respect_availability: 'flexible',
-    minimum_confidence: 0,
-    daily_max_mode: 'flexible'
-  }
+  const currentCoverageDefaults = useMemo(
+    () => optionsState.coverageDefaults || {
+      objective_mode: 'balanced',
+      respect_availability: 'flexible',
+      minimum_confidence: 0,
+      daily_max_mode: 'flexible'
+    },
+    [optionsState.coverageDefaults]
+  )
   const currentRequestPayload = useMemo(
     () => buildSalesCoveragePayload(filters, selectedCommercialCodes, currentCoverageDefaults),
     [currentCoverageDefaults, filters, selectedCommercialCodes]
@@ -347,10 +349,6 @@ export default function SalesCoveragePlanner() {
   const selectedLoadingPrediction = useMemo(
     () => aggregateSalesLoadingPrediction(selectedBlock),
     [selectedBlock]
-  )
-  const expectedCaMetric = useMemo(
-    () => buildExpectedCaMetric(planView?.summary || {}),
-    [planView]
   )
   const highProbabilityMetric = useMemo(
     () => buildHighProbabilityMetric(planView?.summary || {}),

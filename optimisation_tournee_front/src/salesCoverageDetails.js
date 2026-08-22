@@ -988,7 +988,8 @@ export function buildSalesVisitFeedbackRecordIndex(records = []) {
   }, {})
 }
 
-export function buildSalesVisitFeedbackDraft(row = {}, record = null) {
+export function buildSalesVisitFeedbackDraft(...args) {
+  const record = args[1] ?? null
   return {
     executionStatus: String(record?.executionStatus || 'pending').trim() || 'pending',
     purchaseMade: record?.purchaseMade == null ? '' : (record.purchaseMade ? 'true' : 'false'),

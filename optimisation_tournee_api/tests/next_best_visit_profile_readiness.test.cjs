@@ -229,6 +229,7 @@ test('planning_start_date-driven rebuild uses the planning cutoff instead of a f
     visits_rows_count: 0,
     max_visit_date: null
   }
+  const sourceDataVersion = buildNextBestVisitSourceDataVersion(sourceFingerprint)
   const queryAsync = createRebuildQueryMock({
     sourceFingerprint,
     activeClients: [{
@@ -276,7 +277,7 @@ test('planning_start_date-driven rebuild uses the planning cutoff instead of a f
   assert.equal(
     queryAsync.__persistedSnapshots[0].profile_version,
     buildNextBestVisitProfileVersion({
-      sourceDataVersion: sourceFingerprint.source_data_version,
+      sourceDataVersion,
       historicalCutoffDate: resolveProfileVersionHistoricalCutoffDate({
         historicalCutoffDate: '2026-08-13',
         sourceFingerprint
@@ -806,7 +807,7 @@ test('readiness returns ready for multiple future dates without starting rebuild
     }
   })
 
-  const dates = ['2026-08-11', '2026-08-20', '2026-09-01']
+  const dates = ['2026-08-12', '2026-08-20', '2026-09-01']
   for (const planningStartDate of dates) {
     const readinessResult = await ensureNextBestVisitProfilesReady({
       queryAsync,
