@@ -589,6 +589,80 @@ function buildSparseCandidateDateEntries(profile = {}, options = {}) {
     })
   }
 
+const normalizedStartDate = normalizeDateOnly(startDate)
+
+const cadenceDueDate = profile.last_purchase_date
+  ? addDays(profile.last_purchase_date, interval)
+  : null
+
+const overdueByCadence = Boolean(
+  cadenceDueDate &&
+  normalizedStartDate &&
+  cadenceDueDate < normalizedStartDate
+)
+
+if (
+  !entries.length &&
+  overdueByCadence &&
+  planningDates.length > 0
+) {
+  const recoverySearchDates = planningDates.slice(
+    0,
+    Math.min(7, planningDates.length)
+  )
+
+  const recoveryPreferredDate =
+    recoverySearchDates.find(dateValue =>
+      usualWeekdays.length > 0 &&
+      usualWeekdays.includes(weekdayIndex(dateValue))
+    ) ||
+    recoverySearchDates[0]
+
+  const recoveryCenterIndex =
+    planningDateIndex.get(recoveryPreferredDate) || 0
+
+  const recoveryWindow = buildPlanningDateWindow(
+    planningDates,
+    recoveryCenterIndex,
+    planningDates.length > 1 ? 1 : 0
+  )
+
+  pushUniqueDateEntry(
+    entries,
+    finalizeDateEntry({
+      client_id: profile.client_id,
+      client_code: profile.client_code,
+      candidate_date: recoveryWindow.preferredDate,
+      preferredDate: recoveryWindow.preferredDate,
+      earliestAllowedDate:
+        recoveryWindow.earliestAllowedDate,
+      latestAllowedDate:
+        recoveryWindow.latestAllowedDate,
+      date_flexibility_type: 'flexible_window',
+      candidate_date_source: 'overdue_recovery',
+      date_confidence: Math.min(
+        Math.max(windowConfidence, 40),
+        60
+      ),
+      date_shift_penalty_per_day: 3,
+      cycle_source: 'overdue_recovery_cycle',
+      cycle_sequence_number: 1,
+      cycle_window_start:
+        recoveryWindow.earliestAllowedDate,
+      cycle_window_end:
+        recoveryWindow.latestAllowedDate,
+      cycle_preferred_date:
+        recoveryWindow.preferredDate,
+      cycle_confidence: Math.min(
+        Math.max(windowConfidence, 40),
+        60
+      ),
+      repeat_justification_code:
+        'overdue_recovery_guardrail'
+    }, planningDates)
+  )
+}
+
   if (!entries.length && !profile.last_purchase_date && decisionMode === 'exploration') {
     const explorationWindow = explorationWindowOverride || deriveExplorationWindow(profile, planningDates, clientMetadata)
     pushUniqueDateEntry(entries, finalizeDateEntry({

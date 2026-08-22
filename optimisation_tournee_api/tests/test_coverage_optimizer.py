@@ -926,8 +926,15 @@ def test_f_true_hard_capacity_is_never_exceeded():
 def test_f_impossible_fixed_commercial_capacity():
     payload = base_payload(
         clients=build_clients(1050, allowed_codes=["C001"]),
-        commercials=build_commercials(count=1, days=14, max_visits=69),
-        planning_days=14
+        commercials=build_commercials(
+            count=1,
+            days=14,
+            max_visits=69,
+            hard_capacities={"C001": 69}
+        ),
+        planning_days=14,
+        capacity_mode="configured_hard_capacity",
+        operational_capacity_known=True
     )
     payload["allow_commercial_reassignment"] = False
 
@@ -945,8 +952,22 @@ def test_g_impossible_global_capacity():
     payload = {
         **base_payload(
             clients=build_clients(5768),
-            commercials=build_commercials(count=6, days=14, max_visits=30),
-            planning_days=14
+            commercials=build_commercials(
+                count=6,
+                days=14,
+                max_visits=30,
+                hard_capacities={
+                    "C001": 30,
+                    "C002": 30,
+                    "C003": 30,
+                    "C004": 30,
+                    "C005": 30,
+                    "C006": 30
+                }
+            ),
+            planning_days=14,
+            capacity_mode="configured_hard_capacity",
+            operational_capacity_known=True
         ),
         "default_max_visits_per_slot": 30
     }
@@ -3472,22 +3493,28 @@ def test_bu_greedy_debug_meta_and_reference_solver_keep_same_hash_and_order(monk
     )
 
     monkeypatch.setattr(optimizer_module, "GREEDY_CP_SAT_CANDIDATE_THRESHOLD", 1)
+    monkeypatch.delenv("COVERAGE_PERF_TIMINGS", raising=False)
     monkeypatch.setenv("COVERAGE_PERF_DEBUG", "true")
     optimized_result = solve_coverage_plan(payload)
 
     with monkeypatch.context() as scoped:
         scoped.setattr(optimizer_module, "GREEDY_CP_SAT_CANDIDATE_THRESHOLD", 1)
         scoped.setattr(optimizer_module, "solve_greedy_capacity_plan", legacy_solve_greedy_capacity_plan_reference)
+        scoped.delenv("COVERAGE_PERF_TIMINGS", raising=False)
         scoped.setenv("COVERAGE_PERF_DEBUG", "false")
         reference_result = solve_coverage_plan(payload)
 
+    monkeypatch.delenv("COVERAGE_PERF_TIMINGS", raising=False)
     monkeypatch.setenv("COVERAGE_PERF_DEBUG", "false")
     plain_result = solve_coverage_plan(payload)
 
     optimized_without_meta = normalize_result_without_meta(optimized_result)
-    assert optimized_without_meta == reference_result
+    reference_without_meta = normalize_result_without_meta(reference_result)
+    plain_without_meta = normalize_result_without_meta(plain_result)
+
+    assert optimized_without_meta == reference_without_meta
     assert compute_functional_result_hash(optimized_result) == compute_functional_result_hash(reference_result)
-    assert plain_result == reference_result
+    assert plain_without_meta == reference_without_meta
 
     greedy_meta = optimized_result["meta"]["greedy"]
     assert greedy_meta["score_cache_hits"] > 0

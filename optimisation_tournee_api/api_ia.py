@@ -529,16 +529,47 @@ def ensure_feature_store_ready_for_target_date(target_date):
     current_source_max = pd.to_datetime(state.get('active_source_max_date'), errors='coerce')
     target_covered = feature_store_covers_target_date(state, target_date)
 
-    if feature_store_is_current(state, source_summary) and target_covered and not pd.isna(current_source_max):
-        if effective_cutoff <= pd.Timestamp(current_source_max).normalize():
-            if prediction_history_source != 'canonical_feature_store':
-                load_feature_store_runtime(engine)
+    snapshot_is_usable = (
+        bool(state.get('active_feature_state_version')) and
+        target_covered and
+        not pd.isna(current_source_max) and
+        effective_cutoff <=
+        pd.Timestamp(current_source_max).normalize()
+    )
+
+    if snapshot_is_usable:
+        if prediction_history_source != 'canonical_feature_store':
+            load_feature_store_runtime(engine)
+
+        if feature_store_is_current(state, source_summary):
             return {
                 'status': 'ready',
-                'effective_cutoff': effective_cutoff.date().isoformat(),
+                'effective_cutoff': (
+                    effective_cutoff.date().isoformat()
+                ),
                 'state': state,
                 'source_summary': source_summary
             }
+
+        refresh_result = refresh_feature_store_singleflight(
+            reason='prediction_request_stale_snapshot',
+            force=False,
+            wait=False,
+            target_date=target_date
+        )
+
+        return {
+            'status': 'ready_stale',
+            'effective_cutoff': (
+                effective_cutoff.date().isoformat()
+            ),
+            'state': state,
+            'source_summary': source_summary,
+            'refresh': refresh_result,
+            'warning': (
+                'canonical_feature_store_refresh_scheduled'
+            )
+        }
 
     refresh_feature_store_singleflight(reason='prediction_request', force=False, wait=True, target_date=target_date)
 

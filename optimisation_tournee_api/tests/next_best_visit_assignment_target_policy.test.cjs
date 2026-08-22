@@ -59,7 +59,7 @@ function countVisitsPerDate(assignment = {}) {
 
 test('Scenario A: target load materially influences selection instead of stopping arbitrarily low', () => {
   const opportunities = Array.from({ length: 35 }, (_, index) => makeOpportunity(index + 1, {
-    portfolio_status: 'due_soon',
+    portfolio_status: 'exploration_needed',
     decision_mode: 'exploration',
     purchase_prediction_known: false,
     visit_opportunity_score: 4 + (index % 3) * 0.1,

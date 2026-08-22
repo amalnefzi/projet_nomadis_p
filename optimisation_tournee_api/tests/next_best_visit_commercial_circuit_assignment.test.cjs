@@ -385,3 +385,78 @@ test('when circuit distance is unknown, existing load balancing still decides th
   assert.equal(assignedVisit.commercial_code, '2')
   assert.equal(assignedVisit.circuit_distance_km, null)
 })
+
+
+test('exploration target fill prefers an underfilled commercial even when another circuit distance is known', () => {
+  const slots = buildCommercialSlots({
+    planningDates: ['2026-08-16'],
+    selectedCommercials: makeSelectedCommercials(),
+    requestMaxVisits: 30
+  })
+
+  const commercialOneSlot = slots.find(
+    slot => slot.commercial_code === '1'
+  )
+
+  commercialOneSlot.visits.push({
+    visit_opportunity_id: 'existing',
+    assigned_date: '2026-08-16',
+    expected_order_value: 0
+  })
+
+  const assignment = assignVisitOpportunities({
+    opportunities: [
+      {
+        visit_opportunity_id: 'exploration-opp',
+        visit_cycle_id: 'exploration-cycle',
+        cycle_source: 'exploration_cycle',
+        client_id: 'exploration-client',
+        client_code: 'EXP001',
+        client_name: 'Exploration Client',
+        candidate_date: '2026-08-16',
+        preferred_date: '2026-08-16',
+        earliest_allowed_date: '2026-08-16',
+        latest_allowed_date: '2026-08-16',
+        date_flexibility_type: 'exploration_window',
+        candidate_date_source: 'exploration_fallback',
+        date_shift_penalty_per_day: 1,
+        purchase_prediction_known: false,
+        purchase_probability: null,
+        visit_opportunity_score: 4,
+        strategic_client_score: 15,
+        inactivity_risk: 'medium',
+        predicted_ca: null,
+        expected_order_value: null,
+        recommended_visit_interval_days: 21,
+        cadence_confidence: 0.2,
+        confidence: 20,
+        possible_commercial_codes: ['1', '2'],
+        availability_status: 'unknown',
+        explanation_codes: [],
+        explanation_reasons: [],
+        portfolio_status: 'exploration_needed',
+        decision_mode: 'exploration',
+        historical_commercial_continuity_code: '1',
+        commercial_circuit_distances_km: {
+          '1': 1
+        }
+      }
+    ],
+
+    slots,
+
+    options: {
+      minimumVisitsPreference: 1
+    }
+  })
+
+  const assignedVisit = assignment.blocks
+    .flatMap(block => block.clients)
+    .find(
+      visit =>
+        String(visit?.client_id || '') ===
+        'exploration-client'
+    )
+
+  assert.equal(assignedVisit.commercial_code, '2')
+})

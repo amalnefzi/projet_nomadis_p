@@ -2547,9 +2547,23 @@ def resolve_effective_visit_bounds(
         if max_numeric_hard_capacity is not None:
             effective_max_visits = min(effective_max_visits, max_numeric_hard_capacity)
     elif has_requested_range and user_max_visits > 0 and required_average_ceiling > user_max_visits:
-        adjustment_reason = "user_range_below_required_load"
+        adjustment_reason = (
+            "user_range_below_required_load"
+            if operational_capacity_known
+            else "raised_max_for_full_coverage"
+        )
     elif not operational_capacity_known:
-        adjustment_reason = "terrain_capacity_unknown"
+        if (
+            has_requested_range and
+            user_range_mathematically_realisable and
+            not any(
+                _safe_int(slot.sales_activity_proxy_per_day, 0) > 0
+                for slot in slots
+            )
+        ):
+            adjustment_reason = "user_range_respected"
+        else:
+            adjustment_reason = "terrain_capacity_unknown"
     elif has_requested_range and recommended_max is not None and user_min_visits > recommended_max and required_average_ceiling <= user_max_visits:
         adjustment_reason = "user_range_above_recommended_capacity"
         effective_max_visits = min(effective_max_visits, recommended_max)
@@ -2615,6 +2629,12 @@ def apply_effective_visit_bounds_to_slots(
                 max(1, _safe_int(slot.hard_capacity, resolved_slot_max))
             )
 
+        if bounds.get("enforce_user_visit_range"):
+            resolved_slot_max = min(
+                resolved_slot_max,
+                effective_max_visits
+            )
+
         slot.max_visits = max(1, resolved_slot_max)
 
     payload.update(bounds)
@@ -2660,7 +2680,21 @@ def build_effective_constraints(payload: dict[str, Any], slots: list[NormalizedS
 
 
 def resolve_slot_min_visits(slot: NormalizedSlot, payload: dict[str, Any]) -> int:
-    return 0
+    if not _safe_bool(payload.get("enforce_user_visit_range"), False):
+        return 0
+
+    effective_min = max(
+        0,
+        _safe_int(
+            slot.effective_target_min,
+            payload.get("effective_min_visits_per_slot")
+        )
+    )
+
+    return min(
+        effective_min,
+        max(0, _safe_int(slot.max_visits, 0))
+    )
 
 
 def resolve_slot_sales_activity_proxy(slot: NormalizedSlot) -> int:
@@ -5362,7 +5396,7 @@ def solve_coverage_plan(raw_payload: dict[str, Any]) -> dict[str, Any]:
     analysis_started_at = time.perf_counter()
     analysis_summary = build_coverage_analysis_summary_from_context(context)
     performance_entries.append(_build_perf_entry("python_analysis_summary", analysis_started_at))
-    allow_partial_plan = bool(payload["allow_partial_plan"]) or analysis_summary.get("status") != "feasible"
+    allow_partial_plan = bool(payload["allow_partial_plan"])
     user_min_target = max(0, _safe_int(payload.get("user_min_visits_per_slot"), 0))
     user_max_target = max(0, _safe_int(payload.get("user_max_visits_per_slot"), 0))
     solver_min_target = max(0, _safe_int(payload.get("effective_min_visits_per_slot"), 0))

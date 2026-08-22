@@ -13,7 +13,6 @@ import {
 import {
   SALES_COVERAGE_FORM_FIELDS,
   aggregateSalesLoadingPrediction,
-  buildExpectedCaMetric,
   buildHighProbabilityMetric,
   buildSalesClientRows,
   buildSalesCoveragePayload,
@@ -47,19 +46,62 @@ function buildRouteStops(block) {
 }
 
 function describeExecutionFeasibility(executionSummary) {
-  const requiredVisits = Number(executionSummary?.requiredVisitsCount || 0)
-  const strictCapacity = Number(executionSummary?.strictCapacity || 0)
-  const deficit = Number(executionSummary?.capacityDeficit || 0)
+  const toNullableNumber = value => {
+    if (value === null || value === undefined || value === '') {
+      return null
+    }
 
-  if (deficit > 0) {
-    return `Deficit strict de ${formatInteger(deficit)} visite(s)`
+    const numericValue = Number(value)
+    return Number.isFinite(numericValue) ? numericValue : null
   }
-  if (strictCapacity > requiredVisits && requiredVisits > 0) {
-    return `Surplus strict de ${formatInteger(strictCapacity - requiredVisits)} visite(s)`
+
+  const status = String(
+    executionSummary?.feasibilityStatus || 'unknown'
+  ).trim()
+
+  const requiredVisits = toNullableNumber(
+    executionSummary?.requiredVisitsCount
+  )
+
+  const maximumCapacity = toNullableNumber(
+    executionSummary?.maximumCapacity
+  )
+
+  const deficit = toNullableNumber(
+    executionSummary?.capacityDeficit
+  )
+
+  const surplus = toNullableNumber(
+    executionSummary?.capacitySurplus
+  )
+
+  if (status === 'no_commercials_selected') {
+    return 'Aucun commercial selectionne'
   }
-  if (strictCapacity === requiredVisits && requiredVisits > 0) {
-    return 'Capacite stricte a l equilibre'
+
+  if (status === 'capacity_insufficient' || (deficit !== null && deficit > 0)) {
+    return `Capacite insuffisante : deficit de ${formatInteger(deficit)} visite(s)`
   }
+
+  if (status === 'feasible') {
+    if (maximumCapacity === null) {
+      return 'Capacite theorique suffisante sans maximum strict'
+    }
+
+    if (surplus !== null && surplus > 0) {
+      return `Capacite theorique suffisante : surplus de ${formatInteger(surplus)} visite(s)`
+    }
+
+    if (
+      requiredVisits !== null &&
+      maximumCapacity === requiredVisits
+    ) {
+      return 'Capacite theorique a l equilibre'
+    }
+
+    return 'Capacite theorique suffisante'
+  }
+
   return 'Faisabilite en attente de calcul'
 }
 
@@ -221,12 +263,15 @@ export default function SalesCoveragePlanner() {
     loadReadiness()
   }, [loadReadiness])
 
-  const currentCoverageDefaults = optionsState.coverageDefaults || {
-    objective_mode: 'balanced',
-    respect_availability: 'flexible',
-    minimum_confidence: 0,
-    daily_max_mode: 'flexible'
-  }
+  const currentCoverageDefaults = useMemo(
+    () => optionsState.coverageDefaults || {
+      objective_mode: 'balanced',
+      respect_availability: 'flexible',
+      minimum_confidence: 0,
+      daily_max_mode: 'flexible'
+    },
+    [optionsState.coverageDefaults]
+  )
   const currentRequestPayload = useMemo(
     () => buildSalesCoveragePayload(filters, selectedCommercialCodes, currentCoverageDefaults),
     [currentCoverageDefaults, filters, selectedCommercialCodes]
@@ -262,6 +307,8 @@ export default function SalesCoveragePlanner() {
       const response = await axios.post(`${API_URL}/api/tournees/next-best-visits`, currentRequestPayload, {
         timeout: PLAN_REQUEST_TIMEOUT_MS
       })
+
+
       const nextPlanView = extractSalesPlanView(response.data)
 
       setPlanView(nextPlanView)
@@ -302,10 +349,6 @@ export default function SalesCoveragePlanner() {
   const selectedLoadingPrediction = useMemo(
     () => aggregateSalesLoadingPrediction(selectedBlock),
     [selectedBlock]
-  )
-  const expectedCaMetric = useMemo(
-    () => buildExpectedCaMetric(planView?.summary || {}),
-    [planView]
   )
   const highProbabilityMetric = useMemo(
     () => buildHighProbabilityMetric(planView?.summary || {}),
@@ -555,38 +598,105 @@ export default function SalesCoveragePlanner() {
           </div>
 
           <div className="sales-summary-section">
-            <h4>Plan executable</h4>
-            <div className="sales-coverage-metrics-grid">
-              <div className="sales-coverage-metric">
-                <span>Visites planifiees dans l horizon</span>
-                <strong>{executionSummary.selectedVisitsCount}</strong>
-              </div>
-              <div className="sales-coverage-metric">
-                <span>Commerciaux selectionnes</span>
-                <strong>{executionSummary.selectedCommercialsCount}</strong>
-              </div>
-              <div className="sales-coverage-metric">
-                <span>Horizon</span>
-                <strong>{executionSummary.horizonDays} jours</strong>
-              </div>
-              <div className="sales-coverage-metric">
-                <span>Charge cible totale</span>
-                <strong>{executionSummary.targetCapacity}</strong>
-              </div>
-              <div className="sales-coverage-metric">
-                <span>Maximum total</span>
-                <strong>{executionSummary.maximumCapacity}</strong>
-              </div>
-              <div className="sales-coverage-metric">
-                <span>Capacite stricte calculee</span>
-                <strong>{executionSummary.strictCapacity}</strong>
-              </div>
-              <div className="sales-coverage-metric">
-                <span>Etat de faisabilite</span>
-                <strong>{describeExecutionFeasibility(executionSummary)}</strong>
-                <small>{executionSummary.feasibilityStatus}</small>
-              </div>
-            </div>
+           <h4>Faisabilite et capacite</h4>
+
+<div className="sales-coverage-metrics-grid">
+  <div className="sales-coverage-metric">
+    <span>Visites planifiees dans l horizon</span>
+    <strong>
+      {formatInteger(executionSummary.selectedVisitsCount)}
+    </strong>
+  </div>
+
+
+ <div className="sales-coverage-metric">
+   <span>Clients uniques planifies</span>
+   <strong>
+    {formatInteger(
+      executionSummary.selectedUniqueClientsCount
+    )}
+   </strong>
+ </div>
+
+  <div className="sales-coverage-metric">
+    <span>Clients requis dans l horizon</span>
+    <strong>
+      {executionSummary.requiredVisitsCount === null
+        ? 'Non disponible'
+        : formatInteger(executionSummary.requiredVisitsCount)}
+    </strong>
+  </div>
+
+  <div className="sales-coverage-metric">
+    <span>Clients obligatoires planifies</span>
+    <strong>
+      {executionSummary.selectedRequiredClientsCount === null
+        ? 'Non disponible'
+        : formatInteger(
+            executionSummary.selectedRequiredClientsCount
+          )}
+    </strong>
+  </div>
+
+
+  <div className="sales-coverage-metric">
+   <span>Ecart de planification</span>
+   <strong>
+     {executionSummary.planningGap === null
+       ? 'Non disponible'
+       : formatInteger(executionSummary.planningGap)}
+   </strong>
+   <small>Clients requis non planifies</small>
+  </div>
+
+  <div className="sales-coverage-metric">
+    <span>Commerciaux selectionnes</span>
+    <strong>
+      {formatInteger(executionSummary.selectedCommercialsCount)}
+    </strong>
+  </div>
+
+  <div className="sales-coverage-metric">
+    <span>Horizon</span>
+    <strong>
+      {formatInteger(executionSummary.horizonDays)} jours
+    </strong>
+  </div>
+
+  <div className="sales-coverage-metric">
+    <span>Charge cible totale</span>
+    <strong>
+      {formatInteger(executionSummary.targetCapacity)}
+    </strong>
+  </div>
+
+  <div className="sales-coverage-metric">
+    <span>Maximum total</span>
+    <strong>
+      {executionSummary.maximumCapacity === null
+        ? 'Non limite'
+        : formatInteger(executionSummary.maximumCapacity)}
+    </strong>
+  </div>
+
+  {executionSummary.recommendedMinimumHorizonDays !== null && (
+    <div className="sales-coverage-metric">
+      <span>Horizon minimum recommande</span>
+      <strong>
+        {formatInteger(
+          executionSummary.recommendedMinimumHorizonDays
+        )} jours
+      </strong>
+    </div>
+  )}
+
+  <div className="sales-coverage-metric">
+    <span>Etat de faisabilite</span>
+    <strong>
+      {describeExecutionFeasibility(executionSummary)}
+    </strong>
+  </div>
+</div>
           </div>
 
           <div className="sales-summary-section">

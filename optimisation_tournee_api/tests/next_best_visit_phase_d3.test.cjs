@@ -308,6 +308,7 @@ test('plan cache invalidates when profile version changes even if inputs stay th
   let snapshotVersion = 'profile-v1'
 
   const baseDependencies = {
+    queryAsync: async () => [],
     fetchCommercialOptions: async () => [{ value: 'C01', label: 'Commercial C01' }],
     fetchCoverageActiveClients: async () => ({
       clients: [makeClient('1', '00152')]

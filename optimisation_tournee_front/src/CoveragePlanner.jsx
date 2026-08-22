@@ -7,7 +7,6 @@ import {
   computeBlockLoadStats,
   computeTotalCaShortfall,
   computeTotalEstimatedDistanceKm,
-  formatCurrency,
   formatDecimal,
   formatDistanceKm,
   formatInteger,
@@ -20,13 +19,11 @@ import useOptimizedTourRoute from './useOptimizedTourRoute'
 import {
   buildCoverageDetailHeaderModel,
   buildCoverageSidebarCardModel,
-  computeCoverageGpsStats,
   resolveSelectedCoverageBlock
 } from './coveragePlannerDetails'
 import {
   buildGoogleMapsUrl,
   formatDistanceMeters,
-  formatDurationMinutes,
   formatDurationSeconds
 } from './tourRouteUtils'
 import { API_URL } from './apiConfig'
@@ -437,6 +434,7 @@ function CommercialMultiSelect({
   const containerRef = useRef(null)
   const [open, setOpen] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
+  const effectiveOpen = open && !disabled
 
   const totalOptions = options.length
   const selectedSet = useMemo(() => new Set(selectedValues), [selectedValues])
@@ -452,7 +450,7 @@ function CommercialMultiSelect({
   }, [options, searchTerm])
 
   useEffect(() => {
-    if (!open) return undefined
+    if (!effectiveOpen) return undefined
 
     const handlePointerDown = event => {
       if (containerRef.current && !containerRef.current.contains(event.target)) {
@@ -462,13 +460,13 @@ function CommercialMultiSelect({
 
     document.addEventListener('mousedown', handlePointerDown)
     return () => document.removeEventListener('mousedown', handlePointerDown)
-  }, [open])
+  }, [effectiveOpen])
 
   useEffect(() => {
-    if (disabled) {
-      setOpen(false)
-    }
-  }, [disabled])
+    if (!disabled || !open) return undefined
+    const timeoutId = window.setTimeout(() => setOpen(false), 0)
+    return () => window.clearTimeout(timeoutId)
+  }, [disabled, open])
 
   const summaryLabel = (() => {
     if (loading) return 'Chargement des commerciaux...'
@@ -500,13 +498,13 @@ function CommercialMultiSelect({
           background: disabled ? '#f8fafc' : '#ffffff',
           color: '#16324f',
           cursor: disabled ? 'not-allowed' : 'pointer',
-          boxShadow: open ? '0 0 0 3px rgba(37, 99, 235, 0.12)' : 'none'
+          boxShadow: effectiveOpen ? '0 0 0 3px rgba(37, 99, 235, 0.12)' : 'none'
         }}
       >
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>
           {summaryLabel}
         </span>
-        <span style={{ color: '#607284', fontSize: 12, transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s ease' }}>
+        <span style={{ color: '#607284', fontSize: 12, transform: effectiveOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s ease' }}>
           ▼
         </span>
       </button>
@@ -545,7 +543,7 @@ function CommercialMultiSelect({
         </div>
       ) : null}
 
-      {open ? (
+      {effectiveOpen ? (
         <div
           style={{
             position: 'absolute',

@@ -218,7 +218,121 @@ test('smart portfolio core attribue un statut portfolio a 100% des clients actif
   assert.equal(finalDecisionSummary.client_final_decisions['5'].recommended_visit_interval_days, null)
   assert.equal(finalDecisionSummary.client_final_decisions['1'].cadence_confidence, 0.92)
   assert.equal(finalDecisionSummary.client_final_decisions['7'].reason_codes.includes('CAPACITY_CONSTRAINT'), true)
+
+  assert.equal(
+  finalDecisionSummary.portfolio_feasibility
+    .required_visits_in_horizon,
+  6
+)
+
+assert.equal(
+  finalDecisionSummary.portfolio_feasibility
+    .selected_required_clients_count,
+  2
+)
+
+assert.equal(
+  finalDecisionSummary.portfolio_feasibility
+    .required_unplanned_clients_count,
+  4
+)
+
 })
+
+
+test('exploration fallback stays exploration_needed when its synthetic date is inside the horizon', () => {
+  const startDate = '2026-08-07'
+  const candidateDate = '2026-08-09'
+  const planningDates = [
+    '2026-08-07',
+    '2026-08-08',
+    '2026-08-09'
+  ]
+
+  const candidateEntry = {
+    ...makeCandidateEntry('EXP', candidateDate),
+    candidate_date_source: 'exploration_fallback',
+    date_flexibility_type: 'exploration_window'
+  }
+
+  const result = buildClientFinalDecisions({
+    clients: [
+      makeClient('EXP', {
+        client_code: 'EXP001',
+        nom: 'Client exploration'
+      })
+    ],
+
+    blocks: [],
+
+    rejectedOpportunities: [
+      {
+        client_id: 'EXP',
+        client_code: 'EXP001',
+        rejection_reason_codes: ['LOW_EFFECTIVE_SCORE']
+      }
+    ],
+
+    candidateDatesByClientId: new Map([
+      ['EXP', [candidateDate]]
+    ]),
+
+    candidateDateEntriesByClientId: new Map([
+      ['EXP', [candidateEntry]]
+    ]),
+
+    cadenceProfiles: [
+      {
+        client_id: 'EXP',
+        client_code: 'EXP001',
+        decision_mode: 'exploration',
+        purchase_count: 0,
+        history_depth: 0,
+        cadence_confidence: 0.2,
+        recommended_visit_interval_days: null
+      }
+    ],
+
+    compatibleCommercialCodesByClientId: new Map([
+      ['EXP', ['C01']]
+    ]),
+
+    selectedCommercials: [
+      {
+        value: 'C01',
+        label: 'Commercial C01'
+      }
+    ],
+
+    requestContext: {
+      startDate,
+      planningHorizonDays: 3,
+      maxVisitsPerDay: 10,
+      minVisitsPerDayPreference: 5
+    },
+
+    planningDates
+  })
+
+  const decision = result.client_final_decisions.EXP
+
+  assert.equal(decision.decision_mode, 'exploration')
+  assert.equal(decision.portfolio_status, 'exploration_needed')
+  assert.equal(decision.next_action, 'explore_client')
+  assert.equal(
+    result.portfolio_summary.exploration_needed_count,
+    1
+  )
+  assert.equal(
+    result.portfolio_summary.due_soon_count,
+    0
+  )
+  assert.equal(
+    result.portfolio_feasibility.required_visits_in_horizon,
+    0
+  )
+})
+
 
 test('no compatible commercials -> hard_constraint_unplanned when visit required', () => {
   const startDate = '2026-08-07'

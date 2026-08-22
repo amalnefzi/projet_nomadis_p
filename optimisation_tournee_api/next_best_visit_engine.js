@@ -396,12 +396,15 @@ function resolvePortfolioStatus({
   if (invalidClientData) return 'invalid_data'
   if (isCapacityIssue) return 'capacity_unplanned'
   if (isHardConstraint) return 'hard_constraint_unplanned'
+  if (decisionMode === 'exploration') {
+  return 'exploration_needed'
+}
   if (nextDueDate && startDate && nextDueDate === startDate) return 'due_now'
   if (nextDueDate && startDate && nextDueDate < startDate) return 'overdue'
   if (overdueByAge) return 'overdue'
-  if (decisionMode === 'exploration' && !nextDueDate) return 'exploration_needed'
+
   if (nextDueDate && planningEndDate && nextDueDate <= planningEndDate) return 'due_soon'
-  if (decisionMode === 'exploration') return 'exploration_needed'
+
   return 'not_due'
 }
 
@@ -606,7 +609,8 @@ function buildPortfolioSummary(portfolioStatusCounts = {}, activeClientsCount = 
 function buildFeasibility({
   requestContext = {},
   selectedCommercials = [],
-  portfolioSummary = {}
+  portfolioSummary = {},
+  clientFinalDecisions = {}
 } = {}) {
   const selectedCommercialsCount = Math.max(0, Array.isArray(selectedCommercials) ? selectedCommercials.length : 0)
   const horizonDays = Math.max(0, Number(requestContext.planningHorizonDays || 0))
@@ -626,6 +630,29 @@ function buildFeasibility({
     Number(portfolioSummary.capacity_unplanned_count || 0) +
     Number(portfolioSummary.hard_constraint_unplanned_count || 0)
   )
+
+const requiredPortfolioStatuses = new Set([
+  'due_now',
+  'due_soon',
+  'overdue',
+  'capacity_unplanned',
+  'hard_constraint_unplanned'
+])
+
+const selectedRequiredClientsCount = Object.values(
+  clientFinalDecisions || {}
+).filter(decision => (
+  decision?.final_client_status === 'selected' &&
+  requiredPortfolioStatuses.has(
+    String(decision?.portfolio_status || '')
+  )
+)).length
+
+const requiredUnplannedClientsCount = Math.max(
+  0,
+  requiredVisitsInHorizon - selectedRequiredClientsCount
+)
+
   const capacityDeficit = maximumCapacity != null
     ? Math.max(0, requiredVisitsInHorizon - maximumCapacity)
     : null
@@ -643,6 +670,13 @@ function buildFeasibility({
 
   return {
     required_visits_in_horizon: requiredVisitsInHorizon,
+
+    selected_required_clients_count:
+    selectedRequiredClientsCount,
+
+    required_unplanned_clients_count:
+    requiredUnplannedClientsCount,
+
     target_capacity: targetCapacity,
     maximum_capacity: maximumCapacity,
     capacity_deficit: capacityDeficit,
@@ -1350,7 +1384,8 @@ function buildClientFinalDecisions({
   const portfolioFeasibility = buildFeasibility({
     requestContext,
     selectedCommercials,
-    portfolioSummary
+    portfolioSummary,
+    clientFinalDecisions
   })
   const portfolioFeasibilityMs = Date.now() - portfolioFeasibilityStartMs
   const deferredClients = Object.values(clientFinalDecisions)
