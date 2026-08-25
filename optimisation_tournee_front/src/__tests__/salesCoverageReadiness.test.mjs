@@ -24,6 +24,28 @@ test('UI building state disables Generate and enables automatic polling', () => 
   assert.equal(viewModel.bannerMessage, 'Preparation en cours...')
 })
 
+test('UI missing and stale states keep automatic polling active', () => {
+  const missingViewModel = buildSalesProfileReadinessViewModel({
+    loading: false,
+    payload: {
+      status: 'missing'
+    }
+  })
+  const staleViewModel = buildSalesProfileReadinessViewModel({
+    loading: false,
+    payload: {
+      status: 'stale'
+    }
+  })
+
+  assert.equal(missingViewModel.disableGenerate, true)
+  assert.equal(missingViewModel.shouldPoll, true)
+  assert.equal(missingViewModel.bannerMessage, 'Preparation en cours...')
+  assert.equal(staleViewModel.disableGenerate, true)
+  assert.equal(staleViewModel.shouldPoll, true)
+  assert.equal(staleViewModel.bannerMessage, 'Preparation en cours...')
+})
+
 test('UI ready state enables Generate automatically', () => {
   const viewModel = buildSalesProfileReadinessViewModel({
     loading: false,
@@ -95,7 +117,7 @@ test('UI keeps Generate enabled when a ready payload is being refreshed', () => 
   assert.equal(viewModel.statusLabel, null)
 })
 
-test('UI failed state stays blocked with a neutral preparation message', () => {
+test('UI failed state exposes the real error and enables retry when idle', () => {
   const viewModel = buildSalesProfileReadinessViewModel({
     loading: false,
     payload: {
@@ -110,23 +132,46 @@ test('UI failed state stays blocked with a neutral preparation message', () => {
 
   assert.equal(viewModel.status, 'failed')
   assert.equal(viewModel.disableGenerate, true)
-  assert.equal(viewModel.canRetry, false)
-  assert.equal(viewModel.bannerMessage, 'Preparation en cours...')
+  assert.equal(viewModel.canRetry, true)
+  assert.equal(viewModel.latestErrorMessage, 'snapshot corrupted')
+  assert.equal(viewModel.bannerMessage, 'snapshot corrupted')
 })
 
-test('SalesCoveragePlanner polls readiness without exposing technical lifecycle UI', () => {
+test('UI failed state disables retry while a retry request is in flight', () => {
+  const viewModel = buildSalesProfileReadinessViewModel({
+    loading: true,
+    payload: {
+      status: 'failed',
+      error: 'rebuild failed again',
+      profile_snapshot: {
+        status: 'failed',
+        latest_error_message: 'rebuild failed again'
+      }
+    }
+  })
+
+  assert.equal(viewModel.status, 'failed')
+  assert.equal(viewModel.disableGenerate, true)
+  assert.equal(viewModel.canRetry, false)
+  assert.equal(viewModel.bannerMessage, 'rebuild failed again')
+})
+
+test('SalesCoveragePlanner keeps retry UX focused on business actions only', () => {
   const source = fs.readFileSync(
-    path.resolve('C:/Users/asus/Desktop/Projet_Nomadis/optimisation_tournee_front/src/SalesCoveragePlanner.jsx'),
+    path.resolve(process.cwd(), 'src', 'SalesCoveragePlanner.jsx'),
     'utf8'
   )
 
   assert.equal(source.includes('buildSalesProfileReadinessViewModel'), true)
-  assert.equal(source.includes('/api/tournees/next-best-visits/readiness/retry'), false)
+  assert.equal(source.includes('retrySalesCoverageReadiness('), true)
   assert.equal(source.includes('readinessView.shouldPoll'), true)
   assert.equal(source.includes('setTimeout(() => {'), true)
-  assert.equal(source.includes('Relancer la preparation'), false)
+  assert.equal(source.includes('Reessayer la preparation'), true)
+  assert.equal(source.includes('disabled={!readinessView.canRetry}'), true)
   assert.equal(source.includes('readinessView.statusLabel || describeProfileSnapshotStatus(readinessStatus)'), false)
   assert.equal(source.includes('Preparation des profils requise'), false)
   assert.equal(source.includes('Preparation en cours...'), true)
   assert.equal(source.includes('readinessRequestSequenceRef'), true)
+  assert.equal(source.includes('readinessContextKeyRef.current'), true)
+  assert.equal(source.includes('latestErrorMessage'), false)
 })

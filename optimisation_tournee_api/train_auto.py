@@ -1,11 +1,12 @@
 import os
 import warnings
+import json
 
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score, mean_absolute_percentage_error, r2_score, roc_auc_score
-from sqlalchemy import create_engine
+from sklearn.metrics import accuracy_score
+from sqlalchemy import create_engine, text
 from xgboost import XGBClassifier, XGBRegressor
 from nomadis_feature_store import (
     build_feature_store_source_summary,
@@ -34,30 +35,15 @@ from nomadis_feature_engineering import (
     resolve_data_cutoff_date,
     resolve_serving_data_upper_bound_date,
 )
+from nomadis_model_strategy import (
+    build_historical_baselines,
+    choose_strategy,
+    compute_classifier_metrics,
+    compute_regression_metrics,
+    save_strategy,
+)
 
 warnings.filterwarnings('ignore')
-
-
-
-
-def quality_from_predictions(y_true, y_pred):
-    r2 = r2_score(y_true, y_pred)
-    try:
-        mape = mean_absolute_percentage_error(y_true, y_pred)
-        quality = round(100 / (1 + mape), 1)
-        return quality, r2, round(mape * 100, 1)
-    except Exception:
-        quality = round(max(0, min(100, r2 * 100)), 1)
-        return quality, r2, None
-
-
-def quality_from_classifier(y_true, y_prob):
-    if len(np.unique(y_true)) < 2:
-        return 0.0, None, 0.0
-    auc = roc_auc_score(y_true, y_prob)
-    y_label = (y_prob >= 0.5).astype(int)
-    accuracy = accuracy_score(y_true, y_label)
-    return round(auc * 100, 1), round(auc, 4), round(accuracy * 100, 1)
 
 
 print("Connexion a la base de donnees MySQL...")
@@ -68,8 +54,7 @@ print(f"[INFO] Date plafond d'entrainement: {data_cutoff_date.date().isoformat()
 print(f"[INFO] Date plafond de serving: {serving_cutoff_date.date().isoformat()}")
 
 print("Extraction du dataset brut nettoye (client + jour)...")
-df_base = pd.read_sql(get_base_dataset_query(), engine)
-
+df_base = pd.read_sql(text(get_base_dataset_query()), engine)
 df_base = drop_rows_after_cutoff(df_base, 'date_doc', data_cutoff_date, 'dataset brut journalier')
 df_base = normalize_base_dataset(df_base)
 
@@ -208,30 +193,152 @@ model_price = XGBRegressor(**common_params)
 model_price.fit(X_train_pos, np.log1p(y_price_train), sample_weight=price_train_weights)
 
 pred_achat = model_achat.predict_proba(X_test)[:, 1]
-pred_ca = np.maximum(1, np.expm1(model_ca.predict(X_test_pos)))
-pred_qte = np.maximum(1, np.expm1(model_qte.predict(X_test_pos)))
-pred_price = np.maximum(0.5, np.expm1(model_price.predict(X_test_pos)))
-pred_achat_pos = model_achat.predict_proba(X_test_pos)[:, 1]
-hybrid_qte = blend_expected_quantity(
-    pred_achat_pos,
-    pred_ca,
-    pred_qte,
-    pred_price,
-    test_positive['avg_price_hist'].to_numpy()
+test_positive_mask = test_df['achat_target'].to_numpy(dtype=int) == 1
+test_baselines = build_historical_baselines(test_df)
+test_positive_baselines = {
+    target_name: values[test_positive_mask]
+    for target_name, values in test_baselines.items()
+}
+
+pred_ca_all = np.maximum(0.0, np.expm1(model_ca.predict(X_test)))
+pred_qte_all = np.maximum(0.0, np.expm1(model_qte.predict(X_test)))
+pred_price_all = np.maximum(0.0, np.expm1(model_price.predict(X_test)))
+
+pred_ca = pred_ca_all[test_positive_mask]
+pred_qte = pred_qte_all[test_positive_mask]
+pred_price = pred_price_all[test_positive_mask]
+
+expected_ca_model_all = pred_achat * pred_ca_all
+expected_ca_baseline_all = pred_achat * test_baselines['ca_if_buy']
+expected_qte_model_all = blend_expected_quantity(
+    pred_achat,
+    pred_ca_all,
+    pred_qte_all,
+    pred_price_all,
+    test_df['avg_price_hist'].to_numpy()
+)
+expected_qte_baseline_all = blend_expected_quantity(
+    pred_achat,
+    test_baselines['ca_if_buy'],
+    test_baselines['qte_if_buy'],
+    test_baselines['price_if_buy'],
+    test_df['avg_price_hist'].to_numpy()
 )
 
-quality_achat, auc_achat, acc_achat = quality_from_classifier(y_achat_test, pred_achat)
-quality_ca, r2_ca, mape_ca = quality_from_predictions(y_ca_test, pred_ca)
-quality_qte_model, r2_qte_model, mape_qte_model = quality_from_predictions(y_qte_test, pred_qte)
-quality_qte, r2_qte, mape_qte = quality_from_predictions(y_qte_test, hybrid_qte)
-quality_price, r2_price, mape_price = quality_from_predictions(y_price_test, pred_price)
-quality_score = round((quality_achat + quality_ca + quality_qte) / 3, 1)
+purchase_metrics = compute_classifier_metrics(y_achat_test, pred_achat)
+ca_model_metrics = compute_regression_metrics(y_ca_test, pred_ca)
+ca_baseline_metrics = compute_regression_metrics(y_ca_test, test_positive_baselines['ca_if_buy'])
+qte_model_metrics = compute_regression_metrics(y_qte_test, pred_qte)
+qte_baseline_metrics = compute_regression_metrics(y_qte_test, test_positive_baselines['qte_if_buy'])
+price_model_metrics = compute_regression_metrics(y_price_test, pred_price)
+price_baseline_metrics = compute_regression_metrics(y_price_test, test_positive_baselines['price_if_buy'])
+expected_ca_model_metrics = compute_regression_metrics(test_df['vente_nette'], expected_ca_model_all)
+expected_ca_baseline_metrics = compute_regression_metrics(test_df['vente_nette'], expected_ca_baseline_all)
+expected_qte_model_metrics = compute_regression_metrics(test_df['qte_totale'], expected_qte_model_all)
+expected_qte_baseline_metrics = compute_regression_metrics(test_df['qte_totale'], expected_qte_baseline_all)
 
-print(f"[INFO] ACHAT -> AUC: {auc_achat if auc_achat is not None else 'n/a'} | Accuracy: {acc_achat}% | Score: {quality_achat}%")
-print(f"[INFO] CA  -> R2: {r2_ca:.4f} | MAPE: {mape_ca if mape_ca is not None else 'n/a'}% | Score: {quality_ca}%")
-print(f"[INFO] PRICE -> R2: {r2_price:.4f} | MAPE: {mape_price if mape_price is not None else 'n/a'}% | Score: {quality_price}%")
-print(f"[INFO] QTE modele -> R2: {r2_qte_model:.4f} | MAPE: {mape_qte_model if mape_qte_model is not None else 'n/a'}% | Score: {quality_qte_model}%")
-print(f"[INFO] QTE hybride -> R2: {r2_qte:.4f} | MAPE: {mape_qte if mape_qte is not None else 'n/a'}% | Score: {quality_qte}%")
+ca_strategy = choose_strategy(ca_model_metrics, ca_baseline_metrics)
+qte_strategy = choose_strategy(qte_model_metrics, qte_baseline_metrics)
+price_strategy = choose_strategy(price_model_metrics, price_baseline_metrics)
+
+selected_ca_if_buy_all = pred_ca_all if ca_strategy['selected'] == 'model' else test_baselines['ca_if_buy']
+selected_qte_if_buy_all = pred_qte_all if qte_strategy['selected'] == 'model' else test_baselines['qte_if_buy']
+selected_price_if_buy_all = pred_price_all if price_strategy['selected'] == 'model' else test_baselines['price_if_buy']
+
+expected_ca_selected_all = pred_achat * selected_ca_if_buy_all
+expected_qte_selected_all = blend_expected_quantity(
+    pred_achat,
+    selected_ca_if_buy_all,
+    selected_qte_if_buy_all,
+    selected_price_if_buy_all,
+    test_df['avg_price_hist'].to_numpy()
+)
+
+expected_ca_selected_metrics = compute_regression_metrics(test_df['vente_nette'], expected_ca_selected_all)
+expected_qte_selected_metrics = compute_regression_metrics(test_df['qte_totale'], expected_qte_selected_all)
+
+strategy_payload = {
+    "strategy_version": 1,
+    "generated_at": pd.Timestamp.utcnow().isoformat() + "Z",
+    "selection_metric": ca_strategy["selection_metric"],
+    "purchase": {
+        "metrics": purchase_metrics,
+    },
+    "targets": {
+        "ca_if_buy": {
+            **ca_strategy,
+            "baseline_name": "historical_avg_ca_per_order_90d_fallback_vente_avg_3_then_vente_last",
+            "model_metrics": ca_model_metrics,
+            "baseline_metrics": ca_baseline_metrics,
+        },
+        "qte_if_buy": {
+            **qte_strategy,
+            "baseline_name": "historical_avg_qte_per_order_90d_fallback_qte_avg_3_then_qte_last",
+            "model_metrics": qte_model_metrics,
+            "baseline_metrics": qte_baseline_metrics,
+        },
+        "price_if_buy": {
+            **price_strategy,
+            "baseline_name": "historical_avg_price_hist_fallback_ca_over_qte",
+            "model_metrics": price_model_metrics,
+            "baseline_metrics": price_baseline_metrics,
+        },
+    },
+    "expected": {
+        "ca_all_days": {
+            "model_metrics": expected_ca_model_metrics,
+            "baseline_metrics": expected_ca_baseline_metrics,
+            "selected_metrics": expected_ca_selected_metrics,
+        },
+        "qte_all_days": {
+            "model_metrics": expected_qte_model_metrics,
+            "baseline_metrics": expected_qte_baseline_metrics,
+            "selected_metrics": expected_qte_selected_metrics,
+        },
+    },
+}
+
+print(
+    f"[INFO] ACHAT -> AUC: {purchase_metrics['auc'] if purchase_metrics['auc'] is not None else 'n/a'} "
+    f"| Accuracy: {purchase_metrics['accuracy'] if purchase_metrics['accuracy'] is not None else 'n/a'}%"
+)
+print(
+    f"[INFO] CA conditionnel modele -> R2: {ca_model_metrics['r2']} | "
+    f"MAE: {ca_model_metrics['mae']} | MAPE: {ca_model_metrics['mape'] if ca_model_metrics['mape'] is not None else 'n/a'}%"
+)
+print(
+    f"[INFO] CA conditionnel baseline -> R2: {ca_baseline_metrics['r2']} | "
+    f"MAE: {ca_baseline_metrics['mae']} | MAPE: {ca_baseline_metrics['mape'] if ca_baseline_metrics['mape'] is not None else 'n/a'}% "
+    f"| Serving: {ca_strategy['selected']}"
+)
+print(
+    f"[INFO] QTE conditionnelle modele -> R2: {qte_model_metrics['r2']} | "
+    f"MAE: {qte_model_metrics['mae']} | MAPE: {qte_model_metrics['mape'] if qte_model_metrics['mape'] is not None else 'n/a'}%"
+)
+print(
+    f"[INFO] QTE conditionnelle baseline -> R2: {qte_baseline_metrics['r2']} | "
+    f"MAE: {qte_baseline_metrics['mae']} | MAPE: {qte_baseline_metrics['mape'] if qte_baseline_metrics['mape'] is not None else 'n/a'}% "
+    f"| Serving: {qte_strategy['selected']}"
+)
+print(
+    f"[INFO] PRIX conditionnel modele -> R2: {price_model_metrics['r2']} | "
+    f"MAE: {price_model_metrics['mae']} | MAPE: {price_model_metrics['mape'] if price_model_metrics['mape'] is not None else 'n/a'}%"
+)
+print(
+    f"[INFO] PRIX conditionnel baseline -> R2: {price_baseline_metrics['r2']} | "
+    f"MAE: {price_baseline_metrics['mae']} | MAPE: {price_baseline_metrics['mape'] if price_baseline_metrics['mape'] is not None else 'n/a'}% "
+    f"| Serving: {price_strategy['selected']}"
+)
+print(
+    f"[INFO] CA attendu tous jours -> modele R2: {expected_ca_model_metrics['r2']} | MAE: {expected_ca_model_metrics['mae']} "
+    f"|| baseline R2: {expected_ca_baseline_metrics['r2']} | MAE: {expected_ca_baseline_metrics['mae']} "
+    f"|| serving R2: {expected_ca_selected_metrics['r2']} | MAE: {expected_ca_selected_metrics['mae']}"
+)
+print(
+    f"[INFO] QTE attendue tous jours -> modele R2: {expected_qte_model_metrics['r2']} | MAE: {expected_qte_model_metrics['mae']} "
+    f"|| baseline R2: {expected_qte_baseline_metrics['r2']} | MAE: {expected_qte_baseline_metrics['mae']} "
+    f"|| serving R2: {expected_qte_selected_metrics['r2']} | MAE: {expected_qte_selected_metrics['mae']}"
+)
 
 joblib.dump(model_achat, 'modele_nomadis_achat.pkl')
 joblib.dump(model_ca, 'modele_nomadis_ca.pkl')
@@ -239,7 +346,7 @@ joblib.dump(model_qte, 'modele_nomadis_qte.pkl')
 joblib.dump(model_price, 'modele_nomadis_price.pkl')
 
 print("Preparation du modele XGBoost d'affectation commerciale...")
-df_assignment_docs = pd.read_sql(get_assignment_dataset_query(), engine)
+df_assignment_docs = pd.read_sql(text(get_assignment_dataset_query()), engine)
 df_assignment_docs = drop_rows_after_cutoff(
     df_assignment_docs,
     'date_doc',
@@ -323,8 +430,11 @@ if df_assignment_train['commercial_code'].nunique() >= 2:
 else:
     print("[INFO] AFFECTATION -> ignoree, moins de deux commerciaux exploitables.")
 
+save_strategy('.', strategy_payload)
+purchase_auc = strategy_payload.get('purchase', {}).get('metrics', {}).get('auc')
+precision_value = round(float(purchase_auc) * 100.0, 1) if purchase_auc is not None else 0.0
 with open('precision.txt', 'w', encoding='utf8') as f:
-    f.write(str(quality_score))
+    f.write(str(precision_value))
 
 print("Synchronisation du feature store canonique...")
 ensure_feature_store_tables(engine)
@@ -361,10 +471,10 @@ df_candidates = df_candidates.groupby(['client_code', 'jour_semaine'], as_index=
 df_candidates.to_csv('master_dataset_v3.csv', index=False)
 
 query_prefs = get_preferences_query(data_cutoff_date)
-df_prefs = pd.read_sql(query_prefs, engine)
+df_prefs = pd.read_sql(text(query_prefs), engine)
 df_prefs['client_code'] = df_prefs['client_code'].astype(str).str.strip()
 df_prefs['produit_nom'] = df_prefs['produit_nom'].fillna(df_prefs['produit_code']).astype(str).str.strip()
 df_prefs['qte_moyenne'] = pd.to_numeric(df_prefs['qte_moyenne'], errors='coerce').fillna(1)
 df_prefs.to_csv('preferences_clients_produits.csv', index=False)
 
-print(f"SUCCES ! Trois modeles XGBoost re-entraines. Score global: {quality_score}%")
+print("SUCCES ! Modeles IA re-entraines, evaluation chronologique explicite et strategie Dashboard persistee.")

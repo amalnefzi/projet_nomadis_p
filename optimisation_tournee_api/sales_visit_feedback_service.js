@@ -167,6 +167,7 @@ function mapFeedbackRow(row = {}) {
     client_code: normalizeNullableText(row.client_code),
     commercial_code: normalizeNullableText(row.commercial_code),
     planned_date: normalizeDateOnly(row.planned_date),
+    tournee_code: normalizeNullableText(row.tournee_code),
     execution_status: normalizeNullableText(row.execution_status) || 'pending',
     purchase_made: row.purchase_made == null ? null : Boolean(Number(row.purchase_made)),
     actual_ca: row.actual_ca == null ? null : Number(row.actual_ca),
@@ -186,14 +187,17 @@ function assertMatchingIdentity(existing = {}, nextRecord = {}) {
     ['client_id', normalizeNullableText],
     ['client_code', normalizeNullableText],
     ['commercial_code', normalizeNullableText],
-    ['planned_date', normalizeDateOnly]
+    ['planned_date', normalizeDateOnly],
+    ['tournee_code', normalizeNullableText]
   ]
 
   fieldDefinitions.forEach(([fieldName, normalizer]) => {
     const existingValue = normalizer(existing[fieldName])
     const nextValue = normalizer(nextRecord[fieldName])
     if (existingValue && nextValue && existingValue !== nextValue) {
-      throw new Error(`Existing feedback identity mismatch on ${fieldName}.`)
+      const error = new Error(`Existing feedback identity mismatch on ${fieldName}.`)
+      error.statusCode = 409
+      throw error
     }
   })
 }
@@ -216,6 +220,7 @@ function normalizeFeedbackUpsertInput(raw = {}, plannedVisitIdFromParams = null)
     client_code: normalizeNullableText(raw?.client_code),
     commercial_code: normalizeNullableText(raw?.commercial_code),
     planned_date: normalizeDateOnly(raw?.planned_date),
+    tournee_code: normalizeNullableText(raw?.tournee_code),
     execution_status: executionStatus,
     purchase_made: normalizeNullableBoolean(raw?.purchase_made, 'purchase_made'),
     actual_ca: normalizeNullableDecimal(raw?.actual_ca, 'actual_ca'),
@@ -254,6 +259,24 @@ function normalizeFeedbackUpsertInput(raw = {}, plannedVisitIdFromParams = null)
   }
 
   return record
+}
+
+function normalizePendingFeedbackSeed(raw = {}) {
+  const normalized = normalizeFeedbackUpsertInput({
+    ...raw,
+    execution_status: 'pending'
+  }, raw?.planned_visit_id)
+  const tourneeCode = normalizeNullableText(raw?.tournee_code)
+
+  if (!tourneeCode) {
+    throw new Error('tournee_code is required.')
+  }
+
+  return {
+    ...normalized,
+    tournee_code: tourneeCode,
+    prediction_snapshot: parsePredictionSnapshot(raw?.prediction_snapshot) ?? buildVisitPredictionSnapshot(raw)
+  }
 }
 
 function parsePlannedVisitIds(rawIds) {
@@ -604,6 +627,7 @@ async function fetchSalesVisitFeedbackMonitoringRecords(queryAsync, rawFilters =
         client_code,
         commercial_code,
         planned_date,
+        tournee_code,
         execution_status,
         purchase_made,
         actual_ca,
@@ -667,6 +691,7 @@ async function fetchSalesVisitFeedbackRecords(queryAsync, {
         client_code,
         commercial_code,
         planned_date,
+        tournee_code,
         execution_status,
         purchase_made,
         actual_ca,
@@ -688,6 +713,38 @@ async function fetchSalesVisitFeedbackRecords(queryAsync, {
   return (Array.isArray(rows) ? rows : []).map(mapFeedbackRow)
 }
 
+async function loadSalesVisitFeedbackRecordsByTourneeCode(queryAsync, tourneeCode) {
+  const rows = await queryAsync(
+    `
+      SELECT
+        planned_visit_id,
+        assigned_slot_id,
+        client_id,
+        client_code,
+        commercial_code,
+        planned_date,
+        tournee_code,
+        execution_status,
+        purchase_made,
+        actual_ca,
+        actual_quantity,
+        visit_date_actual,
+        note,
+        non_visit_reason,
+        no_purchase_reason,
+        prediction_snapshot_json,
+        created_at,
+        updated_at
+      FROM sales_v2_visit_feedback
+      WHERE tournee_code = ?
+      ORDER BY planned_date ASC, commercial_code ASC, client_code ASC, planned_visit_id ASC
+    `,
+    [tourneeCode]
+  )
+
+  return (Array.isArray(rows) ? rows : []).map(mapFeedbackRow)
+}
+
 async function loadSalesVisitFeedbackRecordById(queryAsync, plannedVisitId) {
   const rows = await queryAsync(
     `
@@ -698,6 +755,7 @@ async function loadSalesVisitFeedbackRecordById(queryAsync, plannedVisitId) {
         client_code,
         commercial_code,
         planned_date,
+        tournee_code,
         execution_status,
         purchase_made,
         actual_ca,
@@ -719,9 +777,14 @@ async function loadSalesVisitFeedbackRecordById(queryAsync, plannedVisitId) {
   return Array.isArray(rows) && rows[0] ? mapFeedbackRow(rows[0]) : null
 }
 
-async function upsertSalesVisitFeedback(queryAsync, rawInput = {}, plannedVisitIdFromParams = null) {
+async function upsertSalesVisitFeedback(queryAsync, rawInput = {}, plannedVisitIdFromParams = null, options = {}) {
   const record = normalizeFeedbackUpsertInput(rawInput, plannedVisitIdFromParams)
   const existing = await loadSalesVisitFeedbackRecordById(queryAsync, record.planned_visit_id)
+  if (!existing && options?.updateOnly) {
+    const error = new Error(`Aucun feedback Sales V2 valide pour ${record.planned_visit_id}.`)
+    error.statusCode = 404
+    throw error
+  }
   if (existing) {
     assertMatchingIdentity(existing, record)
   }
@@ -767,6 +830,7 @@ async function upsertSalesVisitFeedback(queryAsync, rawInput = {}, plannedVisitI
           client_code,
           commercial_code,
           planned_date,
+          tournee_code,
           execution_status,
           purchase_made,
           actual_ca,
@@ -776,8 +840,8 @@ async function upsertSalesVisitFeedback(queryAsync, rawInput = {}, plannedVisitI
           non_visit_reason,
           no_purchase_reason,
           prediction_snapshot_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`,
       [
         record.planned_visit_id,
         record.assigned_slot_id,
@@ -785,6 +849,7 @@ async function upsertSalesVisitFeedback(queryAsync, rawInput = {}, plannedVisitI
         record.client_code,
         record.commercial_code,
         record.planned_date,
+        record.tournee_code,
         record.execution_status,
         record.purchase_made == null ? null : (record.purchase_made ? 1 : 0),
         record.actual_ca,
@@ -802,6 +867,75 @@ async function upsertSalesVisitFeedback(queryAsync, rawInput = {}, plannedVisitI
   return saved
 }
 
+async function replacePendingSalesVisitFeedbackForTournee(queryAsync, {
+  tournee_code: rawTourneeCode,
+  visits = []
+} = {}) {
+  const tourneeCode = normalizeNullableText(rawTourneeCode)
+  if (!tourneeCode) {
+    throw new Error('tournee_code is required.')
+  }
+
+  const normalizedVisits = (Array.isArray(visits) ? visits : []).map(visit => normalizePendingFeedbackSeed({
+    ...visit,
+    tournee_code: tourneeCode
+  }))
+  if (!normalizedVisits.length) {
+    throw new Error('At least one validated Sales V2 visit is required.')
+  }
+
+  const plannedVisitIds = normalizedVisits.map(visit => visit.planned_visit_id)
+  if (new Set(plannedVisitIds).size !== plannedVisitIds.length) {
+    const error = new Error('Duplicate planned_visit_id detected inside the validated Sales V2 block.')
+    error.statusCode = 400
+    throw error
+  }
+
+  const existingByTournee = await loadSalesVisitFeedbackRecordsByTourneeCode(queryAsync, tourneeCode)
+  const finalizedRows = existingByTournee.filter(record => String(record.execution_status || 'pending') !== 'pending')
+  if (finalizedRows.length) {
+    const error = new Error(`Impossible de revalider le bloc Sales V2 ${tourneeCode} car ${finalizedRows.length} visite(s) ont deja un retour terrain.`)
+    error.statusCode = 409
+    throw error
+  }
+
+  const existingById = await fetchSalesVisitFeedbackRecords(queryAsync, {
+    plannedVisitIds
+  })
+  const conflictingTourneeRows = existingById.filter(record => {
+    const existingTourneeCode = normalizeNullableText(record?.tournee_code)
+    return existingTourneeCode && existingTourneeCode !== tourneeCode
+  })
+  if (conflictingTourneeRows.length) {
+    const conflictIds = conflictingTourneeRows.map(record => record.planned_visit_id).join(', ')
+    const error = new Error(`Certaines visites Sales V2 existent deja sur un autre bloc valide: ${conflictIds}.`)
+    error.statusCode = 409
+    throw error
+  }
+
+  await queryAsync(
+    `
+      DELETE FROM sales_v2_visit_feedback
+      WHERE tournee_code = ?
+        AND execution_status = 'pending'
+    `,
+    [tourneeCode]
+  )
+
+  for (const visit of normalizedVisits) {
+    await upsertSalesVisitFeedback(queryAsync, visit, visit.planned_visit_id)
+  }
+
+  const records = await fetchSalesVisitFeedbackRecords(queryAsync, {
+    plannedVisitIds
+  })
+
+  return {
+    savedRows: records.length,
+    records
+  }
+}
+
 module.exports = {
   buildPlannedVisitId,
   buildPlannedVisitMetadata,
@@ -812,13 +946,17 @@ module.exports = {
   fetchSalesVisitFeedbackMonitoringRecords,
   getSalesVisitFeedbackMonitoring,
   getSalesVisitFeedbackMonitoringDetails,
+  replacePendingSalesVisitFeedbackForTournee,
   upsertSalesVisitFeedback,
   __testables: {
     ALLOWED_MONITORING_SEGMENTS,
     ALLOWED_EXECUTION_STATUSES,
     finalizeSummaryAccumulator,
+    loadSalesVisitFeedbackRecordById,
+    loadSalesVisitFeedbackRecordsByTourneeCode,
     mapFeedbackRow,
     normalizeFeedbackUpsertInput,
+    normalizePendingFeedbackSeed,
     parseMonitoringFilters,
     parsePlannedVisitIds
   }
