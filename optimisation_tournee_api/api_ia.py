@@ -31,6 +31,12 @@ from nomadis_feature_store import (
     read_feature_store_state,
     refresh_feature_store,
 )
+from nomadis_model_strategy import (
+    build_historical_baselines,
+    extract_precision_score,
+    load_strategy,
+    resolve_target_choice,
+)
 
 try:
     from dotenv import load_dotenv as python_dotenv_load
@@ -39,6 +45,7 @@ except Exception:  # pragma: no cover
 
 app = Flask(__name__)
 BASE_DIR = Path(__file__).resolve().parent
+CLIENT_CODE_CSV_DTYPE = {"client_code": "string"}
 
 FEATURE_COLUMNS_BASE = [
     'jour_semaine',
@@ -142,6 +149,7 @@ artifacts_load_metrics = {
     "total_ms": 0.0,
     "loaded_at": None
 }
+model_strategy = load_strategy(BASE_DIR)
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(errors="replace", line_buffering=True, write_through=True)
@@ -340,7 +348,16 @@ def build_prediction_run_code(prefix='pred'):
 
 def read_precision_score():
     try:
+        strategy_score = extract_precision_score(model_strategy)
+        if strategy_score is not None:
+            return strategy_score
+
         precision_text = (BASE_DIR / 'precision.txt').read_text(encoding='utf8').strip()
+        if precision_text.startswith('{'):
+            payload = json.loads(precision_text)
+            json_score = extract_precision_score(payload)
+            return json_score if json_score is not None else 0.0
+
         parsed = float(precision_text)
         return parsed if np.isfinite(parsed) else 0.0
     except Exception:
@@ -637,7 +654,8 @@ def build_model_version():
         'colonnes_ia.pkl',
         'colonnes_affectation.pkl',
         'classes_affectation.pkl',
-        'precision.txt'
+        'precision.txt',
+        'model_strategy.json',
     ]
 
     signature_parts = []
@@ -1080,15 +1098,42 @@ def build_scored_prediction_candidates(data):
     feature_lookup_ms = round((time.perf_counter() - feature_lookup_started_at) * 1000, 2)
     prediction_compute_started_at = time.perf_counter()
     X_pred = build_features(clients_du_jour)
+    historical_baselines = build_historical_baselines(clients_du_jour)
     achat_prob = np.clip(model_achat.predict_proba(X_pred)[:, 1], 0, 1)
-    pred_ca_if_buy = np.maximum(1, np.expm1(model_ca.predict(X_pred)))
-    pred_qte_if_buy = np.maximum(1, np.expm1(model_qte.predict(X_pred)))
-    pred_price_if_buy = np.maximum(0.5, np.expm1(model_price.predict(X_pred)))
+    pred_ca_if_buy_model = np.maximum(0.0, np.expm1(model_ca.predict(X_pred)))
+    pred_qte_if_buy_model = np.maximum(0.0, np.expm1(model_qte.predict(X_pred)))
+    pred_price_if_buy_model = np.maximum(0.0, np.expm1(model_price.predict(X_pred)))
+
+    ca_choice = resolve_target_choice(model_strategy, 'ca_if_buy')
+    qte_choice = resolve_target_choice(model_strategy, 'qte_if_buy')
+    price_choice = resolve_target_choice(model_strategy, 'price_if_buy')
+
+    pred_ca_if_buy = (
+        pred_ca_if_buy_model
+        if ca_choice == 'model'
+        else historical_baselines['ca_if_buy']
+    )
+    pred_qte_if_buy = (
+        pred_qte_if_buy_model
+        if qte_choice == 'model'
+        else historical_baselines['qte_if_buy']
+    )
+    pred_price_if_buy = (
+        pred_price_if_buy_model
+        if price_choice == 'model'
+        else historical_baselines['price_if_buy']
+    )
 
     clients_du_jour['Prob_modele'] = np.round(achat_prob * 100, 1)
     clients_du_jour['Pred_ca_if_buy'] = pred_ca_if_buy
     clients_du_jour['Pred_qte_if_buy'] = pred_qte_if_buy
     clients_du_jour['Prix_pred'] = pred_price_if_buy
+    clients_du_jour['Pred_ca_if_buy_model'] = pred_ca_if_buy_model
+    clients_du_jour['Pred_qte_if_buy_model'] = pred_qte_if_buy_model
+    clients_du_jour['Prix_pred_model'] = pred_price_if_buy_model
+    clients_du_jour['Pred_ca_if_buy_baseline'] = historical_baselines['ca_if_buy']
+    clients_du_jour['Pred_qte_if_buy_baseline'] = historical_baselines['qte_if_buy']
+    clients_du_jour['Prix_pred_baseline'] = historical_baselines['price_if_buy']
     clients_du_jour['Habit_score'] = clients_du_jour.apply(compute_habit_score, axis=1)
     clients_du_jour['Recency_score'] = clients_du_jour.apply(compute_recency_score, axis=1)
     clients_du_jour['Prob_hist'] = clients_du_jour.apply(build_purchase_probability, axis=1)
@@ -1192,6 +1237,11 @@ def build_scored_prediction_candidates(data):
         "selected_limit": selected_limit,
         "selected_commercials": selected_commercials,
         "budget_meta": budget_meta,
+        "strategy_meta": {
+            "ca_if_buy": ca_choice,
+            "qte_if_buy": qte_choice,
+            "price_if_buy": price_choice,
+        },
         "timings": {
             "feature_lookup_ms": feature_lookup_ms,
             "prediction_compute_ms": prediction_compute_ms
@@ -1209,11 +1259,7 @@ def build_dashboard_prediction_output(filtered_clients, selected_limit, selected
         assignment_probabilities = np.clip(model_affectation.predict_proba(X_assignment), 0, 1)
 
         for row_index, (_, row) in enumerate(filtered_head.iterrows()):
-            raw_code = str(row['client_code']).strip()
-            try:
-                code_str = str(int(float(raw_code))).zfill(5)
-            except ValueError:
-                code_str = raw_code.zfill(5) if len(raw_code) < 5 else raw_code
+            code_str = str(row['client_code']).strip()
 
             score_map = {
                 assignment_classes[class_index]: round(float(assignment_probabilities[row_index][class_index]) * 100, 1)
@@ -1236,11 +1282,7 @@ def build_dashboard_prediction_output(filtered_clients, selected_limit, selected
 
     result_dict = {}
     for _, row in filtered_head.iterrows():
-        raw_code = str(row['client_code']).strip()
-        try:
-            code_str = str(int(float(raw_code))).zfill(5)
-        except ValueError:
-            code_str = raw_code.zfill(5) if len(raw_code) < 5 else raw_code
+        code_str = str(row['client_code']).strip()
 
         if 'client_code' in effective_prefs.columns and not effective_prefs.empty:
             df_prefs_filtered = effective_prefs[effective_prefs['client_code'] == code_str]
@@ -1257,12 +1299,19 @@ def build_dashboard_prediction_output(filtered_clients, selected_limit, selected
                     produit = 'Standard'
                 product_weights[produit] = float(p_row.get('qte_moyenne', 1) or 1)
 
-        qte_predite = float(row['Qte_predite'])
-        if qte_predite < 1 and float(row['Prob_achat']) >= 12 and float(row['Vn_predit']) >= 8:
-            qte_predite = 1
+        product_weights = {
+            produit: qte
+            for produit, qte in product_weights.items()
+            if pd.notna(qte) and float(qte) > 0
+        }
+        if not product_weights:
+            continue
 
+        qte_predite = float(row['Qte_predite'])
         details_qte, total_qte = rebalance_quantities(qte_predite, product_weights)
-        prix_moyen = float(row['Vn_predit']) / max(1, total_qte)
+        if total_qte <= 0:
+            continue
+        prix_moyen = float(row['Vn_predit']) / float(total_qte)
         commercial_scores = commercial_scores_by_client.get(code_str, {})
         best_commercial = next(iter(commercial_scores), str(row.get('home_commercial', '')).strip())
 
@@ -1384,11 +1433,11 @@ def rebalance_quantities(target_total, details_qte):
     if target_total <= 0:
         return {}, 0
     if not details_qte:
-        return {"Standard": target_total}, target_total
+        return {}, 0
 
     total_hist = sum(max(0, float(qte)) for qte in details_qte.values())
     if total_hist <= 0:
-        return {"Standard": target_total}, target_total
+        return {}, 0
 
     weighted = []
     for produit, qte in details_qte.items():
@@ -1420,20 +1469,20 @@ def rebalance_quantities(target_total, details_qte):
     final_details = {item['nom']: int(item['base']) for item in weighted if item['base'] > 0}
     final_total = sum(final_details.values())
     if final_total <= 0:
-        return {"Standard": 1}, 1
+        return {}, 0
     return final_details, final_total
 
 
 def blend_expected_quantity(prob_buy, ca_if_buy, qte_if_buy, price_if_buy, avg_price_hist):
     prob_buy = max(0.0, min(1.0, float(prob_buy)))
-    ca_if_buy = max(1.0, float(ca_if_buy))
-    qte_if_buy = max(1.0, float(qte_if_buy))
-    price_if_buy = max(0.5, float(price_if_buy))
+    ca_if_buy = max(0.0, float(ca_if_buy))
+    qte_if_buy = max(0.0, float(qte_if_buy))
+    price_if_buy = max(0.0, float(price_if_buy))
     avg_price_hist = float(avg_price_hist) if pd.notna(avg_price_hist) else np.nan
 
     expected_ca = ca_if_buy * prob_buy
     qte_from_model = qte_if_buy * prob_buy
-    qte_from_price = expected_ca / price_if_buy
+    qte_from_price = expected_ca / max(0.5, price_if_buy)
 
     hist_price = avg_price_hist if np.isfinite(avg_price_hist) and avg_price_hist > 0.5 else price_if_buy
     qte_from_hist = expected_ca / max(0.5, hist_price)
@@ -1566,7 +1615,7 @@ def load_prediction_history():
             "Lancez train_auto.py pour regenerer les artefacts IA."
         )
 
-    history = pd.read_csv(history_path, low_memory=False)
+    history = pd.read_csv(history_path, low_memory=False, dtype=CLIENT_CODE_CSV_DTYPE)
     if 'date_doc' not in history.columns:
         raise RuntimeError("dataset_features_clients_jour.csv ne contient pas la colonne date_doc.")
 
@@ -1856,6 +1905,7 @@ def load_artifacts():
     global model_affectation, feature_columns, assignment_feature_columns, assignment_classes
     global df_master, prediction_history_source, df_daily_demand, df_prefs, feature_store_state
     global artifacts_load_metrics
+    global model_strategy
 
     print("Chargement des modeles XGBoost et des donnees...")
     started_at = time.perf_counter()
@@ -1867,6 +1917,7 @@ def load_artifacts():
         model_qte = joblib.load('modele_nomadis_qte.pkl')
         model_price = joblib.load('modele_nomadis_price.pkl')
         feature_columns = joblib.load('colonnes_ia.pkl')
+        model_strategy = load_strategy(BASE_DIR)
         store_state = read_feature_store_state(engine)
         source_summary = build_feature_store_source_summary(engine)
         loaded_from_store = False
@@ -1883,7 +1934,7 @@ def load_artifacts():
             df_master = load_prediction_history()
             prediction_history_source = 'csv_fallback'
             df_daily_demand = load_daily_demand_history(df_master)
-            df_prefs = pd.read_csv('preferences_clients_produits.csv')
+            df_prefs = pd.read_csv('preferences_clients_produits.csv', dtype=CLIENT_CODE_CSV_DTYPE)
             if 'client_code' in df_prefs.columns:
                 df_prefs['client_code'] = df_prefs['client_code'].astype(str).str.strip()
             if 'qte_moyenne' in df_prefs.columns:
@@ -1936,6 +1987,11 @@ def build_model_status_payload():
         "model_version": build_model_version(),
         "features_version": build_features_version(),
         "prediction_history_source": prediction_history_source,
+        "regression_strategy": {
+            "ca_if_buy": resolve_target_choice(model_strategy, "ca_if_buy"),
+            "qte_if_buy": resolve_target_choice(model_strategy, "qte_if_buy"),
+            "price_if_buy": resolve_target_choice(model_strategy, "price_if_buy"),
+        },
         "feature_schema_version": CANONICAL_FEATURE_SCHEMA_VERSION,
         "source_data_watermark": build_feature_store_source_data_version(),
         "feature_store_state": feature_store_state,

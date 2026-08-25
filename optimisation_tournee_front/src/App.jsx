@@ -4,6 +4,17 @@ import './App.css'
 import CoveragePlanner from './CoveragePlanner'
 import SalesCoveragePlanner from './SalesCoveragePlanner'
 import V2ValidationLab from './V2ValidationLab'
+import {
+  getPastSalesPlanMessage
+} from './dashboardDateGuard.js'
+import {
+  executeDashboardPlanSearchGuard
+} from './dashboardPlanSearchGuard.js'
+import {
+  getDashboardCommercialValidationMessage,
+  getDashboardValidationDisabledReason
+} from './dashboardValidationGuard.js'
+import { getSalesPlanApiErrorMessage } from './salesPlanApiError.js'
 import { formatCommercialZone } from './salesCoverageDetails.js'
 import { API_URL } from './apiConfig'
 import TourRouteMap from './TourRouteMap'
@@ -14,6 +25,7 @@ import {
   formatDistanceMeters,
   formatDurationSeconds
 } from './tourRouteUtils'
+import { filterVisibleDashboardRows } from './dashboardRows.js'
 
 const JOURS_TO_INDEX = {
   Dimanche: 0,
@@ -98,7 +110,6 @@ function App() {
   const [activeModule, setActiveModule] = useState('dashboard')
   const [loading, setLoading] = useState(false)
   const [erreur, setErreur] = useState(null)
-  const [showBacktest, setShowBacktest] = useState(false)
   const [topClientsInput, setTopClientsInput] = useState('')
   const [targetChiffreInput, setTargetChiffreInput] = useState('')
   const [isTraining, setIsTraining] = useState(false)
@@ -203,10 +214,6 @@ function App() {
       setLoading(true)
       setErreur(null)
       setValidationFeedback(null)
-      if (filtres.mode_tournee !== 'vente') {
-        setShowBacktest(false)
-      }
-
       const parsedTop = parseInt(topClientsInput, 10)
       const committedTop = Number.isFinite(parsedTop) ? Math.min(200, Math.max(1, parsedTop)) : ''
       const parsedTarget = parseFloat(String(targetChiffreInput || '').replace(',', '.'))
@@ -220,27 +227,57 @@ function App() {
       setTopClientsInput(committedTop === '' ? '' : String(committedTop))
       setTargetChiffreInput(committedTarget === '' ? '' : String(committedTarget))
 
-      const res = await axios.get(`${API_URL}/api/tournees/plan`, {
-        params: {
-          date_precise: effectiveDatePrecise,
-          date_debut: periode?.date_debut,
-          date_fin: periode?.date_fin,
-          commercial: filtres.commercial,
-          route: filtres.route,
-          actif: filtres.actif,
-          mode_tournee: filtres.mode_tournee,
-          top_clients: committedTop || undefined,
-          target_chiffre: committedTarget || undefined,
-          t: Date.now()
-        }
+      const guardedSearch = await executeDashboardPlanSearchGuard({
+        modeTournee: filtres.mode_tournee,
+        datePrecise: effectiveDatePrecise,
+        dateDebut: periode?.date_debut,
+        dateFin: periode?.date_fin,
+        previousState: {
+          donneesTournee,
+          editableTournees,
+          additionalSuggestions,
+          clickedClient,
+          validationFeedback,
+          isValidationModalOpen,
+          manualOrderLocked
+        },
+        requestPlan: () => axios.get(`${API_URL}/api/tournees/plan`, {
+          params: {
+            date_precise: effectiveDatePrecise,
+            date_debut: periode?.date_debut,
+            date_fin: periode?.date_fin,
+            commercial: filtres.commercial,
+            route: filtres.route,
+            actif: filtres.actif,
+            mode_tournee: filtres.mode_tournee,
+            top_clients: committedTop || undefined,
+            target_chiffre: committedTarget || undefined,
+            t: Date.now()
+          }
+        })
       })
+
+      if (guardedSearch.blocked) {
+        const nextState = guardedSearch.nextState
+        setDonneesTournee(nextState.donneesTournee)
+        setEditableTournees(nextState.editableTournees)
+        setAdditionalSuggestions(nextState.additionalSuggestions)
+        setClickedClient(nextState.clickedClient)
+        setValidationFeedback(nextState.validationFeedback)
+        setIsValidationModalOpen(nextState.isValidationModalOpen)
+        setManualOrderLocked(nextState.manualOrderLocked)
+        setErreur(guardedSearch.errorMessage || getPastSalesPlanMessage())
+        return
+      }
+
+      const res = guardedSearch.response
       setDonneesTournee(res.data)
       setEditableTournees(Array.isArray(res.data?.tournees) ? res.data.tournees : [])
       setAdditionalSuggestions(Array.isArray(res.data?.suggestions_ajout) ? res.data.suggestions_ajout : [])
       setManualOrderLocked(false)
       setClickedClient(null)
-    } catch {
-      setErreur("Erreur connexion. Verifiez MySQL et l'API.")
+    } catch (error) {
+      setErreur(getSalesPlanApiErrorMessage(error))
     } finally {
       setLoading(false)
     }
@@ -313,13 +350,16 @@ function App() {
   }
 
   const tourneesAffichees = useMemo(() => {
-    const filtered = tournees
-    const maxPossible = filtered.length
-    if (maxPossible === 0) return []
-    if (filtres.top_clients === '' || filtres.top_clients == null) return filtered
-    const n = Math.min(maxPossible, Math.max(1, Number(filtres.top_clients)))
-    return filtered.slice(0, n)
-  }, [tournees, filtres.top_clients])
+    const requestedTopClients =
+      filtres.top_clients === '' || filtres.top_clients == null
+        ? null
+        : Number(filtres.top_clients)
+
+    return filterVisibleDashboardRows(tournees, {
+      isRecouvrementMode,
+      topClients: requestedTopClients
+    })
+  }, [tournees, filtres.top_clients, isRecouvrementMode])
 
   const suggestionRows = useMemo(() => {
     const selectedKeys = new Set(tournees.map(row => getClientSelectionKey(row)).filter(Boolean))
@@ -393,11 +433,16 @@ function App() {
     () => depotOrigin?.nom || 'Depot non specifie',
     [depotOrigin]
   )
-  const validationDisabledReason = validationLoading
-    ? 'Validation en cours...'
-    : !tourneesAffichees.length
-      ? 'Aucun client a enregistrer pour ce plan de route.'
-      : null
+  const commercialValidationMessage = getDashboardCommercialValidationMessage({
+    modeTournee,
+    commercialCode: filtres.commercial
+  })
+  const validationDisabledReason = getDashboardValidationDisabledReason({
+    validationLoading,
+    stopCount: tourneesAffichees.length,
+    modeTournee,
+    commercialCode: filtres.commercial
+  })
 
   const buildValidationStops = () => {
     const rowsByClient = new Map(
@@ -532,6 +577,11 @@ function App() {
       return
     }
 
+    if (commercialValidationMessage) {
+      setValidationFeedback({ type: 'error', message: commercialValidationMessage })
+      return
+    }
+
     const stops = buildValidationStops()
     if (!stops.length) {
       const errorMessage = 'Aucun client exploitable a enregistrer pour cette tournee.'
@@ -553,6 +603,12 @@ function App() {
       const errorMessage = 'Aucun plan de route disponible a valider.'
       setValidationFeedback({ type: 'error', message: errorMessage })
       window.alert(errorMessage)
+      return
+    }
+
+    if (commercialValidationMessage) {
+      setValidationFeedback({ type: 'error', message: commercialValidationMessage })
+      setIsValidationModalOpen(false)
       return
     }
 
@@ -740,10 +796,7 @@ function App() {
           <label style={{ fontSize: '13px', fontWeight: 'bold', color: '#555', marginBottom: '6px' }}>Type de tournee</label>
           <select
             value={filtres.mode_tournee}
-            onChange={e => {
-              setShowBacktest(false)
-              handleChangeFiltre('mode_tournee', e.target.value)
-            }}
+            onChange={e => handleChangeFiltre('mode_tournee', e.target.value)}
             style={{ padding: '10px', borderRadius: '6px', border: '1px solid #ddd' }}
           >
             <option value="vente">Prediction de vente</option>
@@ -769,93 +822,9 @@ function App() {
           {loading ? 'Recherche IA...' : "Analyser avec l'IA"}
         </button>
 
-        {donneesTournee && !isRecouvrementMode && (
-          <button onClick={() => setShowBacktest(!showBacktest)} style={{ padding: '10px 25px', backgroundColor: '#6f42c1', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', height: '40px', marginLeft: 'auto' }}>
-            {showBacktest ? 'Cacher Backtest' : 'Voir Precision'}
-          </button>
-        )}
       </div>
 
       {erreur && <div style={{ padding: '15px', backgroundColor: '#f8d7da', color: '#721c24', borderRadius: '6px', marginBottom: '20px' }}>{erreur}</div>}
-
-      {showBacktest && donneesTournee && (
-        <div style={{ backgroundColor: 'white', padding: '25px', borderRadius: '12px', marginBottom: '30px', border: '2px solid #6f42c1', boxShadow: '0 8px 15px rgba(111, 66, 193, 0.15)' }}>
-          <h4 style={{ margin: '0 0 20px 0', color: '#4b2885', fontSize: '20px', textAlign: 'center', textTransform: 'uppercase', letterSpacing: '1px' }}>
-            Validation IA : Predit vs Reel
-          </h4>
-
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '15px', marginBottom: '20px' }}>
-            <div style={{ backgroundColor: '#f8f9fa', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
-              <div style={{ fontSize: '12px', color: '#6c757d', marginBottom: '5px' }}>Precision Globale IA</div>
-              <div style={{ fontSize: '36px', fontWeight: '900', color: '#198754' }}>
-                {donneesTournee?.precision_ia ?? '85.4'}%
-              </div>
-            </div>
-            <div style={{ backgroundColor: '#f8f9fa', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
-              <div style={{ fontSize: '12px', color: '#6c757d', marginBottom: '5px' }}>Total Predit</div>
-              <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#0d6efd' }}>{chiffreTotal.toLocaleString()} TND</div>
-            </div>
-            <div style={{ backgroundColor: '#f8f9fa', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
-              <div style={{ fontSize: '12px', color: '#6c757d', marginBottom: '5px' }}>Clients Analyses</div>
-              <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#6f42c1' }}>{tourneesAffichees.length}</div>
-            </div>
-          </div>
-
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
-              <thead>
-                <tr style={{ backgroundColor: '#6f42c1', color: 'white' }}>
-                  <th style={{ padding: '10px', textAlign: 'left' }}>CLIENT</th>
-                  <th style={{ padding: '10px', textAlign: 'right' }}>VENTE PREDITE</th>
-                  <th style={{ padding: '10px', textAlign: 'right' }}>VENTE REELLE</th>
-                  <th style={{ padding: '10px', textAlign: 'right' }}>ECART</th>
-                  <th style={{ padding: '10px', textAlign: 'center' }}>PRECISION</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tourneesAffichees.map((row, idx) => {
-                  const predit = parseFloat(row.chiffre) || 0
-                  const reel = parseFloat(row.vente_reelle) || 0
-                  const ecart = predit - reel
-                  const precision = reel > 0 ? Math.max(0, 100 - (Math.abs(ecart) / reel * 100)) : 0
-
-                  let precisionColor = '#dc3545'
-                  if (precision >= 80) precisionColor = '#198754'
-                  else if (precision >= 60) precisionColor = '#fd7e14'
-
-                  return (
-                    <tr key={idx} style={{ backgroundColor: idx % 2 === 0 ? 'white' : '#f8f9fa' }}>
-                      <td style={{ padding: '8px', borderBottom: '1px solid #e9ecef' }}>{row.nom}</td>
-                      <td style={{ padding: '8px', borderBottom: '1px solid #e9ecef', textAlign: 'right', color: '#0d6efd', fontWeight: 'bold' }}>
-                        {predit.toFixed(1)} TND
-                      </td>
-                      <td style={{ padding: '8px', borderBottom: '1px solid #e9ecef', textAlign: 'right', color: reel > 0 ? '#198754' : '#6c757d', fontWeight: 'bold' }}>
-                        {reel > 0 ? `${reel.toFixed(1)} TND` : 'N/A'}
-                      </td>
-                      <td style={{ padding: '8px', borderBottom: '1px solid #e9ecef', textAlign: 'right', color: ecart > 0 ? '#dc3545' : '#198754', fontWeight: 'bold' }}>
-                        {reel > 0 ? `${ecart > 0 ? '+' : ''}${ecart.toFixed(1)} TND` : '-'}
-                      </td>
-                      <td style={{ padding: '8px', borderBottom: '1px solid #e9ecef', textAlign: 'center' }}>
-                        {reel > 0 ? (
-                          <span style={{ backgroundColor: precisionColor, color: 'white', padding: '4px 10px', borderRadius: '12px', fontWeight: 'bold', fontSize: '12px' }}>
-                            {precision.toFixed(1)}%
-                          </span>
-                        ) : (
-                          <span style={{ color: '#6c757d', fontSize: '11px' }}>Pas de donnees</span>
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          <p style={{ margin: '15px 0 0 0', color: '#6c757d', fontSize: '12px', textAlign: 'center' }}>
-            La precision est calculee en comparant les predictions IA avec les ventes reelles de la base de donnees.
-          </p>
-        </div>
-      )}
 
       {donneesTournee && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px', marginBottom: '30px' }}>
@@ -1296,17 +1265,17 @@ function App() {
                 <button
                   type="button"
                   onClick={openValidationModal}
-                  disabled={validationLoading}
+                  disabled={Boolean(validationDisabledReason)}
                   title={validationDisabledReason || 'Enregistrer ce plan de route dans la base'}
                   style={{
                     flex: 1,
                     padding: '12px',
-                    backgroundColor: validationLoading ? '#94a3b8' : '#0d6efd',
+                    backgroundColor: validationDisabledReason ? '#94a3b8' : '#0d6efd',
                     color: 'white',
                     border: 'none',
                     borderRadius: '6px',
                     fontWeight: 'bold',
-                    cursor: validationLoading ? 'not-allowed' : 'pointer',
+                    cursor: validationDisabledReason ? 'not-allowed' : 'pointer',
                     transition: '0.2s',
                     opacity: validationDisabledReason && !validationLoading ? 0.8 : 1
                   }}
@@ -1423,15 +1392,15 @@ function App() {
               <button
                 type="button"
                 onClick={validateRoutePlan}
-                disabled={validationLoading}
+                disabled={validationLoading || Boolean(commercialValidationMessage)}
                 style={{
                   padding: '11px 16px',
                   borderRadius: '10px',
                   border: 'none',
-                  backgroundColor: validationLoading ? '#94a3b8' : '#0d6efd',
+                  backgroundColor: validationLoading || commercialValidationMessage ? '#94a3b8' : '#0d6efd',
                   color: 'white',
                   fontWeight: '800',
-                  cursor: validationLoading ? 'not-allowed' : 'pointer'
+                  cursor: validationLoading || commercialValidationMessage ? 'not-allowed' : 'pointer'
                 }}
               >
                 {validationLoading ? 'Validation en cours...' : 'Confirmer la validation'}

@@ -11,6 +11,7 @@ from nomadis_feature_engineering import (
     FEATURE_SCHEMA_VERSION,
     MAIN_CATEGORICAL_COLUMNS,
     build_canonical_feature_bundle,
+    build_valid_sales_document_filters,
     resolve_feature_store_serving_horizon_end_date,
     resolve_serving_data_upper_bound_date,
 )
@@ -83,7 +84,7 @@ def build_feature_store_source_summary(engine, reference_now=None, target_date=N
             WITH source_rows AS (
                 SELECT
                     e.code AS doc_code,
-                    LPAD(e.client_code, 5, '0') AS client_code,
+                    TRIM(e.client_code) AS client_code,
                     CAST(COALESCE(e.net_a_payer, 0) AS DECIMAL(15,3)) AS net_a_payer,
                     CASE
                         WHEN e.date REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$'
@@ -93,11 +94,13 @@ def build_feature_store_source_summary(engine, reference_now=None, target_date=N
                         ELSE NULL
                     END AS date_valide
                 FROM entetecommercials e
+                JOIN clients c ON e.client_code = c.code
                 WHERE e.type IN ('facture', 'bl', 'blf')
                   AND e.net_a_payer > 0
                   AND e.client_code IS NOT NULL
-                  AND e.client_code <> ''
-                  AND LPAD(e.client_code, 5, '0') <> '00000'
+                  AND TRIM(e.client_code) <> ''
+                  AND TRIM(e.client_code) <> '00000'
+                  AND __SALES_DOCUMENT_FILTERS__
             )
             SELECT
                 MAX(DATE(date_valide)) AS source_max_date,
@@ -110,7 +113,7 @@ def build_feature_store_source_summary(engine, reference_now=None, target_date=N
             WHERE date_valide IS NOT NULL
               AND YEAR(date_valide) >= 2001
               AND DATE(date_valide) <= DATE(:source_upper_bound)
-        """), {
+        """.replace('__SALES_DOCUMENT_FILTERS__', build_valid_sales_document_filters('e', 'c'))), {
             'source_upper_bound': source_upper_bound.date().isoformat()
         }).mappings().first()
 

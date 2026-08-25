@@ -14,6 +14,7 @@ if str(API_DIR) not in sys.path:
 
 import api_ia  # noqa: E402
 import nomadis_feature_store as feature_store_module  # noqa: E402
+from nomadis_feature_engineering import build_valid_sales_document_filters  # noqa: E402
 from nomadis_feature_store import (  # noqa: E402
     FEATURE_SCHEMA_VERSION,
     build_feature_store_source_summary,
@@ -1094,7 +1095,177 @@ class NomadisFeatureStoreServingTest(unittest.TestCase):
         self.assertEqual(persisted["row_count"], 1)
         self.assertEqual(state.iloc[0]["status"], "ready")
         self.assertEqual(len(loaded_rows), 1)
-        self.assertEqual(str(loaded_rows.iloc[0]["client_code"]).zfill(5), "00158")
+        self.assertEqual(str(loaded_rows.iloc[0]["client_code"]).strip(), "00158")
+
+    def test_persist_feature_store_snapshot_keeps_00152_and_152_distinct(self):
+        engine = self._create_feature_store_engine()
+        features = self._build_feature_rows(2, day="2026-08-11", client_start=152)
+        features.loc[0, "client_code"] = "00152"
+        features.loc[1, "client_code"] = "152"
+        features.loc[:, "date"] = pd.Timestamp("2026-08-11")
+
+        with mock.patch("nomadis_feature_store.ensure_feature_store_tables", autospec=True):
+            persisted = persist_feature_store_snapshot(
+                engine,
+                {"features": features},
+                {
+                    "watermark": "sha1:distinct-client-codes",
+                    "source_max_date": "2026-08-11",
+                    "serving_horizon_end_date": "2026-12-10",
+                },
+                reason="distinct_client_codes",
+            )
+
+            active_rows, active_state = load_active_feature_store_frame(engine)
+
+        self.assertEqual(persisted["row_count"], 2)
+        self.assertEqual(active_state["active_feature_state_version"], persisted["feature_state_version"])
+        self.assertEqual(set(active_rows["client_code"].astype(str)), {"00152", "152"})
+
+    def test_dashboard_output_keeps_00152_and_152_distinct(self):
+        filtered_clients = pd.DataFrame([
+            {
+                "client_code": "00152",
+                "Score": 81.0,
+                "Confidence": 73.0,
+                "VIP": 60,
+                "Qte_predite": 5.0,
+                "Vn_predit": 250.0,
+                "Pred_ca_if_buy": 312.0,
+                "Pred_qte_if_buy": 7.0,
+                "Prob_achat": 80.0,
+                "Prob_modele": 78.0,
+                "Habit_score": 50.0,
+                "Recency_score": 30.0,
+                "Cadence_score": 40.0,
+                "Basket_fit_score": 20.0,
+                "home_commercial": "C01",
+                "Prix_pred": 50.0,
+            },
+            {
+                "client_code": "152",
+                "Score": 62.0,
+                "Confidence": 66.0,
+                "VIP": 42,
+                "Qte_predite": 3.0,
+                "Vn_predit": 120.0,
+                "Pred_ca_if_buy": 150.0,
+                "Pred_qte_if_buy": 4.0,
+                "Prob_achat": 62.0,
+                "Prob_modele": 61.0,
+                "Habit_score": 25.0,
+                "Recency_score": 18.0,
+                "Cadence_score": 22.0,
+                "Basket_fit_score": 12.0,
+                "home_commercial": "C02",
+                "Prix_pred": 40.0,
+            },
+        ])
+        preferences_frame = pd.DataFrame([
+            {"client_code": "00152", "produit_nom": "Chips", "produit_code": "P1", "qte_moyenne": 5.0},
+            {"client_code": "152", "produit_nom": "Biscuits", "produit_code": "P2", "qte_moyenne": 3.0},
+        ])
+
+        original_model_affectation = api_ia.model_affectation
+        api_ia.model_affectation = None
+        try:
+            result = api_ia.build_dashboard_prediction_output(
+                filtered_clients,
+                selected_limit=2,
+                selected_commercials=[],
+                preferences_frame=preferences_frame,
+            )
+        finally:
+            api_ia.model_affectation = original_model_affectation
+
+        self.assertEqual(set(result["predictions"].keys()), {"00152", "152"})
+        self.assertIn("Chips", result["predictions"]["00152"]["details"])
+        self.assertIn("Biscuits", result["predictions"]["152"]["details"])
+
+    def test_dashboard_output_excludes_clients_without_positive_recommended_basket(self):
+        filtered_clients = pd.DataFrame([
+            {
+                "client_code": "00158",
+                "Score": 41.0,
+                "Confidence": 65.0,
+                "VIP": 40,
+                "Qte_predite": 0.8,
+                "Vn_predit": 5.59,
+                "Pred_ca_if_buy": 44.7,
+                "Pred_qte_if_buy": 9.6,
+                "Prob_achat": 12.5,
+                "Prob_modele": 14.0,
+                "Habit_score": 40.0,
+                "Recency_score": 42.0,
+                "Cadence_score": 55.0,
+                "Basket_fit_score": 60.0,
+                "home_commercial": "1",
+                "Prix_pred": 5.59,
+            }
+        ])
+        empty_preferences = pd.DataFrame(columns=["client_code", "produit_nom", "produit_code", "qte_moyenne"])
+
+        original_model_affectation = api_ia.model_affectation
+        api_ia.model_affectation = None
+        try:
+            result = api_ia.build_dashboard_prediction_output(
+                filtered_clients,
+                selected_limit=1,
+                selected_commercials=[],
+                preferences_frame=empty_preferences,
+            )
+        finally:
+            api_ia.model_affectation = original_model_affectation
+
+        self.assertEqual(result["predictions"], {})
+
+
+class FeatureStoreSourceSummaryQueryFilterTest(unittest.TestCase):
+    def test_source_summary_query_uses_shared_sales_document_policy(self):
+        captured = {}
+        fake_row = {
+            "source_max_date": date(2026, 8, 11),
+            "txn_count": 1,
+            "client_count": 1,
+            "txn_day_count": 1,
+            "total_net_amount": 10.0,
+            "max_doc_code": "FAC0001",
+        }
+
+        class FakeResult:
+            def mappings(self):
+                return self
+
+            def first(self):
+                return fake_row
+
+        class FakeConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                return False
+
+            def execute(self, statement, params):
+                captured["sql"] = str(statement)
+                captured["params"] = dict(params)
+                return FakeResult()
+
+        class FakeEngine:
+            def connect(self):
+                return FakeConnection()
+
+        summary = build_feature_store_source_summary(
+            FakeEngine(),
+            reference_now="2026-08-12",
+            target_date="2026-08-12",
+        )
+
+        expected_policy = build_valid_sales_document_filters("e", "c")
+        self.assertIn(expected_policy, captured["sql"])
+        self.assertIn("JOIN clients c ON e.client_code = c.code", captured["sql"])
+        self.assertEqual(captured["params"]["source_upper_bound"], "2026-08-11")
+        self.assertEqual(summary["source_max_date"], "2026-08-11")
 
 
 if __name__ == "__main__":

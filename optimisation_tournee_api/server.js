@@ -48,6 +48,10 @@ const {
   loadRecoveryProfiles
 } = require('./coverage_recovery_profiles')
 const {
+  getPastSalesPlanMessage,
+  shouldRejectPastSalesPlanRequest
+} = require('./dashboardDateGuard')
+const {
   loadCoveragePurchasePredictionProfiles
 } = require('./coverage_purchase_prediction_profiles')
 const {
@@ -63,9 +67,11 @@ const {
   ensureNextBestVisitProfilesReady
 } = nextBestVisitService
 const {
+  buildPlannedVisitMetadata,
   fetchSalesVisitFeedbackRecords,
   getSalesVisitFeedbackMonitoring,
   getSalesVisitFeedbackMonitoringDetails,
+  replacePendingSalesVisitFeedbackForTournee,
   upsertSalesVisitFeedback
 } = require('./sales_visit_feedback_service')
 const {
@@ -100,6 +106,10 @@ const SALES_V2_AUTO_LEARNING_CHECK_INTERVAL_MS = parsePositiveIntEnv(
 const SALES_V2_AUTO_LEARNING_STARTUP_DELAY_MS = parsePositiveIntEnv(
   'SALES_V2_LEARNING_AUTO_STARTUP_DELAY_MS',
   DEFAULT_AUTO_LEARNING_STARTUP_DELAY_MS
+)
+const NEXT_BEST_VISIT_DISABLE_STARTUP_BACKGROUND_WORK = parseBooleanEnv(
+  process.env.NEXT_BEST_VISIT_DISABLE_STARTUP_BACKGROUND_WORK,
+  false
 )
 const SHARED_DEPOT_ORIGIN = {
   latitude: Number(process.env.DEPOT_LATITUDE || 36.8065),
@@ -231,35 +241,38 @@ function triggerDbBootstrap() {
       dbBootstrapPromise = null
     })
 
-  ensureNextBestVisitProfilesReady({
-    queryAsync,
-    withTransaction,
-    querySalesHistoryRowsForClients: nextBestVisitService.__testables.querySalesHistoryRowsForClients,
-    normalizeSalesHistoryRowsForClients: nextBestVisitService.__testables.normalizeSalesHistoryRowsForClients,
-    queryVisitHistoryRowsForClients: nextBestVisitService.__testables.queryVisitHistoryRowsForClients,
-    normalizeVisitHistoryRowsForClients: nextBestVisitService.__testables.normalizeVisitHistoryRowsForClients,
-    autoTriggerRebuild: true,
-    logger: console
-  })
-    .then(result => {
-      const readinessStatus = String(result?.status || 'missing')
-      if (readinessStatus === 'ready') {
-        console.log('Next Best Visit profiles already ready; startup rebuild skipped.')
-        return
-      }
-      if (readinessStatus === 'building') {
-        console.log('Next Best Visit profile rebuild started in background at startup.')
-        return
-      }
-      if (readinessStatus === 'failed') {
-        console.warn(`Next Best Visit startup readiness failed: ${result?.snapshotState?.latest_error_message || 'unknown_error'}`)
-        return
-      }
-      console.log(`Next Best Visit startup readiness status: ${readinessStatus}`)
+  if (!NEXT_BEST_VISIT_DISABLE_STARTUP_BACKGROUND_WORK) {
+    ensureNextBestVisitProfilesReady({
+      queryAsync,
+      withTransaction,
+      querySalesHistoryRowsForClients: nextBestVisitService.__testables.querySalesHistoryRowsForClients,
+      normalizeSalesHistoryRowsForClients: nextBestVisitService.__testables.normalizeSalesHistoryRowsForClients,
+      queryVisitHistoryRowsForClients: nextBestVisitService.__testables.queryVisitHistoryRowsForClients,
+      normalizeVisitHistoryRowsForClients: nextBestVisitService.__testables.normalizeVisitHistoryRowsForClients,
+      planningStartDate: formatLocalDate(new Date()),
+      autoTriggerRebuild: true,
+      logger: console
     })
-    .catch(error => {
-      console.error('Next Best Visit startup readiness trigger failed:', error.message || String(error))
-    })
+      .then(result => {
+        const readinessStatus = String(result?.status || 'missing')
+        if (readinessStatus === 'ready') {
+          console.log('Next Best Visit profiles already ready; startup rebuild skipped.')
+          return
+        }
+        if (readinessStatus === 'building') {
+          console.log('Next Best Visit profile rebuild started in background at startup.')
+          return
+        }
+        if (readinessStatus === 'failed') {
+          console.warn(`Next Best Visit startup readiness failed: ${result?.snapshotState?.latest_error_message || 'unknown_error'}`)
+          return
+        }
+        console.log(`Next Best Visit startup readiness status: ${readinessStatus}`)
+      })
+      .catch(error => {
+        console.error('Next Best Visit startup readiness trigger failed:', error.message || String(error))
+      })
+  }
 
   startSalesLearningAutomaticCycleScheduler()
 }
@@ -1090,6 +1103,13 @@ async function ensureCoverageSupportTables() {
         KEY idx_sales_v2_visit_feedback_commercial_date (commercial_code, planned_date)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
     `)
+
+    await ensureTableColumn('sales_v2_visit_feedback', 'tournee_code', 'VARCHAR(191) DEFAULT NULL')
+    await ensureTableIndex(
+      'sales_v2_visit_feedback',
+      'idx_sales_v2_visit_feedback_tournee_status',
+      'INDEX `idx_sales_v2_visit_feedback_tournee_status` (`tournee_code`, `execution_status`)'
+    )
 
     console.log('Table sales_v2_visit_feedback verifiee.')
   })().catch(error => {
@@ -4526,6 +4546,389 @@ function parseCommercialSelection(rawValue) {
     .filter(Boolean)
 }
 
+function isStrictIsoDateOnly(value) {
+  const rawValue = String(value || '').trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(rawValue)) {
+    return false
+  }
+
+  const [year, month, day] = rawValue.split('-').map(Number)
+  const parsed = new Date(year, month - 1, day)
+  parsed.setHours(0, 0, 0, 0)
+  return (
+    parsed.getFullYear() === year &&
+    parsed.getMonth() === month - 1 &&
+    parsed.getDate() === day
+  )
+}
+
+function parseIntegerLikeForNextBestVisitHttp(value) {
+  const rawValue = String(value ?? '').trim()
+  if (rawValue === '') {
+    return { empty: true, valid: true, value: null }
+  }
+
+  if (!/^-?\d+$/.test(rawValue)) {
+    return { empty: false, valid: false, value: null }
+  }
+
+  return {
+    empty: false,
+    valid: true,
+    value: Number.parseInt(rawValue, 10)
+  }
+}
+
+async function validateNextBestVisitHttpRequest(rawBody = {}, dependencyOverrides = {}) {
+  const fetchCommercialOptionsImpl = typeof dependencyOverrides.fetchCommercialOptions === 'function'
+    ? dependencyOverrides.fetchCommercialOptions
+    : fetchCommercialOptions
+  const todayIso = String(
+    dependencyOverrides.todayIso ||
+    formatLocalDate(new Date())
+  ).trim()
+  const startDate = String(rawBody.start_date ?? rawBody.planning_start_date ?? '').trim()
+
+  if (!isStrictIsoDateOnly(startDate)) {
+    return {
+      valid: false,
+      message: 'La date de debut du plan de tournees ventes est invalide.'
+    }
+  }
+
+  if (startDate < todayIso) {
+    return {
+      valid: false,
+      message: 'La date de debut du plan de tournees ventes ne peut pas etre dans le passe.'
+    }
+  }
+
+  const planningDays = parseIntegerLikeForNextBestVisitHttp(
+    rawBody.planning_horizon_days ?? rawBody.period_days ?? rawBody.planning_days
+  )
+  if (!planningDays.valid || planningDays.value < 1 || planningDays.value > 60) {
+    return {
+      valid: false,
+      message: 'La periode du plan de tournees ventes doit etre comprise entre 1 et 60 jours.'
+    }
+  }
+
+  const minClients = parseIntegerLikeForNextBestVisitHttp(
+    rawBody.minimum_clients ?? rawBody.min_clients ?? rawBody.min_visits
+  )
+  if (!minClients.valid || (!minClients.empty && minClients.value < 0)) {
+    return {
+      valid: false,
+      message: 'La charge cible par commercial et par jour ne peut pas etre negative.'
+    }
+  }
+
+  const maxClients = parseIntegerLikeForNextBestVisitHttp(
+    rawBody.maximum_clients ?? rawBody.max_clients ?? rawBody.max_visits
+  )
+  if (!maxClients.valid || (!maxClients.empty && maxClients.value < 0)) {
+    return {
+      valid: false,
+      message: 'Le maximum par commercial et par jour ne peut pas etre negatif.'
+    }
+  }
+
+  const hasStrictMaximum = !maxClients.empty && maxClients.value > 0
+  if (
+    normalizeDailyMaxMode(rawBody.daily_max_mode) === DAILY_MAX_MODE_STRICT &&
+    hasStrictMaximum &&
+    Number(minClients.value || 0) > Number(maxClients.value || 0)
+  ) {
+    return {
+      valid: false,
+      message: 'En mode maximum strict, la charge cible ne peut pas depasser le maximum renseigne.'
+    }
+  }
+
+  const selectedCommercialCodes = parseCommercialSelection(
+    rawBody.commercials ??
+    rawBody.commercial_codes ??
+    rawBody.commercial ??
+    rawBody.commercial_code
+  )
+
+  if (!selectedCommercialCodes.length) {
+    return {
+      valid: false,
+      message: 'Selectionne au moins un commercial pour generer le plan de tournees ventes.'
+    }
+  }
+
+  const allCommercials = await fetchCommercialOptionsImpl()
+  const validCommercialCodes = new Set(
+    (Array.isArray(allCommercials) ? allCommercials : [])
+      .map(item => String(item?.value || '').trim())
+      .filter(Boolean)
+  )
+  const unknownCommercialCodes = [...new Set(
+    selectedCommercialCodes.filter(code => !validCommercialCodes.has(code))
+  )]
+
+  if (unknownCommercialCodes.length) {
+    return {
+      valid: false,
+      message: `Codes commerciaux introuvables : ${unknownCommercialCodes.join(', ')}.`
+    }
+  }
+
+  return {
+    valid: true,
+    normalizedBody: {
+      ...rawBody,
+      start_date: startDate,
+      commercial_codes: selectedCommercialCodes,
+      commercials: selectedCommercialCodes,
+      commercial: selectedCommercialCodes.length === 1 ? selectedCommercialCodes[0] : null
+    }
+  }
+}
+
+function normalizeSingleSalesV2BlockPayload(rawBody = {}) {
+  const body = rawBody && typeof rawBody === 'object' ? rawBody : {}
+  const nestedBlocks = Array.isArray(body.blocks) ? body.blocks.filter(block => block && typeof block === 'object') : []
+
+  if (nestedBlocks.length > 1) {
+    const error = new Error('Un seul bloc Sales V2 (commercial + date) peut etre valide a la fois.')
+    error.statusCode = 400
+    throw error
+  }
+
+  const baseBlock = body.block && typeof body.block === 'object'
+    ? body.block
+    : (nestedBlocks[0] || body)
+  const dateCandidate = String(body.date ?? baseBlock.date ?? '').trim()
+  const commercialCode = String(body.commercial_code ?? baseBlock.commercial_code ?? '').trim()
+  const commercialLabel = String(
+    body.commercial_label ??
+    baseBlock.commercial_label ??
+    baseBlock.commercial_name ??
+    `Commercial ${commercialCode}`
+  ).trim()
+  const clients = Array.isArray(baseBlock.clients)
+    ? baseBlock.clients
+    : (Array.isArray(body.clients) ? body.clients : [])
+
+  if (!isStrictIsoDateOnly(dateCandidate)) {
+    const error = new Error('La date du bloc Sales V2 est invalide.')
+    error.statusCode = 400
+    throw error
+  }
+
+  if (!commercialCode) {
+    const error = new Error('Le commercial du bloc Sales V2 est obligatoire.')
+    error.statusCode = 400
+    throw error
+  }
+
+  if (!clients.length) {
+    const error = new Error('Le bloc Sales V2 ne contient aucune visite a valider.')
+    error.statusCode = 400
+    throw error
+  }
+
+  return {
+    date: formatLocalDate(parseLocalDate(dateCandidate)),
+    dayLabel: String(body.day_label ?? baseBlock.day_label ?? '').trim() || null,
+    commercialCode,
+    commercialLabel: commercialLabel || `Commercial ${commercialCode}`,
+    routeCode: String(body.route_code ?? baseBlock.route_code ?? '').trim(),
+    depotCode: String(body.depot_code ?? baseBlock.depot_code ?? '').trim(),
+    depotName: String(body.depot_name ?? baseBlock.depot_name ?? '').trim(),
+    slotId: String(baseBlock.slot_id ?? body.slot_id ?? `${dateCandidate}::${commercialCode}`).trim(),
+    clients
+  }
+}
+
+function buildSalesV2ValidationSeeds(blockPayload) {
+  const stops = []
+
+  blockPayload.clients.forEach((client, index) => {
+    const clientCode = normalizeExactClientCode(client?.client_code ?? client?.nbr_client)
+
+    if (!clientCode) {
+      const error = new Error(`La visite #${index + 1} du bloc Sales V2 n'a pas de client_code exploitable.`)
+      error.statusCode = 400
+      throw error
+    }
+
+    stops.push({
+      client_id: normalizeClientId(client?.client_id ?? client?.id ?? client?.client_unique_key),
+      client_code: clientCode,
+      client_name: String(client?.client_name ?? client?.nom ?? '').trim(),
+      adresse: String(client?.adresse ?? '').trim(),
+      latitude: Number.isFinite(Number(client?.latitude)) ? String(Number(client.latitude)) : null,
+      longitude: Number.isFinite(Number(client?.longitude)) ? String(Number(client.longitude)) : null,
+      rang: Number.isFinite(Number(client?.rang)) && Number(client.rang) > 0 ? Number(client.rang) : index + 1
+    })
+  })
+
+  return {
+    stops
+  }
+}
+
+async function validateSalesV2BlockRequest(blockPayload, dependencyOverrides = {}) {
+  const fetchCommercialOptionsImpl = typeof dependencyOverrides.fetchCommercialOptions === 'function'
+    ? dependencyOverrides.fetchCommercialOptions
+    : fetchCommercialOptions
+  const todayIso = String(
+    dependencyOverrides.todayIso ||
+    formatLocalDate(new Date())
+  ).trim()
+
+  if (blockPayload.date < todayIso) {
+    const error = new Error('La date du bloc Sales V2 ne peut pas etre dans le passe.')
+    error.statusCode = 400
+    throw error
+  }
+
+  const allCommercials = await fetchCommercialOptionsImpl()
+  const activeCommercialCodes = new Set(
+    (Array.isArray(allCommercials) ? allCommercials : [])
+      .map(item => String(item?.value || '').trim())
+      .filter(Boolean)
+  )
+
+  if (!activeCommercialCodes.has(blockPayload.commercialCode)) {
+    const error = new Error(`Le commercial du bloc Sales V2 est introuvable ou inactif: ${blockPayload.commercialCode}.`)
+    error.statusCode = 400
+    throw error
+  }
+}
+
+function buildSalesV2ValidationVisits(blockPayload, normalizedStops) {
+  const visits = normalizedStops.map((stop, index) => {
+    const client = blockPayload.clients[index] && typeof blockPayload.clients[index] === 'object'
+      ? blockPayload.clients[index]
+      : {}
+
+    return buildPlannedVisitMetadata({
+      ...client,
+      client_id: stop.client_id,
+      client_code: stop.client_code,
+      assigned_slot_id: blockPayload.slotId,
+      assigned_date: blockPayload.date,
+      planned_date: blockPayload.date,
+      candidate_date: blockPayload.date,
+      commercial_code: blockPayload.commercialCode
+    })
+  })
+
+  const plannedVisitIds = visits.map(visit => visit.planned_visit_id)
+  if (new Set(plannedVisitIds).size !== plannedVisitIds.length) {
+    const error = new Error('Le bloc Sales V2 contient des visites dupliquees pour un meme commercial et une meme date.')
+    error.statusCode = 400
+    throw error
+  }
+
+  return visits
+}
+
+async function validateNextBestVisitBlockPlan(rawBody = {}, dependencyOverrides = {}) {
+  const blockPayload = normalizeSingleSalesV2BlockPayload(rawBody)
+  const {
+    stops
+  } = buildSalesV2ValidationSeeds(blockPayload)
+  const ensureCoverageSupportTablesImpl = typeof dependencyOverrides.ensureCoverageSupportTables === 'function'
+    ? dependencyOverrides.ensureCoverageSupportTables
+    : ensureCoverageSupportTables
+  const ensureValidatedTourneeIdentityColumnsImpl = typeof dependencyOverrides.ensureValidatedTourneeIdentityColumns === 'function'
+    ? dependencyOverrides.ensureValidatedTourneeIdentityColumns
+    : ensureValidatedTourneeIdentityColumns
+  const withTransactionImpl = typeof dependencyOverrides.withTransaction === 'function'
+    ? dependencyOverrides.withTransaction
+    : withTransaction
+  const queryAsyncImpl = typeof dependencyOverrides.queryAsync === 'function'
+    ? dependencyOverrides.queryAsync
+    : queryAsync
+  const replacePendingSalesVisitFeedbackForTourneeImpl = typeof dependencyOverrides.replacePendingSalesVisitFeedbackForTournee === 'function'
+    ? dependencyOverrides.replacePendingSalesVisitFeedbackForTournee
+    : replacePendingSalesVisitFeedbackForTournee
+
+  await validateSalesV2BlockRequest(blockPayload, dependencyOverrides)
+  await ensureCoverageSupportTablesImpl()
+  await ensureValidatedTourneeIdentityColumnsImpl()
+
+  const normalizedStops = await validateAndResolveValidatedTourneeStops(stops, {
+    queryExecutor: queryAsyncImpl
+  })
+  const visits = buildSalesV2ValidationVisits(blockPayload, normalizedStops)
+  const persisted = await withTransactionImpl(async connection => {
+    await ensureValidatedTourneeIdentityColumnsImpl(connection)
+    const txQueryAsync = async (sql, params = []) => queryAsyncImpl(sql, params, connection)
+
+    const persistedTournee = await replaceValidatedTourneeRowsInTransaction({
+      selectedDate: blockPayload.date,
+      dayLabel: blockPayload.dayLabel,
+      commercialCode: blockPayload.commercialCode,
+      commercialLabel: blockPayload.commercialLabel,
+      routeCode: blockPayload.routeCode,
+      depotCode: blockPayload.depotCode,
+      depotName: blockPayload.depotName,
+      normalizedStops,
+      frequence: 'sales_v2',
+      categorieCode: 'sales_v2',
+      typeClient: 'sales_v2_plan',
+      codePrefix: 'sales-v2',
+      connection,
+      queryExecutor: txQueryAsync
+    })
+
+    const feedbackResult = await replacePendingSalesVisitFeedbackForTourneeImpl(txQueryAsync, {
+      tournee_code: persistedTournee.validationCode,
+      visits
+    })
+
+    return {
+      persistedTournee,
+      feedbackResult
+    }
+  }, { logPrefix: 'SALES_V2_VALIDATE' })
+
+  return {
+    status: 'success',
+    message: `Le bloc Sales V2 du ${blockPayload.date} pour ${blockPayload.commercialLabel} a ete valide.`,
+    saved_rows: normalizedStops.length,
+    feedback_rows: persisted.feedbackResult.savedRows,
+    tournee_code: persisted.persistedTournee.validationCode,
+    commercial_code: blockPayload.commercialCode,
+    date: blockPayload.date
+  }
+}
+
+async function handleNextBestVisitValidationRoute(req, res, dependencyOverrides = {}) {
+  const rawBody = req.body && typeof req.body === 'object' ? req.body : {}
+  const fetchCommercialOptionsImpl = typeof dependencyOverrides.fetchCommercialOptions === 'function'
+    ? dependencyOverrides.fetchCommercialOptions
+    : fetchCommercialOptions
+  const todayIso = String(
+    dependencyOverrides.todayIso ||
+    req?.app?.locals?.todayIsoForTests ||
+    formatLocalDate(new Date())
+  ).trim()
+
+  try {
+    const result = await validateNextBestVisitBlockPlan(rawBody, {
+      ...dependencyOverrides,
+      fetchCommercialOptions: fetchCommercialOptionsImpl,
+      todayIso
+    })
+    return res.json(result)
+  } catch (error) {
+    const statusCode = error.statusCode || 500
+    console.error('Erreur validation bloc next-best-visits:', error.message)
+    return res.status(statusCode).json({
+      status: 'error',
+      message: error.message || 'Erreur inattendue pendant la validation du bloc Sales V2.'
+    })
+  }
+}
+
 function parseClientSelection(rawValue) {
   if (Array.isArray(rawValue)) {
     return [...new Set(
@@ -5500,18 +5903,22 @@ function normalizeValidatedStops(stops) {
     .filter(stop => stop.client_id || stop.client_code)
 }
 
-async function resolveValidatedStopsWithClientIdentity(stops, connection = null) {
+async function resolveValidatedStopsWithClientIdentity(stops, options = {}) {
+  const connection = options && typeof options === 'object' ? (options.connection || null) : null
+  const queryExecutor = options && typeof options === 'object' && typeof options.queryExecutor === 'function'
+    ? options.queryExecutor
+    : queryAsync
   const normalizedStops = normalizeValidatedStops(stops)
-  const unresolvedCodes = [...new Set(
+  const exactCodes = [...new Set(
     normalizedStops
-      .filter(stop => !stop.client_id && stop.client_code)
+      .filter(stop => stop.client_code)
       .map(stop => stop.client_code)
       .filter(Boolean)
   )]
 
-  if (unresolvedCodes.length > 0) {
-    const codeFilter = buildInClause('c.code', unresolvedCodes)
-    const clientRows = await queryAsync(
+  if (exactCodes.length > 0) {
+    const codeFilter = buildInClause('c.code', exactCodes)
+    const clientRows = await queryExecutor(
       `
         SELECT
           c.id AS client_id,
@@ -5524,16 +5931,30 @@ async function resolveValidatedStopsWithClientIdentity(stops, connection = null)
       codeFilter.params,
       connection
     )
-    const clientIdByCode = new Map(
+    const clientIdentityByCode = new Map(
       (clientRows || []).map(row => [
         normalizeExactClientCode(row.client_code),
-        normalizeClientId(row.client_id)
+        {
+          client_id: normalizeClientId(row.client_id),
+          client_code: normalizeExactClientCode(row.client_code)
+        }
       ])
     )
 
     normalizedStops.forEach(stop => {
-      if (stop.client_id) return
-      stop.client_id = clientIdByCode.get(stop.client_code) || ''
+      if (!stop.client_code) {
+        stop.client_id = ''
+        return
+      }
+
+      const resolvedIdentity = clientIdentityByCode.get(stop.client_code) || null
+      if (!resolvedIdentity) {
+        stop.client_id = ''
+        return
+      }
+
+      stop.client_id = resolvedIdentity.client_id || ''
+      stop.client_code = resolvedIdentity.client_code || stop.client_code
     })
   }
 
@@ -5609,6 +6030,140 @@ function normalizeLoadingProducts(products) {
 
 async function resolveMovementSoussocieteCode({ commercialCode = '', depotCode = '' } = {}) {
   return null
+}
+
+async function validateAndResolveValidatedTourneeStops(stops, options = {}) {
+  const resolvedStops = await resolveValidatedStopsWithClientIdentity(stops, options)
+  const normalizedStops = resolvedStops.stops
+
+  if (!normalizedStops.length) {
+    const error = new Error('Aucun client valide a enregistrer pour cette tournee.')
+    error.statusCode = 400
+    throw error
+  }
+
+  if (resolvedStops.missingClientIdentity.length > 0) {
+    const missingCodes = resolvedStops.missingClientIdentity
+      .map(item => item.client_code || item.client_name || 'client_sans_id')
+      .join(', ')
+    const error = new Error(`Impossible de relier certains clients a un client_id actif: ${missingCodes}.`)
+    error.statusCode = 400
+    throw error
+  }
+
+  if (resolvedStops.duplicateClientIds.length > 0) {
+    const error = new Error(`Des doublons client_id ont ete detectes dans la tournee: ${resolvedStops.duplicateClientIds.join(', ')}.`)
+    error.statusCode = 400
+    throw error
+  }
+
+  return normalizedStops
+}
+
+async function replaceValidatedTourneeRowsInTransaction({
+  selectedDate,
+  dayLabel,
+  commercialCode,
+  commercialLabel,
+  routeCode,
+  depotCode,
+  depotName,
+  normalizedStops,
+  frequence,
+  categorieCode,
+  typeClient,
+  codePrefix,
+  connection,
+  queryExecutor = queryAsync
+}) {
+  const resolvedDayLabel = resolveFrenchDayLabel(selectedDate, dayLabel)
+  const validationCode = buildValidatedTourneeCode(codePrefix, selectedDate, commercialCode)
+  const routingCode = routeCode || commercialCode || 'plan-ia'
+  const depotValue = depotCode || depotName || null
+  const tourneeLabel = `${commercialLabel} - ${selectedDate}`
+
+  await queryExecutor(
+    `DELETE FROM tournees
+     WHERE deleted_at IS NULL
+       AND frequence = ?
+       AND code_layer = ?
+       AND date_debut = ?
+       AND date_fin = ?`,
+    [frequence, commercialCode, selectedDate, selectedDate],
+    connection
+  )
+
+  for (const stop of normalizedStops) {
+    const coordinates = stop.latitude != null && stop.longitude != null
+      ? JSON.stringify({ latitude: Number(stop.latitude), longitude: Number(stop.longitude) })
+      : null
+
+    await queryExecutor(
+      `INSERT INTO tournees (
+        code,
+        libelle,
+        layer,
+        coordinates,
+        code_jour,
+        client_id,
+        client_code,
+        routing_code,
+        depot_code,
+        frequence,
+        dates,
+        actif,
+        actif_client,
+        date_debut,
+        date_fin,
+        rang,
+        categorie_code,
+        type_layer,
+        code_layer,
+        couleur,
+        type_client,
+        rs_client_code,
+        latitude,
+        longitude,
+        adresse,
+        activite,
+        client,
+        icon,
+        couleur_icon,
+        image
+      ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, 'tournee', ?, NULL, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL)`,
+      [
+        validationCode,
+        tourneeLabel,
+        coordinates,
+        resolvedDayLabel,
+        stop.client_id || null,
+        stop.client_code,
+        routingCode,
+        depotValue,
+        frequence,
+        selectedDate,
+        selectedDate,
+        selectedDate,
+        stop.rang,
+        categorieCode,
+        commercialCode,
+        typeClient,
+        stop.client_code,
+        stop.latitude,
+        stop.longitude,
+        stop.adresse || null,
+        stop.client_name || null
+      ],
+      connection
+    )
+  }
+
+  return {
+    validationCode,
+    routingCode,
+    depotValue,
+    tourneeLabel
+  }
 }
 
 async function resolveLoadingProductDefinition(productName, cache = new Map(), connection = null) {
@@ -5875,34 +6430,11 @@ async function saveValidatedTourneePlan({
     throw error
   }
 
-  const resolvedStops = await resolveValidatedStopsWithClientIdentity(stops)
-  const normalizedStops = resolvedStops.stops
-  if (!normalizedStops.length) {
-    const error = new Error('Aucun client valide a enregistrer pour cette tournee.')
-    error.statusCode = 400
-    throw error
-  }
-  if (resolvedStops.missingClientIdentity.length > 0) {
-    const missingCodes = resolvedStops.missingClientIdentity
-      .map(item => item.client_code || item.client_name || 'client_sans_id')
-      .join(', ')
-    const error = new Error(`Impossible de relier certains clients a un client_id actif: ${missingCodes}.`)
-    error.statusCode = 400
-    throw error
-  }
-  if (resolvedStops.duplicateClientIds.length > 0) {
-    const error = new Error(`Des doublons client_id ont ete detectes dans la tournee: ${resolvedStops.duplicateClientIds.join(', ')}.`)
-    error.statusCode = 400
-    throw error
-  }
+  const normalizedStops = await validateAndResolveValidatedTourneeStops(stops, {
+    queryExecutor: queryAsyncImpl
+  })
 
   console.log(`[${logPrefix}] Debut validation -> date=${selectedDate} commercial=${commercialCode} stops=${normalizedStops.length}`)
-
-  const resolvedDayLabel = resolveFrenchDayLabel(selectedDate, dayLabel)
-  const validationCode = buildValidatedTourneeCode(codePrefix, selectedDate, commercialCode)
-  const routingCode = routeCode || commercialCode || 'plan-ia'
-  const depotValue = depotCode || depotName || null
-  const tourneeLabel = `${commercialLabel} - ${selectedDate}`
 
   try {
     await ensureMovementSupportTables()
@@ -5910,93 +6442,37 @@ async function saveValidatedTourneePlan({
 
     const loadingResult = await withTransaction(async connection => {
       await ensureValidatedTourneeIdentityColumns(connection)
-      await queryAsync(
-      `DELETE FROM tournees
-       WHERE deleted_at IS NULL
-         AND frequence = ?
-         AND code_layer = ?
-         AND date_debut = ?
-         AND date_fin = ?`,
-        [frequence, commercialCode, selectedDate, selectedDate],
+      const persistedTournee = await replaceValidatedTourneeRowsInTransaction({
+        selectedDate,
+        dayLabel,
+        commercialCode,
+        commercialLabel,
+        routeCode,
+        depotCode,
+        depotName,
+        normalizedStops,
+        frequence,
+        categorieCode,
+        typeClient,
+        codePrefix,
         connection
-      )
-
-      for (const stop of normalizedStops) {
-        const coordinates = stop.latitude != null && stop.longitude != null
-          ? JSON.stringify({ latitude: Number(stop.latitude), longitude: Number(stop.longitude) })
-          : null
-
-        await queryAsync(
-          `INSERT INTO tournees (
-            code,
-            libelle,
-            layer,
-            coordinates,
-            code_jour,
-            client_id,
-            client_code,
-            routing_code,
-            depot_code,
-            frequence,
-            dates,
-            actif,
-            actif_client,
-            date_debut,
-            date_fin,
-            rang,
-            categorie_code,
-            type_layer,
-            code_layer,
-            couleur,
-            type_client,
-            rs_client_code,
-            latitude,
-            longitude,
-            adresse,
-            activite,
-            client,
-            icon,
-            couleur_icon,
-            image
-          ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, 'tournee', ?, NULL, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL)`,
-          [
-            validationCode,
-            tourneeLabel,
-            coordinates,
-            resolvedDayLabel,
-            stop.client_id || null,
-            stop.client_code,
-            routingCode,
-            depotValue,
-            frequence,
-            selectedDate,
-            selectedDate,
-            selectedDate,
-            stop.rang,
-            categorieCode,
-            commercialCode,
-            typeClient,
-            stop.client_code,
-            stop.latitude,
-            stop.longitude,
-            stop.adresse || null,
-            stop.client_name || null
-          ],
-          connection
-        )
-      }
+      })
 
       return Array.isArray(loadingProducts)
         ? replaceValidatedLoadingPrediction({
-            date: selectedDate,
-            commercialCode,
-            depotCode: depotCode || depotName || null,
-            loadingProducts,
-            logPrefix,
-            connection
-          })
+          date: selectedDate,
+          commercialCode,
+          depotCode: persistedTournee.depotValue,
+          loadingProducts,
+          logPrefix,
+          connection
+        })
         : { savedRows: 0, movementCode: null }
     }, { logPrefix })
+
+    const validationCode = buildValidatedTourneeCode(codePrefix, selectedDate, commercialCode)
+    const routingCode = routeCode || commercialCode || 'plan-ia'
+    const depotValue = depotCode || depotName || null
 
     console.log(`[${logPrefix}] Succes -> code=${validationCode} rows=${normalizedStops.length}`)
 
@@ -7823,18 +8299,24 @@ app.get('/api/tournees/next-best-visits/visit-feedback', async (req, res) => {
   }
 })
 
+app.post('/api/tournees/next-best-visits/validate', async (req, res) => {
+  return handleNextBestVisitValidationRoute(req, res)
+})
+
 app.put('/api/tournees/next-best-visits/visit-feedback/:plannedVisitId', async (req, res) => {
   const plannedVisitId = String(req.params?.plannedVisitId || '').trim() || null
   const rawBody = req.body && typeof req.body === 'object' ? req.body : {}
 
   try {
-    const record = await upsertSalesVisitFeedback(queryAsync, rawBody, plannedVisitId)
+    const record = await upsertSalesVisitFeedback(queryAsync, rawBody, plannedVisitId, {
+      updateOnly: true
+    })
     return res.json({
       status: 'success',
       record
     })
   } catch (error) {
-    const statusCode = /required|must be|mismatch/i.test(String(error.message || '')) ? 400 : 500
+    const statusCode = error.statusCode || (/required|must be/i.test(String(error.message || '')) ? 400 : 500)
     console.error('Erreur ecriture feedback next-best-visits:', error.message)
     return res.status(statusCode).json({
       status: 'error',
@@ -8002,13 +8484,39 @@ app.post('/api/tournees/next-best-visits/learning/run-cycle', async (req, res) =
   }
 })
 
-app.post('/api/tournees/next-best-visits', async (req, res) => {
+async function handleNextBestVisitRoute(req, res, dependencyOverrides = {}) {
   const httpStartedAt = Date.now()
   const rawBody = req.body && typeof req.body === 'object' ? req.body : {}
+  const generateNextBestVisitPlanImpl = typeof dependencyOverrides.generateNextBestVisitPlan === 'function'
+    ? dependencyOverrides.generateNextBestVisitPlan
+    : generateNextBestVisitPlan
+  const validateNextBestVisitHttpRequestImpl = typeof dependencyOverrides.validateNextBestVisitHttpRequest === 'function'
+    ? dependencyOverrides.validateNextBestVisitHttpRequest
+    : validateNextBestVisitHttpRequest
+  const fetchCommercialOptionsImpl = typeof dependencyOverrides.fetchCommercialOptions === 'function'
+    ? dependencyOverrides.fetchCommercialOptions
+    : fetchCommercialOptions
+  const todayIso = String(
+    dependencyOverrides.todayIso ||
+    req?.app?.locals?.todayIsoForTests ||
+    formatLocalDate(new Date())
+  ).trim()
 
   try {
-    const payload = await generateNextBestVisitPlan(rawBody, {
-      fetchCommercialOptions,
+    const validation = await validateNextBestVisitHttpRequestImpl(rawBody, {
+      fetchCommercialOptions: fetchCommercialOptionsImpl,
+      todayIso
+    })
+
+    if (!validation.valid) {
+      return res.status(400).json({
+        status: 'invalid_parameters',
+        message: validation.message
+      })
+    }
+
+    const payload = await generateNextBestVisitPlanImpl(validation.normalizedBody, {
+      fetchCommercialOptions: fetchCommercialOptionsImpl,
       fetchCoverageActiveClients,
       loadCoverageConstraints: async params => loadCoverageConstraints(params, {
         queryAsync,
@@ -8055,6 +8563,10 @@ app.post('/api/tournees/next-best-visits', async (req, res) => {
       return res.status(409).json(responsePayload)
     }
 
+    if (String(responsePayload?.status || '').trim() === 'invalid_parameters') {
+      return res.status(400).json(responsePayload)
+    }
+
     return res.json(responsePayload)
   } catch (error) {
     console.error('Erreur V2 next-best-visits:', error.message)
@@ -8063,6 +8575,10 @@ app.post('/api/tournees/next-best-visits', async (req, res) => {
       message: error.message || 'Erreur inattendue pendant la generation V2.'
     })
   }
+}
+
+app.post('/api/tournees/next-best-visits', async (req, res) => {
+  return handleNextBestVisitRoute(req, res)
 })
 
 registerNextBestVisitValidationLabRoutes(app, {
@@ -8301,6 +8817,136 @@ app.get('/api/tournees/coverage-plan', async (req, res) => {
   }
 })
 
+const FUTURE_SALES_AI_UNAVAILABLE_MESSAGE = "Le plan de vente future est indisponible car le moteur IA n'a pas pu calculer les predictions."
+const FUTURE_SALES_AI_TRANSPORT_MESSAGE = "Le plan de vente future est indisponible car le moteur IA est temporairement injoignable. Reessayez dans quelques instants."
+
+function buildFutureSalesAiUnavailableMessage(aiPayload = null) {
+  const upstreamMessage = typeof aiPayload?.message === 'string'
+    ? aiPayload.message.trim()
+    : ''
+
+  if (upstreamMessage) {
+    return `${FUTURE_SALES_AI_UNAVAILABLE_MESSAGE} ${upstreamMessage}`
+  }
+
+  return FUTURE_SALES_AI_UNAVAILABLE_MESSAGE
+}
+
+function buildFutureSalesAiUnavailableResponse(aiPayload = null) {
+  const predictionRunCode = typeof aiPayload?.prediction_run_code === 'string' && aiPayload.prediction_run_code.trim()
+    ? aiPayload.prediction_run_code.trim()
+    : null
+  const body = {
+    status: 'error',
+    message: buildFutureSalesAiUnavailableMessage(aiPayload)
+  }
+
+  if (predictionRunCode) {
+    body.prediction_run_code = predictionRunCode
+  }
+
+  return {
+    ok: false,
+    statusCode: 503,
+    body
+  }
+}
+
+function buildFutureSalesAiTransportFailureResponse() {
+  return {
+    ok: false,
+    statusCode: 503,
+    body: {
+      status: 'error',
+      message: FUTURE_SALES_AI_TRANSPORT_MESSAGE
+    }
+  }
+}
+
+function normalizePredictionBasketProducts(rawDetails) {
+  if (!rawDetails || typeof rawDetails !== 'object' || Array.isArray(rawDetails)) {
+    return []
+  }
+
+  return Object.entries(rawDetails)
+    .map(([nom, quantite]) => {
+      const normalizedName = String(nom || '').trim()
+      const normalizedQuantity = roundScore(Number(quantite || 0))
+      if (!normalizedName || !Number.isFinite(normalizedQuantity) || normalizedQuantity <= 0) {
+        return null
+      }
+      return {
+        nom: normalizedName,
+        quantite: normalizedQuantity
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => Number(b.quantite || 0) - Number(a.quantite || 0))
+}
+
+function buildSalesPredictionBasket(rawPrediction = null) {
+  const produits = normalizePredictionBasketProducts(rawPrediction?.details)
+  const totalQuantity = roundScore(
+    produits.reduce((sum, produit) => sum + Number(produit.quantite || 0), 0)
+  )
+
+  return {
+    produits,
+    totalQuantity,
+    details: Object.fromEntries(
+      produits.map(produit => [produit.nom, produit.quantite])
+    )
+  }
+}
+
+function normalizeLoggedSalesPredictionEntry(rawPrediction = null) {
+  if (!rawPrediction || typeof rawPrediction !== 'object' || Array.isArray(rawPrediction)) {
+    return null
+  }
+
+  const basket = buildSalesPredictionBasket(rawPrediction)
+  return {
+    ...rawPrediction,
+    qte: basket.totalQuantity,
+    details: basket.details
+  }
+}
+
+function normalizeLoggedSalesPredictions(predictions) {
+  if (!predictions || typeof predictions !== 'object' || Array.isArray(predictions)) {
+    return {}
+  }
+
+  return Object.entries(predictions).reduce((accumulator, [clientCode, rawPrediction]) => {
+    const normalizedClientCode = String(clientCode || '').trim()
+    const normalizedPrediction = normalizeLoggedSalesPredictionEntry(rawPrediction)
+    if (normalizedClientCode && normalizedPrediction) {
+      accumulator[normalizedClientCode] = normalizedPrediction
+    }
+    return accumulator
+  }, {})
+}
+
+function normalizeFutureSalesAiResult(aiResponse) {
+  const payload = aiResponse?.data ?? null
+
+  if (!payload || payload.status !== 'success') {
+    return buildFutureSalesAiUnavailableResponse(payload)
+  }
+
+  const predictions = payload.predictions && typeof payload.predictions === 'object' && !Array.isArray(payload.predictions)
+    ? normalizeLoggedSalesPredictions(payload.predictions)
+    : {}
+
+  return {
+    ok: true,
+    predictions,
+    predictionRunCode: typeof payload.prediction_run_code === 'string' && payload.prediction_run_code.trim()
+      ? payload.prediction_run_code.trim()
+      : null
+  }
+}
+
 app.get('/api/tournees/plan', async (req, res) => {
   const date_precise = req.query.date_precise || new Date().toISOString().split('T')[0]
   const date_debut = req.query.date_debut
@@ -8317,6 +8963,18 @@ app.get('/api/tournees/plan', async (req, res) => {
   const useRange = Boolean(date_debut && date_fin)
   const dateReference = useRange ? date_fin : date_precise
   const datePrediction = useRange ? date_debut : date_precise
+
+  if (shouldRejectPastSalesPlanRequest({
+    modeTournee,
+    datePrecise: date_precise,
+    dateDebut: date_debut,
+    dateFin: date_fin
+  })) {
+    return res.status(400).json({
+      status: 'error',
+      message: getPastSalesPlanMessage()
+    })
+  }
 
   const requestDate = new Date(dateReference)
   requestDate.setHours(0, 0, 0, 0)
@@ -8411,7 +9069,7 @@ app.get('/api/tournees/plan', async (req, res) => {
         )
         predictionRunCode = aiResponse.data?.prediction_run_code || loggingResult?.runCode || null
         if (aiResponse.data.status === 'success') {
-          aiPredictions = aiResponse.data.predictions
+          aiPredictions = normalizeLoggedSalesPredictions(aiResponse.data.predictions)
         }
       } catch (error) {
         console.error('Serveur Python injoignable, backtesting sans IA')
@@ -8501,6 +9159,9 @@ app.get('/api/tournees/plan', async (req, res) => {
 
           const clientCodeStr = String(c.nbr_client || '').trim()
           const iaData = aiPredictions[clientCodeStr]
+          const predictionBasket = buildSalesPredictionBasket(iaData)
+          const hasValidPredictionBasket = predictionBasket.totalQuantity > 0
+          if (iaData && !hasValidPredictionBasket) return null
           const chiffrePred = iaData ? iaData.chiffre : chiffreReel
           const probAchat = iaData ? (iaData.prob_achat || 0) : 0
           const habitScore = iaData ? (iaData.habit_score || 0) : 0
@@ -8509,10 +9170,8 @@ app.get('/api/tournees/plan', async (req, res) => {
           const finalScore = computePriorityScore(chiffrePred, maxPredPast, probAchat, habitScore, recencyScore, distanceKm, maxDistance)
 
           let produitsAAfficher = produitsReels
-          if (iaData && iaData.details && typeof iaData.details === 'object') {
-            produitsAAfficher = Object.entries(iaData.details)
-              .map(([nom, quantite]) => ({ nom, quantite }))
-              .sort((a, b) => b.quantite - a.quantite)
+          if (iaData) {
+            produitsAAfficher = predictionBasket.produits
           }
 
           totalChiffre += chiffreReel
@@ -8524,7 +9183,7 @@ app.get('/api/tournees/plan', async (req, res) => {
             chiffre_brut: chiffrePred,
             vente_reelle: chiffreReel,
             score_ia: finalScore,
-            qte_reco: iaData ? iaData.qte : qte,
+            qte_reco: iaData ? predictionBasket.totalQuantity : qte,
             details,
             produits: produitsAAfficher,
             prob_achat: probAchat,
@@ -8574,12 +9233,21 @@ app.get('/api/tournees/plan', async (req, res) => {
             }
           }
         )
-        predictionRunCode = aiResponse.data?.prediction_run_code || loggingResult?.runCode || null
-        if (aiResponse.data.status === 'success') {
-          aiPredictions = aiResponse.data.predictions
+        const normalizedAiResult = normalizeFutureSalesAiResult(aiResponse)
+        predictionRunCode = normalizedAiResult.predictionRunCode || loggingResult?.runCode || null
+
+        if (!normalizedAiResult.ok) {
+          if (predictionRunCode && !normalizedAiResult.body.prediction_run_code) {
+            normalizedAiResult.body.prediction_run_code = predictionRunCode
+          }
+          return res.status(normalizedAiResult.statusCode).json(normalizedAiResult.body)
         }
+
+        aiPredictions = normalizedAiResult.predictions
       } catch (error) {
-        console.error('Serveur Python (api_ia.py) injoignable.')
+        console.error('Serveur Python (api_ia.py) injoignable.', error)
+        const transportFailure = buildFutureSalesAiTransportFailureResponse()
+        return res.status(transportFailure.statusCode).json(transportFailure.body)
       }
 
       const maxPredFuture = clients.reduce((max, c) => {
@@ -8591,29 +9259,27 @@ app.get('/api/tournees/plan', async (req, res) => {
       const tousLesClients = clients.map(c => {
         const clientCodeStr = String(c.nbr_client || '').trim()
         const iaData = aiPredictions[clientCodeStr]
+        const predictionBasket = buildSalesPredictionBasket(iaData)
 
         const probAchat = iaData ? (iaData.prob_achat || 0) : 0
         const habitScore = iaData ? (iaData.habit_score || 0) : 0
         const recencyScore = iaData ? (iaData.recency_score || 0) : 0
-        const qteRecoIA = iaData ? iaData.qte : 0
+        const qteRecoIA = iaData ? predictionBasket.totalQuantity : 0
         const vnPreditIA = iaData ? iaData.chiffre : 0
         const caIfBuyIA = iaData ? (iaData.ca_if_buy || 0) : 0
         const distanceKm = distanceMap.get(String(c.nbr_client)) || 0
         const scoreIA = iaData ? computePriorityScore(vnPreditIA, maxPredFuture, probAchat, habitScore, recencyScore, distanceKm, maxDistance) : 0
+        const hasValidPredictionBasket = iaData ? predictionBasket.totalQuantity > 0 : false
         const isViable = iaData
-          ? (probAchat >= 8 || vnPreditIA >= 8 || caIfBuyIA >= 35 || qteRecoIA >= 1)
+          ? (hasValidPredictionBasket && (probAchat >= 8 || vnPreditIA >= 8 || caIfBuyIA >= 35 || qteRecoIA >= 1))
           : false
 
-        let produits = []
+        let produits = predictionBasket.produits
         let clientAgro = 0
         let clientChips = 0
         let clientBur = 0
 
-        if (iaData && iaData.details && typeof iaData.details === 'object') {
-          produits = Object.entries(iaData.details)
-            .map(([nom, quantite]) => ({ nom, quantite }))
-            .sort((a, b) => (b.quantite || 0) - (a.quantite || 0))
-
+        if (iaData && hasValidPredictionBasket) {
           clientAgro = Math.floor(qteRecoIA * 0.45)
           clientChips = Math.floor(qteRecoIA * 0.35)
           clientBur = Math.floor(qteRecoIA * 0.20)
@@ -8652,7 +9318,7 @@ app.get('/api/tournees/plan', async (req, res) => {
           is_viable: isViable,
           canonical_client_key: getClientUniqueKey(c) || getCanonicalClientKey(c.nbr_client)
         }
-      }).filter(t => t.chiffre_brut > 0 && t.is_viable)
+      }).filter(t => t.chiffre_brut > 0 && t.qte_reco > 0 && t.is_viable)
 
       tourneesFormattees = tousLesClients
         .sort((a, b) => b.score_ia - a.score_ia)
@@ -8742,6 +9408,10 @@ module.exports = {
     buildCoverageCapacityPrecheck,
     buildCoveragePlanningContext,
     buildCoveragePrecheckResponse,
+    validateNextBestVisitHttpRequest,
+    validateNextBestVisitBlockPlan,
+    handleNextBestVisitRoute,
+    handleNextBestVisitValidationRoute,
     fetchAiPredictionsForClientBatch,
     generateNextBestVisitPlan,
     resolveCoverageClientScope,
@@ -8755,12 +9425,20 @@ module.exports = {
     computeCoverageFunctionalResultHash,
     decorateCoverageBlocks,
     decorateCoverageSummary,
+    buildSalesV2ValidationSeeds,
     fetchCommercialOptions,
     fetchCoverageActiveClients,
     fetchLoggedAiPredictions,
+    normalizeFutureSalesAiResult,
+    buildFutureSalesAiTransportFailureResponse,
+    buildSalesPredictionBasket,
+    normalizeLoggedSalesPredictionEntry,
+    normalizeLoggedSalesPredictions,
     withTransaction,
     isV2ValidationLabEnabled,
     registerNextBestVisitValidationLabRoutes,
+    replaceValidatedTourneeRowsInTransaction,
+    validateAndResolveValidatedTourneeStops,
     loadCoverageConstraintsForApi: params => loadCoverageConstraints(params, {
       queryAsync,
       sharedDepotOrigin: SHARED_DEPOT_ORIGIN,

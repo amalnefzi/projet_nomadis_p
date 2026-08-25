@@ -856,6 +856,7 @@ export function buildSalesProfileReadinessViewModel(readinessState = {}) {
   const pending = Boolean(readinessState?.loading)
   const hasPayload = Boolean(normalizedTopLevelStatus || normalizedSnapshotStatus || latestErrorMessage || Object.keys(payload).length)
   const building = status === 'building'
+  const waitingForPreparation = building || status === 'missing' || status === 'stale'
   const failed = status === 'failed'
   const ready = status === 'ready'
   const isLoading = pending && !hasPayload
@@ -868,11 +869,13 @@ export function buildSalesProfileReadinessViewModel(readinessState = {}) {
     pending,
     isLoading,
     disableGenerate: !ready,
-    shouldPoll: building && !pending,
-    canRetry: false,
+    shouldPoll: waitingForPreparation && !pending,
+    canRetry: failed && !pending,
     latestErrorMessage,
     statusLabel: isLoading ? 'Preparation en cours...' : null,
-    bannerMessage: building || failed || status === 'stale' || status === 'missing'
+    bannerMessage: failed
+      ? (latestErrorMessage || 'La preparation des profils V2 a echoue.')
+      : waitingForPreparation || isLoading
       ? 'Preparation en cours...'
       : null
   }
@@ -970,6 +973,7 @@ export function buildSalesVisitFeedbackRecordIndex(records = []) {
     if (plannedVisitId) {
       accumulator[plannedVisitId] = {
         plannedVisitId,
+        tourneeCode: String(record?.tournee_code || '').trim() || null,
         executionStatus: String(record?.execution_status || 'pending').trim() || 'pending',
         purchaseMade: record?.purchase_made == null ? null : Boolean(record.purchase_made),
         actualCa: record?.actual_ca == null ? null : Number(record.actual_ca),
@@ -1040,6 +1044,7 @@ export function buildSalesVisitFeedbackItems(rows = [], feedbackIndex = {}) {
       const existingRecord = feedbackIndex?.[row.plannedVisitId] || null
       return {
         plannedVisitId: row.plannedVisitId,
+        tourneeCode: existingRecord?.tourneeCode || null,
         clientId: row.clientId,
         clientCode: row.clientCode,
         clientName: row.clientName,

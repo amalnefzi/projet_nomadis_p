@@ -4,6 +4,7 @@ const assert = require('node:assert/strict')
 const {
   buildPlannedVisitMetadata,
   fetchSalesVisitFeedbackRecords,
+  replacePendingSalesVisitFeedbackForTournee,
   upsertSalesVisitFeedback
 } = require('../sales_visit_feedback_service')
 const {
@@ -35,6 +36,21 @@ function createFeedbackQueryAsyncMock() {
         return row ? [clone(row)] : []
       }
 
+      if (normalizedSql.includes('FROM sales_v2_visit_feedback') && normalizedSql.includes('WHERE tournee_code = ?')) {
+        const tourneeCode = String(params[0] || '')
+        return rows.filter(entry => entry.tournee_code === tourneeCode).map(clone)
+      }
+
+      if (normalizedSql.includes('DELETE FROM sales_v2_visit_feedback') && normalizedSql.includes('WHERE tournee_code = ?')) {
+        const tourneeCode = String(params[0] || '')
+        for (let index = rows.length - 1; index >= 0; index -= 1) {
+          if (rows[index].tournee_code === tourneeCode && rows[index].execution_status === 'pending') {
+            rows.splice(index, 1)
+          }
+        }
+        return { affectedRows: 1 }
+      }
+
       if (normalizedSql.includes('INSERT INTO sales_v2_visit_feedback')) {
         const now = '2026-08-10 09:00:00'
         const [
@@ -44,6 +60,7 @@ function createFeedbackQueryAsyncMock() {
           client_code,
           commercial_code,
           planned_date,
+          tournee_code,
           execution_status,
           purchase_made,
           actual_ca,
@@ -63,6 +80,7 @@ function createFeedbackQueryAsyncMock() {
           client_code,
           commercial_code,
           planned_date,
+          tournee_code,
           execution_status,
           purchase_made,
           actual_ca,
@@ -159,10 +177,12 @@ test('feedback upsert keeps one state per planned visit and preserves exact code
 
   const firstSave = await upsertSalesVisitFeedback(queryAsync, {
     ...metadata,
+    tournee_code: 'sales-v2-2026-08-10-C01',
     execution_status: 'pending'
   })
   const secondSave = await upsertSalesVisitFeedback(queryAsync, {
     ...metadata,
+    tournee_code: 'sales-v2-2026-08-10-C01',
     execution_status: 'visited',
     purchase_made: true,
     actual_ca: 210.5,
@@ -193,11 +213,13 @@ test('feedback supports pending to not_visited and visited with no purchase', as
 
   const notVisited = await upsertSalesVisitFeedback(queryAsync, {
     ...metadata,
+    tournee_code: 'sales-v2-2026-08-11-C02',
     execution_status: 'not_visited',
     non_visit_reason: 'Absence client'
   })
   const visitedNoPurchase = await upsertSalesVisitFeedback(queryAsync, {
     ...metadata,
+    tournee_code: 'sales-v2-2026-08-11-C02',
     execution_status: 'visited',
     purchase_made: false,
     no_purchase_reason: 'Rupture budget'
@@ -231,6 +253,7 @@ test('feedback keeps null actual values and leaves the planning snapshot unchang
 
   await upsertSalesVisitFeedback(queryAsync, {
     ...metadata,
+    tournee_code: 'sales-v2-2026-08-12-C03',
     execution_status: 'visited',
     purchase_made: true,
     actual_ca: null,
@@ -238,6 +261,7 @@ test('feedback keeps null actual values and leaves the planning snapshot unchang
   })
   const updated = await upsertSalesVisitFeedback(queryAsync, {
     ...metadata,
+    tournee_code: 'sales-v2-2026-08-12-C03',
     execution_status: 'visited',
     purchase_made: true,
     actual_ca: null,
@@ -270,8 +294,17 @@ test('batch feedback read returns one record per planned visit id', async () => 
     planned_date: '2026-08-13'
   })
 
-  await upsertSalesVisitFeedback(queryAsync, { ...visitA, execution_status: 'pending' })
-  await upsertSalesVisitFeedback(queryAsync, { ...visitB, execution_status: 'visited', purchase_made: false })
+  await upsertSalesVisitFeedback(queryAsync, {
+    ...visitA,
+    tournee_code: 'sales-v2-2026-08-13-C01',
+    execution_status: 'pending'
+  })
+  await upsertSalesVisitFeedback(queryAsync, {
+    ...visitB,
+    tournee_code: 'sales-v2-2026-08-13-C01',
+    execution_status: 'visited',
+    purchase_made: false
+  })
 
   const records = await fetchSalesVisitFeedbackRecords(queryAsync, {
     plannedVisitIds: [visitA.planned_visit_id, visitB.planned_visit_id]
@@ -328,4 +361,63 @@ test('feedback read preserves planned_date when the database returns DATE values
   assert.equal(record.planned_date, '2026-08-14')
   assert.equal(record.client_code, '00204')
   assert.equal(record.commercial_code, 'C04')
+})
+
+test('feedback update-only refuses an unknown planned visit without insertion', async () => {
+  const { queryAsync, rows } = createFeedbackQueryAsyncMock()
+  const metadata = buildPlannedVisitMetadata({
+    assigned_slot_id: '2026-08-15::C05',
+    client_id: '205',
+    client_code: '00205',
+    commercial_code: 'C05',
+    planned_date: '2026-08-15'
+  })
+
+  await assert.rejects(
+    () => upsertSalesVisitFeedback(queryAsync, {
+      ...metadata,
+      execution_status: 'visited',
+      purchase_made: true
+    }, metadata.planned_visit_id, { updateOnly: true }),
+    error => error?.statusCode === 404 && /Aucun feedback Sales V2 valide/.test(error.message)
+  )
+  assert.equal(rows.length, 0)
+})
+
+test('feedback update preserves identity, tournee_code and immutable prediction snapshot', async () => {
+  const { queryAsync, rows } = createFeedbackQueryAsyncMock()
+  const metadata = buildPlannedVisitMetadata({
+    assigned_slot_id: '2026-08-16::C06',
+    client_id: '206',
+    client_code: '00206',
+    commercial_code: 'C06',
+    planned_date: '2026-08-16',
+    predicted_ca: 96.4,
+    portfolio_status: 'due_now'
+  })
+
+  await replacePendingSalesVisitFeedbackForTournee(queryAsync, {
+    tournee_code: 'sales-v2-2026-08-16-C06',
+    visits: [metadata]
+  })
+  const updated = await upsertSalesVisitFeedback(queryAsync, {
+    planned_visit_id: metadata.planned_visit_id,
+    client_id: metadata.client_id,
+    client_code: metadata.client_code,
+    commercial_code: metadata.commercial_code,
+    planned_date: metadata.planned_date,
+    execution_status: 'visited',
+    purchase_made: false,
+    no_purchase_reason: 'Budget reporte',
+    prediction_snapshot: {
+      portfolio_status: 'mutated'
+    }
+  }, metadata.planned_visit_id, { updateOnly: true })
+
+  assert.equal(updated.client_id, metadata.client_id)
+  assert.equal(updated.client_code, metadata.client_code)
+  assert.equal(updated.commercial_code, metadata.commercial_code)
+  assert.equal(updated.tournee_code, 'sales-v2-2026-08-16-C06')
+  assert.equal(updated.prediction_snapshot.portfolio_status, 'due_now')
+  assert.equal(rows.length, 1)
 })

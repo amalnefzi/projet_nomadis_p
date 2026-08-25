@@ -220,7 +220,7 @@ test('sales planner ui keeps Smart Portfolio and route execution separate', () =
   assert.equal(source.includes('planView.clientScope'), true)
   assert.equal(source.includes('buildHighProbabilityMetric'), true)
   assert.equal(source.includes('Prediction coverage'), true)
-  assert.equal(source.includes('/api/tournees/next-best-visits/readiness'), true)
+  assert.equal(source.includes('fetchSalesCoverageReadiness'), true)
   assert.equal(source.includes('Preparation des profils requise'), false)
   assert.equal(source.includes('Preparation en cours...'), true)
   assert.equal(source.includes('Cache du plan'), false)

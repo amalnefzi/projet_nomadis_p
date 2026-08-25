@@ -1,3 +1,6 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import axios from 'axios'
+import { API_URL } from './apiConfig'
 import TourRouteMap from './TourRouteMap.jsx'
 import {
   formatDistanceMeters,
@@ -11,6 +14,14 @@ import SalesVisitFeedbackPanel from './SalesVisitFeedbackPanel.jsx'
 import {
   buildSalesPredictionConsistency
 } from './salesCoverageDetails.js'
+import {
+  buildSalesBlockValidationPayload,
+  buildSalesBlockValidationScopeKey,
+  shouldStartSalesValidationRequest,
+  shouldApplySalesValidationResponse
+} from './salesTourValidation.js'
+
+const VALIDATION_REQUEST_TIMEOUT_MS = 40000
 
 function renderCaStatus(status) {
   switch (status) {
@@ -32,6 +43,176 @@ export default function SalesTourDetails({
   loadingPredictionItems = [],
   routePlan = null
 }) {
+  const resolvedBlock = block && typeof block === 'object' ? block : {}
+  const resolvedHeader = header && typeof header === 'object' ? header : {}
+  const routeUrl = buildGoogleMapsUrl(routePlan?.origin, routePlan?.orderedStops)
+  const predictionConsistency = buildSalesPredictionConsistency(resolvedBlock, clientRows)
+  const validationScopeKey = useMemo(
+    () => buildSalesBlockValidationScopeKey(resolvedBlock),
+    [resolvedBlock]
+  )
+  const [validationRequestState, setValidationRequestState] = useState({
+    phase: 'idle',
+    message: null,
+    error: null,
+    tourneeCode: null,
+    reloadNonce: 0
+  })
+  const [restoredValidationState, setRestoredValidationState] = useState({
+    validated: false,
+    tourneeCode: null,
+    message: null
+  })
+  const activeRequestIdRef = useRef(0)
+  const activeScopeKeyRef = useRef(validationScopeKey)
+  const submitGuardRef = useRef(false)
+  const mountedRef = useRef(true)
+  const clientsCount = Array.isArray(resolvedBlock?.clients)
+    ? resolvedBlock.clients.length
+    : Number(resolvedBlock?.clients_count || clientRows.length || 0)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    activeScopeKeyRef.current = validationScopeKey
+    activeRequestIdRef.current += 1
+    submitGuardRef.current = false
+    setValidationRequestState({
+      phase: 'idle',
+      message: null,
+      error: null,
+      tourneeCode: null,
+      reloadNonce: 0
+    })
+    setRestoredValidationState({
+      validated: false,
+      tourneeCode: null,
+      message: null
+    })
+  }, [validationScopeKey])
+
+  const effectiveValidated = validationRequestState.phase === 'success' || restoredValidationState.validated
+  const effectiveTourneeCode = validationRequestState.tourneeCode || restoredValidationState.tourneeCode || null
+  const validationSummaryMessage = validationRequestState.phase === 'success'
+    ? validationRequestState.message
+    : (restoredValidationState.message || null)
+  const validationBlockedByRouteLoading = Boolean(routePlan?.loading)
+  const validationButtonDisabled = validationRequestState.phase === 'validating' || effectiveValidated || validationBlockedByRouteLoading
+  const validationButtonLabel = validationRequestState.phase === 'validating'
+    ? 'Validation en cours...'
+    : effectiveValidated
+      ? 'Tournee validee'
+      : validationBlockedByRouteLoading
+        ? 'Calcul de l itineraire en cours...'
+        : 'Valider et enregistrer cette tournee'
+
+  const handleRestoredValidationStateChange = useCallback((nextState = {}) => {
+    setRestoredValidationState({
+      validated: Boolean(nextState?.validated),
+      tourneeCode: nextState?.tourneeCode || null,
+      message: nextState?.message || null
+    })
+  }, [])
+
+  const handleValidateTour = useCallback(async () => {
+    if (!shouldStartSalesValidationRequest({
+      isSubmitting: submitGuardRef.current,
+      validationPhase: validationRequestState.phase,
+      isValidated: effectiveValidated,
+      isRouteLoading: routePlan?.loading
+    })) {
+      return
+    }
+
+    const payload = buildSalesBlockValidationPayload(resolvedBlock, routePlan)
+    const confirmationMessage = [
+      'Confirmer la validation de cette tournee ?',
+      `Date : ${resolvedHeader?.date || resolvedBlock?.date || '-'}`,
+      `Commercial : ${resolvedHeader?.commercialLabel || resolvedBlock?.commercial_label || resolvedBlock?.commercial_code || '-'}`,
+      `Nombre de clients : ${clientsCount}`
+    ].join('\n')
+
+    if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm(confirmationMessage)) {
+      return
+    }
+
+    submitGuardRef.current = true
+    const requestId = activeRequestIdRef.current + 1
+    activeRequestIdRef.current = requestId
+    const requestScopeKey = validationScopeKey
+
+    setValidationRequestState(current => ({
+      ...current,
+      phase: 'validating',
+      message: null,
+      error: null,
+      tourneeCode: null
+    }))
+
+    try {
+      const response = await axios.post(
+        `${API_URL}/api/tournees/next-best-visits/validate`,
+        payload,
+        {
+          timeout: VALIDATION_REQUEST_TIMEOUT_MS
+        }
+      )
+
+      const shouldApply = shouldApplySalesValidationResponse({
+        requestId,
+        activeRequestId: activeRequestIdRef.current,
+        requestScopeKey,
+        activeScopeKey: activeScopeKeyRef.current,
+        isMounted: mountedRef.current
+      })
+      if (!shouldApply) {
+        return
+      }
+
+      submitGuardRef.current = false
+      setValidationRequestState(current => ({
+        phase: 'success',
+        message: response.data?.message || 'Tournee validee.',
+        error: null,
+        tourneeCode: String(response.data?.tournee_code || '').trim() || null,
+        reloadNonce: current.reloadNonce + 1
+      }))
+    } catch (requestError) {
+      const shouldApply = shouldApplySalesValidationResponse({
+        requestId,
+        activeRequestId: activeRequestIdRef.current,
+        requestScopeKey,
+        activeScopeKey: activeScopeKeyRef.current,
+        isMounted: mountedRef.current
+      })
+      if (!shouldApply) {
+        return
+      }
+
+      submitGuardRef.current = false
+      setValidationRequestState(current => ({
+        ...current,
+        phase: 'error',
+        message: null,
+        error: requestError?.response?.data?.message || requestError?.message || 'Erreur inattendue pendant la validation du bloc Sales V2.',
+        tourneeCode: null
+      }))
+    }
+  }, [
+    resolvedBlock,
+    clientsCount,
+    effectiveValidated,
+    resolvedHeader,
+    routePlan,
+    validationRequestState.phase,
+    validationScopeKey
+  ])
+
   if (!block || !header) {
     return (
       <div className="sales-empty-state">
@@ -39,9 +220,6 @@ export default function SalesTourDetails({
       </div>
     )
   }
-
-  const routeUrl = buildGoogleMapsUrl(routePlan?.origin, routePlan?.orderedStops)
-  const predictionConsistency = buildSalesPredictionConsistency(block, clientRows)
 
   return (
     <div className="sales-tour-detail">
@@ -75,7 +253,55 @@ export default function SalesTourDetails({
 
         <div className="sales-side-panels">
           <SalesBasketPrediction rows={clientRows} />
-          <SalesVisitFeedbackPanel rows={clientRows} />
+          <div className="sales-route-panel sales-validation-panel">
+            <div className="sales-panel-title">Validation de la tournee</div>
+
+            <div className="sales-validation-summary">
+              <div className="sales-validation-summary-item">
+                <span>Date</span>
+                <strong>{header.date}</strong>
+              </div>
+              <div className="sales-validation-summary-item">
+                <span>Commercial</span>
+                <strong>{header.commercialLabel}</strong>
+              </div>
+              <div className="sales-validation-summary-item">
+                <span>Nombre de clients</span>
+                <strong>{clientsCount}</strong>
+              </div>
+            </div>
+
+            {validationSummaryMessage ? (
+              <div className="sales-route-note">
+                {validationSummaryMessage}
+                {effectiveTourneeCode ? ` Tournee code : ${effectiveTourneeCode}` : ''}
+              </div>
+            ) : null}
+            {validationRequestState.error ? (
+              <div className="sales-route-note sales-validation-error">{validationRequestState.error}</div>
+            ) : null}
+
+            <div className="sales-feedback-actions">
+              <button
+                type="button"
+                className="sales-coverage-submit"
+                onClick={handleValidateTour}
+                disabled={validationButtonDisabled}
+              >
+                {validationButtonLabel}
+                </button>
+              </div>
+          </div>
+          <SalesVisitFeedbackPanel
+            rows={clientRows}
+            validationState={{
+              validated: effectiveValidated,
+              validating: validationRequestState.phase === 'validating',
+              tourneeCode: effectiveTourneeCode,
+              reloadNonce: validationRequestState.reloadNonce
+            }}
+            onValidationStateChange={handleRestoredValidationStateChange}
+          />
           <SalesLoadingPrediction loadingPrediction={loadingPredictionItems} />
 
           <div className="sales-route-panel">

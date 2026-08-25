@@ -11,6 +11,22 @@ import {
   todayIsoDate
 } from './coveragePlannerUtils.js'
 import {
+  invalidateSalesCoveragePlannerRequest,
+  resolveSalesCoveragePlannerRequestError,
+  resolveSalesCoverageReadinessRequestError,
+  resolveSalesCoverageReadinessRequestSuccess,
+  resolveSalesCoveragePlannerRequestSuccess,
+  startSalesCoveragePlannerRequest,
+  startSalesCoverageReadinessRequest
+} from './salesCoveragePlannerRequestState.js'
+import {
+  fetchSalesCoverageReadiness,
+  retrySalesCoverageReadiness
+} from './salesCoverageReadinessApi.js'
+import {
+  resolveSalesCoverageSubmitGuard
+} from './salesCoverageValidation.js'
+import {
   SALES_COVERAGE_FORM_FIELDS,
   aggregateSalesLoadingPrediction,
   buildHighProbabilityMetric,
@@ -29,6 +45,9 @@ import {
   normalizeSelectedSalesCommercialCodes,
   resolveSelectedSalesBlock
 } from './salesCoverageDetails.js'
+import {
+  buildSalesBlockValidationScopeKey
+} from './salesTourValidation.js'
 
 const OPTIONS_REQUEST_TIMEOUT_MS = 20000
 const PLAN_REQUEST_TIMEOUT_MS = 240000
@@ -141,8 +160,25 @@ export default function SalesCoveragePlanner() {
     payload: null
   })
   const readinessRequestSequenceRef = useRef(0)
+  const readinessStateRef = useRef(readinessState)
+  const readinessContextKeyRef = useRef(String(filters.start_date || todayIsoDate()).slice(0, 10))
+  const readinessRetryPendingRef = useRef(false)
+  const componentMountedRef = useRef(true)
+  const generationRequestSequenceRef = useRef(0)
   const [planView, setPlanView] = useState(null)
   const [selectedBlockId, setSelectedBlockId] = useState(null)
+  const readinessStartDate = String(filters.start_date || todayIsoDate()).slice(0, 10)
+
+  readinessStateRef.current = readinessState
+  readinessContextKeyRef.current = readinessStartDate
+
+  useEffect(() => {
+    componentMountedRef.current = true
+
+    return () => {
+      componentMountedRef.current = false
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -205,12 +241,41 @@ export default function SalesCoveragePlanner() {
     }
   }, [])
 
+  const applyGenerationViewState = useCallback(viewState => {
+    setGenerationState({
+      loading: Boolean(viewState?.loading),
+      error: viewState?.error || null
+    })
+    setPlanView(viewState?.planView || null)
+    setSelectedBlockId(viewState?.selectedBlockId || null)
+  }, [])
+
+  const applyReadinessViewState = useCallback(viewState => {
+    if (!componentMountedRef.current || !viewState) {
+      return false
+    }
+
+    readinessStateRef.current = viewState
+    setReadinessState(viewState)
+    return true
+  }, [])
+
+  const invalidateGeneratedPlan = useCallback(() => {
+    const nextRequest = invalidateSalesCoveragePlannerRequest(
+      generationRequestSequenceRef.current
+    )
+
+    generationRequestSequenceRef.current = nextRequest.requestSequence
+    applyGenerationViewState(nextRequest.viewState)
+  }, [applyGenerationViewState])
+
   const handleFilterChange = useCallback((fieldId, value) => {
+    invalidateGeneratedPlan()
     setFilters(current => ({
       ...current,
       [fieldId]: value
     }))
-  }, [])
+  }, [invalidateGeneratedPlan])
 
   const selectedCommercialCodes = useMemo(
     () => normalizeSelectedSalesCommercialCodes(filters.commercial_codes, optionsState.commerciaux),
@@ -222,42 +287,50 @@ export default function SalesCoveragePlanner() {
   }, [handleFilterChange, optionsState.commerciaux])
 
   const loadReadiness = useCallback(async () => {
-    const requestSequence = readinessRequestSequenceRef.current + 1
+    const nextRequest = startSalesCoverageReadinessRequest(
+      readinessRequestSequenceRef.current,
+      readinessStateRef.current
+    )
+    const requestSequence = nextRequest.requestSequence
+    const requestContextKey = readinessStartDate
+
     readinessRequestSequenceRef.current = requestSequence
-    setReadinessState(current => ({
-      ...current,
-      loading: true,
-      error: null
-    }))
+    applyReadinessViewState(nextRequest.viewState)
+
     try {
-      const response = await axios.get(`${API_URL}/api/tournees/next-best-visits/readiness`, {
-        timeout: OPTIONS_REQUEST_TIMEOUT_MS,
-        params: {
-          start_date: String(filters.start_date || todayIsoDate()).slice(0, 10)
-        }
-      })
-      if (requestSequence !== readinessRequestSequenceRef.current) {
-        return response.data
-      }
-      setReadinessState(current => ({
-        ...current,
-        loading: false,
-        error: null,
-        payload: response.data
-      }))
+      const response = await fetchSalesCoverageReadiness(
+        axios,
+        API_URL,
+        requestContextKey,
+        OPTIONS_REQUEST_TIMEOUT_MS
+      )
+
+      const successViewState = resolveSalesCoverageReadinessRequestSuccess(
+        readinessRequestSequenceRef.current,
+        requestSequence,
+        readinessContextKeyRef.current,
+        requestContextKey,
+        response.data
+      )
+
+      applyReadinessViewState(successViewState)
       return response.data
     } catch (error) {
-      if (requestSequence !== readinessRequestSequenceRef.current) {
-        return null
-      }
-      setReadinessState(current => ({
-        ...current,
-        loading: false,
-        error: error?.response?.data?.error || error?.message || 'Impossible de verifier l etat des profils V2.'
-      }))
+      const errorViewState = resolveSalesCoverageReadinessRequestError(
+        readinessRequestSequenceRef.current,
+        requestSequence,
+        readinessContextKeyRef.current,
+        requestContextKey,
+        readinessStateRef.current,
+        error?.response?.data?.message ||
+        error?.response?.data?.error ||
+        error?.message || 'Impossible de verifier l etat des profils V2.'
+      )
+
+      applyReadinessViewState(errorViewState)
       return null
     }
-  }, [filters.start_date])
+  }, [applyReadinessViewState, readinessStartDate])
 
   useEffect(() => {
     loadReadiness()
@@ -297,35 +370,125 @@ export default function SalesCoveragePlanner() {
     }
   }, [loadReadiness, readinessView.shouldPoll])
 
-  const handleGeneratePlan = useCallback(async () => {
-    try {
-      setGenerationState({
-        loading: true,
-        error: null
-      })
+  const handleRetryReadiness = useCallback(async () => {
+    if (!readinessView.failed || readinessRetryPendingRef.current) {
+      return null
+    }
 
-      const response = await axios.post(`${API_URL}/api/tournees/next-best-visits`, currentRequestPayload, {
+    readinessRetryPendingRef.current = true
+
+    const nextRequest = startSalesCoverageReadinessRequest(
+      readinessRequestSequenceRef.current,
+      readinessStateRef.current
+    )
+    const requestSequence = nextRequest.requestSequence
+    const requestContextKey = readinessStartDate
+
+    readinessRequestSequenceRef.current = requestSequence
+    applyReadinessViewState(nextRequest.viewState)
+
+    try {
+      const response = await retrySalesCoverageReadiness(
+        axios,
+        API_URL,
+        requestContextKey,
+        OPTIONS_REQUEST_TIMEOUT_MS
+      )
+
+      const successViewState = resolveSalesCoverageReadinessRequestSuccess(
+        readinessRequestSequenceRef.current,
+        requestSequence,
+        readinessContextKeyRef.current,
+        requestContextKey,
+        response.data
+      )
+
+      applyReadinessViewState(successViewState)
+      return response.data
+    } catch (error) {
+      const errorViewState = resolveSalesCoverageReadinessRequestError(
+        readinessRequestSequenceRef.current,
+        requestSequence,
+        readinessContextKeyRef.current,
+        requestContextKey,
+        readinessStateRef.current,
+        error?.response?.data?.message ||
+        error?.response?.data?.error ||
+        error?.message || 'Impossible de relancer la preparation des profils V2.'
+        )
+
+      applyReadinessViewState(errorViewState)
+      return null
+    } finally {
+      readinessRetryPendingRef.current = false
+    }
+  }, [applyReadinessViewState, readinessStartDate, readinessView.failed])
+
+  const handleGeneratePlan = useCallback(async () => {
+    const submitGuard = resolveSalesCoverageSubmitGuard({
+      filters,
+      commerciaux: optionsState.commerciaux,
+      invalidateGeneratedPlan,
+      requestBuilder: () => currentRequestPayload
+    })
+
+    if (!submitGuard.shouldSubmit) {
+      setGenerationState({
+        loading: false,
+        error: submitGuard.errorMessage
+      })
+      return
+    }
+
+    const nextRequest = startSalesCoveragePlannerRequest(
+      generationRequestSequenceRef.current
+    )
+
+    generationRequestSequenceRef.current = nextRequest.requestSequence
+    applyGenerationViewState(nextRequest.viewState)
+
+    const requestSequence = nextRequest.requestSequence
+
+    try {
+      const response = await axios.post(`${API_URL}/api/tournees/next-best-visits`, submitGuard.payload, {
         timeout: PLAN_REQUEST_TIMEOUT_MS
       })
 
-
       const nextPlanView = extractSalesPlanView(response.data)
+      const successViewState = resolveSalesCoveragePlannerRequestSuccess(
+        generationRequestSequenceRef.current,
+        requestSequence,
+        nextPlanView
+      )
 
-      setPlanView(nextPlanView)
-      setSelectedBlockId(nextPlanView.blocks[0]?.slot_id || null)
+      if (!successViewState) {
+        return
+      }
+
+      applyGenerationViewState(successViewState)
       await loadReadiness()
-      setGenerationState({
-        loading: false,
-        error: null
-      })
     } catch (error) {
+      const errorViewState = resolveSalesCoveragePlannerRequestError(
+        generationRequestSequenceRef.current,
+        requestSequence,
+        error?.response?.data?.message || error?.message || 'La generation du plan de tournees ventes V2 a echoue.'
+      )
+
+      if (!errorViewState) {
+        return
+      }
+
+      applyGenerationViewState(errorViewState)
       await loadReadiness()
-      setGenerationState({
-        loading: false,
-        error: error?.response?.data?.message || error?.message || 'La generation du plan de tournees ventes V2 a echoue.'
-      })
     }
-  }, [currentRequestPayload, loadReadiness])
+  }, [
+    applyGenerationViewState,
+    currentRequestPayload,
+    filters,
+    invalidateGeneratedPlan,
+    loadReadiness,
+    optionsState.commerciaux
+  ])
 
   const selectedBlock = useMemo(
     () => resolveSelectedSalesBlock(planView?.blocks, selectedBlockId),
@@ -357,6 +520,10 @@ export default function SalesCoveragePlanner() {
   const selectedHeader = useMemo(
     () => buildSalesDetailHeaderModel(selectedBlock, selectedBlockRoutePlan),
     [selectedBlock, selectedBlockRoutePlan]
+  )
+  const selectedBlockValidationKey = useMemo(
+    () => buildSalesBlockValidationScopeKey(selectedBlock || {}),
+    [selectedBlock]
   )
   const selectedGpsStats = useMemo(
     () => computeSalesGpsStats(selectedBlock?.clients),
@@ -397,6 +564,7 @@ export default function SalesCoveragePlanner() {
             <input
               id="sales-start-date"
               type="date"
+              min={todayIsoDate()}
               value={filters.start_date}
               onChange={event => handleFilterChange('start_date', event.target.value)}
             />
@@ -568,8 +736,20 @@ export default function SalesCoveragePlanner() {
         </div>
       ) : null}
       {generationBlockedByReadiness ? (
-        <div className="sales-status-banner sales-status-banner-info">
-          Preparation en cours...
+        <div className={`sales-status-banner ${readinessView.failed ? 'sales-status-banner-error' : 'sales-status-banner-info'}`}>
+          <div className="sales-coverage-meta-stack">
+            <span>{readinessView.bannerMessage || 'Preparation en cours...'}</span>
+            {readinessView.failed ? (
+              <button
+                type="button"
+                className="sales-coverage-retry-button"
+                onClick={handleRetryReadiness}
+                disabled={!readinessView.canRetry}
+              >
+                Reessayer la preparation
+              </button>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
@@ -749,6 +929,7 @@ export default function SalesCoveragePlanner() {
               </div>
 
               <SalesTourDetails
+                key={selectedBlockValidationKey}
                 block={selectedBlock}
                 header={selectedHeader}
                 clientRows={selectedClientRows}

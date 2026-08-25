@@ -125,6 +125,22 @@
   gap: 10px;
 }
 
+.sales-coverage-retry-button {
+  justify-self: start;
+  border: 1px solid #fca5a5;
+  border-radius: 999px;
+  padding: 10px 14px;
+  background: #ffffff;
+  color: #b42318;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.sales-coverage-retry-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
 .sales-coverage-readiness {
   display: grid;
   gap: 4px;
@@ -534,6 +550,40 @@
   flex-wrap: wrap;
 }
 
+.sales-validation-panel {
+  background: #f8fbff;
+  border-color: #d8e9ff;
+}
+
+.sales-validation-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.sales-validation-summary-item {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid #d7e0ea;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.sales-validation-summary-item span {
+  color: #607284;
+  font-size: 12px;
+}
+
+.sales-validation-summary-item strong {
+  color: #16324f;
+  font-size: 15px;
+}
+
+.sales-validation-error {
+  color: #b42318;
+}
+
 .sales-monitoring-header {
   display: flex;
   justify-content: space-between;
@@ -748,6 +798,10 @@
 }
 
 @media (max-width: 640px) {
+  .sales-validation-summary {
+    grid-template-columns: 1fr;
+  }
+
   .sales-route-columns {
     grid-template-columns: minmax(0, 1fr);
   }

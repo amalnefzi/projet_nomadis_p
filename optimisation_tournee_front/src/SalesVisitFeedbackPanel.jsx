@@ -7,16 +7,25 @@ import {
   buildSalesVisitFeedbackPayload,
   buildSalesVisitFeedbackRecordIndex
 } from './salesCoverageDetails.js'
+import {
+  deriveSalesBlockValidationStatus
+} from './salesTourValidation.js'
 
 const FEEDBACK_REQUEST_TIMEOUT_MS = 20000
 
-export default function SalesVisitFeedbackPanel({ rows = [] }) {
+export default function SalesVisitFeedbackPanel({
+  rows = [],
+  validationState = {},
+  onValidationStateChange = null
+}) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [recordsById, setRecordsById] = useState({})
   const [draftsById, setDraftsById] = useState({})
   const [savingById, setSavingById] = useState({})
   const [savedById, setSavedById] = useState({})
+  const feedbackReloadNonce = Number(validationState?.reloadNonce || 0)
+  const feedbackEditable = Boolean(validationState?.validated)
 
   const rowIndex = useMemo(
     () => (Array.isArray(rows) ? rows : []).reduce((accumulator, row) => {
@@ -31,7 +40,7 @@ export default function SalesVisitFeedbackPanel({ rows = [] }) {
     () => Object.keys(rowIndex),
     [rowIndex]
   )
-  const plannedVisitIdsKey = plannedVisitIds.join('||')
+  const plannedVisitIdsKey = `${plannedVisitIds.join('||')}::${feedbackReloadNonce}`
 
   useEffect(() => {
     let cancelled = false
@@ -83,6 +92,17 @@ export default function SalesVisitFeedbackPanel({ rows = [] }) {
     }
   }, [plannedVisitIds, plannedVisitIdsKey, rowIndex])
 
+  const restoredValidationState = useMemo(
+    () => deriveSalesBlockValidationStatus(rows, recordsById),
+    [recordsById, rows]
+  )
+
+  useEffect(() => {
+    if (typeof onValidationStateChange === 'function') {
+      onValidationStateChange(restoredValidationState)
+    }
+  }, [onValidationStateChange, restoredValidationState])
+
   const feedbackItems = useMemo(
     () => buildSalesVisitFeedbackItems(rows, recordsById),
     [recordsById, rows]
@@ -103,6 +123,8 @@ export default function SalesVisitFeedbackPanel({ rows = [] }) {
   }, [])
 
   const handleSave = useCallback(async (plannedVisitId) => {
+    if (!feedbackEditable) return
+
     const row = rowIndex[plannedVisitId]
     if (!row) return
 
@@ -145,7 +167,7 @@ export default function SalesVisitFeedbackPanel({ rows = [] }) {
         [plannedVisitId]: false
       }))
     }
-  }, [draftsById, rowIndex])
+  }, [draftsById, feedbackEditable, rowIndex])
 
   if (!feedbackItems.length) {
     return (
@@ -165,134 +187,146 @@ export default function SalesVisitFeedbackPanel({ rows = [] }) {
       {error ? (
         <div className="sales-route-note">{error}</div>
       ) : null}
+      {!feedbackEditable ? (
+        <div className="sales-route-note">Validez cette tournee avant de saisir le resultat des visites.</div>
+      ) : null}
 
-      <div className="sales-feedback-list">
-        {feedbackItems.map(item => {
-          const draft = draftsById[item.plannedVisitId] || buildSalesVisitFeedbackDraft(rowIndex[item.plannedVisitId], recordsById[item.plannedVisitId] || null)
-          const saving = Boolean(savingById[item.plannedVisitId])
-          const savedMessage = savedById[item.plannedVisitId] || null
-          return (
-            <details key={item.plannedVisitId} className="sales-feedback-card">
-              <summary className="sales-feedback-summary">
-                <div>
-                  <strong>{item.clientName}</strong>
-                  <span>{item.clientCode}</span>
-                </div>
-                <span className="sales-inline-badge">{item.executionStatusLabel}</span>
-              </summary>
+      {feedbackEditable ? (
+        <div className="sales-feedback-list">
+          {feedbackItems.map(item => {
+            const draft = draftsById[item.plannedVisitId] || buildSalesVisitFeedbackDraft(rowIndex[item.plannedVisitId], recordsById[item.plannedVisitId] || null)
+            const saving = Boolean(savingById[item.plannedVisitId])
+            const savedMessage = savedById[item.plannedVisitId] || null
+            return (
+              <details key={item.plannedVisitId} className="sales-feedback-card">
+                <summary className="sales-feedback-summary">
+                  <div>
+                    <strong>{item.clientName}</strong>
+                    <span>{item.clientCode}</span>
+                  </div>
+                  <span className="sales-inline-badge">{item.executionStatusLabel}</span>
+                </summary>
 
-              <div className="sales-feedback-fields">
-                <div className="sales-feedback-field">
-                  <label htmlFor={`feedback-status-${item.plannedVisitId}`}>Statut</label>
-                  <select
-                    id={`feedback-status-${item.plannedVisitId}`}
-                    value={draft.executionStatus}
-                    onChange={event => handleDraftChange(item.plannedVisitId, 'executionStatus', event.target.value)}
-                  >
-                    <option value="pending">En attente</option>
-                    <option value="visited">Visite effectuee</option>
-                    <option value="not_visited">Non visite</option>
-                  </select>
-                </div>
+                <div className="sales-feedback-fields">
+                  <div className="sales-feedback-field">
+                    <label htmlFor={`feedback-status-${item.plannedVisitId}`}>Statut</label>
+                    <select
+                      id={`feedback-status-${item.plannedVisitId}`}
+                      value={draft.executionStatus}
+                      onChange={event => handleDraftChange(item.plannedVisitId, 'executionStatus', event.target.value)}
+                      disabled={!feedbackEditable}
+                    >
+                      <option value="pending">En attente</option>
+                      <option value="visited">Visite effectuee</option>
+                      <option value="not_visited">Non visite</option>
+                    </select>
+                  </div>
 
-                {draft.executionStatus === 'visited' ? (
-                  <>
-                    <div className="sales-feedback-field">
-                      <label htmlFor={`feedback-purchase-${item.plannedVisitId}`}>Achat realise</label>
-                      <select
-                        id={`feedback-purchase-${item.plannedVisitId}`}
-                        value={draft.purchaseMade}
-                        onChange={event => handleDraftChange(item.plannedVisitId, 'purchaseMade', event.target.value)}
-                      >
-                        <option value="">Non renseigne</option>
-                        <option value="true">Oui</option>
-                        <option value="false">Non</option>
-                      </select>
-                    </div>
+                  {draft.executionStatus === 'visited' ? (
+                    <>
+                      <div className="sales-feedback-field">
+                        <label htmlFor={`feedback-purchase-${item.plannedVisitId}`}>Achat realise</label>
+                        <select
+                          id={`feedback-purchase-${item.plannedVisitId}`}
+                          value={draft.purchaseMade}
+                          onChange={event => handleDraftChange(item.plannedVisitId, 'purchaseMade', event.target.value)}
+                          disabled={!feedbackEditable}
+                        >
+                          <option value="">Non renseigne</option>
+                          <option value="true">Oui</option>
+                          <option value="false">Non</option>
+                        </select>
+                      </div>
 
-                    <div className="sales-feedback-field">
-                      <label htmlFor={`feedback-actual-ca-${item.plannedVisitId}`}>CA reel</label>
-                      <input
-                        id={`feedback-actual-ca-${item.plannedVisitId}`}
-                        type="number"
-                        step="0.001"
-                        min="0"
-                        value={draft.actualCa}
-                        onChange={event => handleDraftChange(item.plannedVisitId, 'actualCa', event.target.value)}
-                        placeholder="Non disponible"
-                      />
-                    </div>
-
-                    <div className="sales-feedback-field">
-                      <label htmlFor={`feedback-actual-quantity-${item.plannedVisitId}`}>Quantite reelle</label>
-                      <input
-                        id={`feedback-actual-quantity-${item.plannedVisitId}`}
-                        type="number"
-                        step="0.001"
-                        min="0"
-                        value={draft.actualQuantity}
-                        onChange={event => handleDraftChange(item.plannedVisitId, 'actualQuantity', event.target.value)}
-                        placeholder="Non disponible"
-                      />
-                    </div>
-
-                    {draft.purchaseMade === 'false' ? (
-                      <div className="sales-feedback-field sales-feedback-field-wide">
-                        <label htmlFor={`feedback-no-purchase-reason-${item.plannedVisitId}`}>Motif sans achat</label>
+                      <div className="sales-feedback-field">
+                        <label htmlFor={`feedback-actual-ca-${item.plannedVisitId}`}>CA reel</label>
                         <input
-                          id={`feedback-no-purchase-reason-${item.plannedVisitId}`}
-                          type="text"
-                          value={draft.noPurchaseReason}
-                          onChange={event => handleDraftChange(item.plannedVisitId, 'noPurchaseReason', event.target.value)}
-                          placeholder="Optionnel"
+                          id={`feedback-actual-ca-${item.plannedVisitId}`}
+                          type="number"
+                          step="0.001"
+                          min="0"
+                          value={draft.actualCa}
+                          onChange={event => handleDraftChange(item.plannedVisitId, 'actualCa', event.target.value)}
+                          placeholder="Non disponible"
+                          disabled={!feedbackEditable}
                         />
                       </div>
-                    ) : null}
-                  </>
-                ) : null}
 
-                {draft.executionStatus === 'not_visited' ? (
+                      <div className="sales-feedback-field">
+                        <label htmlFor={`feedback-actual-quantity-${item.plannedVisitId}`}>Quantite reelle</label>
+                        <input
+                          id={`feedback-actual-quantity-${item.plannedVisitId}`}
+                          type="number"
+                          step="0.001"
+                          min="0"
+                          value={draft.actualQuantity}
+                          onChange={event => handleDraftChange(item.plannedVisitId, 'actualQuantity', event.target.value)}
+                          placeholder="Non disponible"
+                          disabled={!feedbackEditable}
+                        />
+                      </div>
+
+                      {draft.purchaseMade === 'false' ? (
+                        <div className="sales-feedback-field sales-feedback-field-wide">
+                          <label htmlFor={`feedback-no-purchase-reason-${item.plannedVisitId}`}>Motif sans achat</label>
+                          <input
+                            id={`feedback-no-purchase-reason-${item.plannedVisitId}`}
+                            type="text"
+                            value={draft.noPurchaseReason}
+                            onChange={event => handleDraftChange(item.plannedVisitId, 'noPurchaseReason', event.target.value)}
+                            placeholder="Optionnel"
+                            disabled={!feedbackEditable}
+                          />
+                        </div>
+                      ) : null}
+                    </>
+                  ) : null}
+
+                  {draft.executionStatus === 'not_visited' ? (
+                    <div className="sales-feedback-field sales-feedback-field-wide">
+                      <label htmlFor={`feedback-non-visit-reason-${item.plannedVisitId}`}>Motif de non visite</label>
+                      <input
+                        id={`feedback-non-visit-reason-${item.plannedVisitId}`}
+                        type="text"
+                        value={draft.nonVisitReason}
+                        onChange={event => handleDraftChange(item.plannedVisitId, 'nonVisitReason', event.target.value)}
+                        placeholder="Optionnel"
+                        disabled={!feedbackEditable}
+                      />
+                    </div>
+                  ) : null}
+
                   <div className="sales-feedback-field sales-feedback-field-wide">
-                    <label htmlFor={`feedback-non-visit-reason-${item.plannedVisitId}`}>Motif de non visite</label>
-                    <input
-                      id={`feedback-non-visit-reason-${item.plannedVisitId}`}
-                      type="text"
-                      value={draft.nonVisitReason}
-                      onChange={event => handleDraftChange(item.plannedVisitId, 'nonVisitReason', event.target.value)}
+                    <label htmlFor={`feedback-note-${item.plannedVisitId}`}>Note</label>
+                    <textarea
+                      id={`feedback-note-${item.plannedVisitId}`}
+                      value={draft.note}
+                      onChange={event => handleDraftChange(item.plannedVisitId, 'note', event.target.value)}
+                      rows={3}
                       placeholder="Optionnel"
+                      disabled={!feedbackEditable}
                     />
                   </div>
-                ) : null}
-
-                <div className="sales-feedback-field sales-feedback-field-wide">
-                  <label htmlFor={`feedback-note-${item.plannedVisitId}`}>Note</label>
-                  <textarea
-                    id={`feedback-note-${item.plannedVisitId}`}
-                    value={draft.note}
-                    onChange={event => handleDraftChange(item.plannedVisitId, 'note', event.target.value)}
-                    rows={3}
-                    placeholder="Optionnel"
-                  />
                 </div>
-              </div>
 
-              <div className="sales-feedback-actions">
-                <button
-                  type="button"
-                  className="sales-coverage-submit"
-                  onClick={() => handleSave(item.plannedVisitId)}
-                  disabled={saving}
-                >
-                  {saving ? 'Enregistrement...' : 'Enregistrer'}
-                </button>
-                {savedMessage ? (
-                  <span className="sales-route-note">{savedMessage}</span>
-                ) : null}
-              </div>
-            </details>
-          )
-        })}
-      </div>
+                <div className="sales-feedback-actions">
+                  <button
+                    type="button"
+                    className="sales-coverage-submit"
+                    onClick={() => handleSave(item.plannedVisitId)}
+                    disabled={saving || !feedbackEditable}
+                  >
+                    {saving ? 'Enregistrement...' : 'Enregistrer'}
+                  </button>
+                  {savedMessage ? (
+                    <span className="sales-route-note">{savedMessage}</span>
+                  ) : null}
+                </div>
+              </details>
+            )
+          })}
+        </div>
+      ) : null}
     </div>
   )
 }

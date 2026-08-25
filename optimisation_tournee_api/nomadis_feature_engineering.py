@@ -77,7 +77,7 @@ ASSIGNMENT_CATEGORICAL_COLUMNS = [
     'home_commercial'
 ]
 
-FEATURE_ENGINE_VERSION = 'nomadis_feature_engine_v1'
+FEATURE_ENGINE_VERSION = 'nomadis_feature_engine_v4'
 FEATURE_ENGINE_SIGNATURE_FIELDS = {
     'feature_engine_version': FEATURE_ENGINE_VERSION,
     'feature_columns_base': FEATURE_COLUMNS_BASE,
@@ -129,15 +129,28 @@ def _normalize_client_codes(client_codes: Optional[Sequence[str]]):
         code = str(raw_code or '').strip()
         if not code:
             continue
-        normalized.append(code.zfill(5))
+        normalized.append(code)
     return sorted(set(normalized))
+
+
+def build_valid_sales_document_filters(entete_alias='e', client_alias=None):
+    entete_alias = str(entete_alias or 'e').strip() or 'e'
+    client_alias = str(client_alias or '').strip() or None
+    annule_value = f"TRIM(CAST({entete_alias}.annule AS CHAR))"
+    filters = [
+        f"{entete_alias}.deleted_at IS NULL",
+        f"({entete_alias}.annule IS NULL OR {annule_value} = '' OR {annule_value} = '0')",
+    ]
+    if client_alias:
+        filters.append(f"{client_alias}.deleted_at IS NULL")
+    return "\n              AND ".join(filters)
 
 
 def get_base_dataset_query():
     return """
         WITH doc_base AS (
             SELECT
-                LPAD(e.client_code, 5, '0') AS client_code,
+                TRIM(e.client_code) AS client_code,
                 e.code AS doc_code,
                 CASE
                     WHEN e.date REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$'
@@ -157,8 +170,9 @@ def get_base_dataset_query():
             WHERE e.type IN ('facture', 'bl', 'blf')
               AND e.net_a_payer > 0
               AND e.client_code IS NOT NULL
-              AND e.client_code <> ''
-              AND LPAD(e.client_code, 5, '0') <> '00000'
+              AND TRIM(e.client_code) <> ''
+              AND TRIM(e.client_code) <> '00000'
+              AND __SALES_DOCUMENT_FILTERS__
         ),
         line_stats AS (
             SELECT
@@ -200,7 +214,7 @@ def get_base_dataset_query():
             d.home_commercial,
             d.potentiel
         ORDER BY d.client_code, date_doc
-    """
+    """.replace('__SALES_DOCUMENT_FILTERS__', build_valid_sales_document_filters('e', 'c'))
 
 
 def get_assignment_dataset_query():
@@ -212,7 +226,7 @@ def get_assignment_dataset_query():
             t.commercial_code
         FROM (
             SELECT
-                LPAD(e.client_code, 5, '0') AS client_code,
+                TRIM(e.client_code) AS client_code,
                 CASE
                     WHEN e.date REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$'
                          AND e.date <> '0000-00-00 00:00:00'
@@ -231,8 +245,9 @@ def get_assignment_dataset_query():
             WHERE e.type IN ('facture', 'bl', 'blf')
               AND e.net_a_payer > 0
               AND e.client_code IS NOT NULL
-              AND e.client_code <> ''
-              AND LPAD(e.client_code, 5, '0') <> '00000'
+              AND TRIM(e.client_code) <> ''
+              AND TRIM(e.client_code) <> '00000'
+              AND __SALES_DOCUMENT_FILTERS__
         ) t
         WHERE t.date_valide IS NOT NULL
           AND YEAR(t.date_valide) >= 2001
@@ -243,7 +258,7 @@ def get_assignment_dataset_query():
             DAYOFWEEK(t.date_valide) - 1,
             t.commercial_code
         ORDER BY t.client_code, date_doc
-    """
+    """.replace('__SALES_DOCUMENT_FILTERS__', build_valid_sales_document_filters('e', 'c'))
 
 
 def get_preferences_query(cutoff_date):
@@ -256,7 +271,7 @@ def get_preferences_query(cutoff_date):
             SUM(t.quantite) / NULLIF(COUNT(DISTINCT t.doc_code), 0) AS qte_moyenne
         FROM (
             SELECT
-                LPAD(e.client_code, 5, '0') AS client_code,
+                TRIM(e.client_code) AS client_code,
                 e.code AS doc_code,
                 COALESCE(p.sousfamille_code, 'Divers') AS produit_code,
                 COALESCE(l.quantite, 0) AS quantite,
@@ -269,12 +284,14 @@ def get_preferences_query(cutoff_date):
                 END AS date_valide
             FROM lignecommercials l
             JOIN entetecommercials e ON l.entetecommercial_code = e.code
+            JOIN clients c ON e.client_code = c.code
             JOIN produits p ON l.produit_code = p.code
             WHERE e.type IN ('facture', 'bl', 'blf')
               AND e.net_a_payer > 0
               AND e.client_code IS NOT NULL
-              AND e.client_code <> ''
-              AND LPAD(e.client_code, 5, '0') <> '00000'
+              AND TRIM(e.client_code) <> ''
+              AND TRIM(e.client_code) <> '00000'
+              AND {build_valid_sales_document_filters('e', 'c')}
         ) t
         WHERE t.date_valide IS NOT NULL
           AND YEAR(t.date_valide) >= 2001
@@ -421,7 +438,12 @@ def enrich_panel_features(group):
 
     group['weekday_purchase_rate'] = group['nbr_visites_jour'] / group['nbr_visites_hist'].replace(0, np.nan)
 
-    last_same_weekday_date = group['date'].where(group['achat_target'] == 1).groupby(group['jour_semaine']).ffill().shift(1)
+    last_same_weekday_date = (
+        group['date']
+        .where(group['achat_target'] == 1)
+        .groupby(group['jour_semaine'])
+        .transform(lambda s: s.ffill().shift(1))
+    )
     group['days_since_last_same_weekday_order'] = (group['date'] - last_same_weekday_date).dt.days
 
     group['recent_ca_trend'] = group['ca_last_30d'] / group['ca_last_90d'].replace(0, np.nan)
@@ -431,26 +453,20 @@ def enrich_panel_features(group):
 
 
 def compute_feature_default_values(df):
-    positive_sales = df.loc[df['vente_nette'] > 0, 'vente_nette']
-    positive_qte = df.loc[df['qte_totale'] > 0, 'qte_totale']
-    positive_docs = df.loc[df['docs_jour'] > 0, 'docs_jour']
-    positive_line_items = df.loc[df['line_items_jour'] > 0, 'line_items_jour']
-    positive_product_refs = df.loc[df['product_refs_jour'] > 0, 'product_refs_jour']
-    price_series = df['vente_nette'] / df['qte_totale'].replace(0, np.nan)
     return {
         'nbr_visites_hist': 0,
         'nbr_visites_jour': 0,
         'days_since_last_order': 999,
-        'vente_last': float(positive_sales.median() if not positive_sales.empty else 0),
-        'qte_last': float(positive_qte.median() if not positive_qte.empty else 0),
-        'docs_last': float(positive_docs.median() if not positive_docs.empty else 0),
-        'line_items_last': float(positive_line_items.median() if not positive_line_items.empty else 0),
-        'product_refs_last': float(positive_product_refs.median() if not positive_product_refs.empty else 0),
-        'vente_avg_3': float(positive_sales.median() if not positive_sales.empty else 0),
-        'qte_avg_3': float(positive_qte.median() if not positive_qte.empty else 0),
-        'docs_avg_3': float(positive_docs.median() if not positive_docs.empty else 0),
-        'line_items_avg_3': float(positive_line_items.median() if not positive_line_items.empty else 0),
-        'product_refs_avg_3': float(positive_product_refs.median() if not positive_product_refs.empty else 0),
+        'vente_last': 0,
+        'qte_last': 0,
+        'docs_last': 0,
+        'line_items_last': 0,
+        'product_refs_last': 0,
+        'vente_avg_3': 0,
+        'qte_avg_3': 0,
+        'docs_avg_3': 0,
+        'line_items_avg_3': 0,
+        'product_refs_avg_3': 0,
         'ca_last_7d': 0,
         'ca_last_30d': 0,
         'ca_last_60d': 0,
@@ -469,11 +485,11 @@ def compute_feature_default_values(df):
         'orders_last_30d': 0,
         'orders_last_60d': 0,
         'orders_last_90d': 0,
-        'avg_ca_per_order_90d': float(positive_sales.median() if not positive_sales.empty else 0),
-        'avg_qte_per_order_90d': float(positive_qte.median() if not positive_qte.empty else 0),
-        'avg_docs_per_order_90d': float(positive_docs.median() if not positive_docs.empty else 0),
-        'avg_line_items_per_order_90d': float(positive_line_items.median() if not positive_line_items.empty else 0),
-        'avg_product_refs_per_order_90d': float(positive_product_refs.median() if not positive_product_refs.empty else 0),
+        'avg_ca_per_order_90d': 0,
+        'avg_qte_per_order_90d': 0,
+        'avg_docs_per_order_90d': 0,
+        'avg_line_items_per_order_90d': 0,
+        'avg_product_refs_per_order_90d': 0,
         'weekday_purchase_rate': 0,
         'days_since_last_same_weekday_order': 999,
         'days_between_last_orders': 30,
@@ -481,7 +497,7 @@ def compute_feature_default_values(df):
         'order_gap_ratio': 1,
         'recent_ca_trend': 0,
         'recent_qte_trend': 0,
-        'avg_price_hist': float(price_series.median() if not price_series.dropna().empty else 0)
+        'avg_price_hist': 0
     }
 
 
@@ -605,14 +621,14 @@ def build_recency_weights(dates):
 
 def blend_expected_quantity(prob_buy, ca_if_buy, qte_if_buy, price_if_buy, avg_price_hist):
     prob_buy = np.clip(np.asarray(prob_buy, dtype=float), 0, 1)
-    ca_if_buy = np.maximum(1.0, np.asarray(ca_if_buy, dtype=float))
-    qte_if_buy = np.maximum(1.0, np.asarray(qte_if_buy, dtype=float))
-    price_if_buy = np.maximum(0.5, np.asarray(price_if_buy, dtype=float))
+    ca_if_buy = np.maximum(0.0, np.asarray(ca_if_buy, dtype=float))
+    qte_if_buy = np.maximum(0.0, np.asarray(qte_if_buy, dtype=float))
+    price_if_buy = np.maximum(0.0, np.asarray(price_if_buy, dtype=float))
     avg_price_hist = np.asarray(avg_price_hist, dtype=float)
 
     expected_ca = ca_if_buy * prob_buy
     qte_from_model = qte_if_buy * prob_buy
-    qte_from_price = expected_ca / price_if_buy
+    qte_from_price = expected_ca / np.maximum(0.5, price_if_buy)
 
     valid_hist_price = np.where(np.isfinite(avg_price_hist) & (avg_price_hist > 0.5), avg_price_hist, price_if_buy)
     qte_from_hist = expected_ca / np.maximum(0.5, valid_hist_price)
