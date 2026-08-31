@@ -8,6 +8,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -345,6 +346,7 @@ def _normalize_coverage_model_payload(logical_model: dict[str, Any]) -> dict[str
             "predicted_stop_minutes_centi": int(item.get("predicted_stop_minutes_centi") or 0),
             "distance_penalty": int(item.get("distance_penalty") or 0),
             "coverage_date_penalty": int(item.get("coverage_date_penalty") or 0),
+            "recovery_urgency_date_penalty": int(item.get("recovery_urgency_date_penalty") or 0),
             "recovery_date_penalty": int(item.get("recovery_date_penalty") or 0),
             "expected_collection_date_penalty": int(item.get("expected_collection_date_penalty") or 0),
             "purchase_score_date_penalty": int(item.get("purchase_score_date_penalty") or 0),
@@ -803,6 +805,7 @@ def _build_candidate_model_signature(assignment: dict[str, Any]) -> tuple[Any, .
         int(assignment.get("predicted_stop_minutes_centi") or 0),
         int(assignment.get("distance_penalty") or 0),
         int(assignment.get("coverage_date_penalty") or 0),
+        int(assignment.get("recovery_urgency_date_penalty") or 0),
         int(assignment.get("recovery_date_penalty") or 0),
         int(assignment.get("expected_collection_date_penalty") or 0),
         int(assignment.get("purchase_score_date_penalty") or 0),
@@ -987,6 +990,7 @@ class NormalizedClient:
 @dataclass
 class CoverageOptimizationContext:
     payload: dict[str, Any]
+    collection_target_context: dict[str, Any] | None
     slots: list[NormalizedSlot]
     mandatory_clients: list[NormalizedClient]
     effective_constraints: dict[str, Any]
@@ -1240,6 +1244,8 @@ class CoverageCpSatArtifacts:
     slot_load_vars: dict[str, Any]
     model_stats: dict[str, Any]
     solver_parameters: dict[str, Any]
+    secondary_objective_terms: list[Any] | None = None
+    target_collection_effective_var: Any | None = None
 
 
 @dataclass
@@ -1399,6 +1405,12 @@ def is_sales_coverage_mode(payload: dict[str, Any] | None) -> bool:
     return resolve_payload_planning_mode(payload) == PLANNING_MODE_SALES
 
 
+def resolve_client_recovery_urgency_value(client: NormalizedClient) -> float:
+    overdue_days = max(0, _safe_int(client.recovery_days_past_due, 0))
+    payment_delay_days = max(0, _safe_int(client.recovery_days_since_expected_payment, 0))
+    return float(max(overdue_days, payment_delay_days))
+
+
 def normalize_time_of_day(value: Any) -> str | None:
     normalized = str(value or "").strip()
     match = normalized[:8].strip().replace(".", ":")
@@ -1458,6 +1470,283 @@ def resolve_client_expected_collection_value(client: NormalizedClient) -> float:
     if not is_known_recovery_number(client.recovery_expected_collection_amount):
         return 0.0
     return max(0.0, float(client.recovery_expected_collection_amount))
+
+
+def _to_stable_money_decimal(value: Any) -> Decimal | None:
+    parsed = _safe_optional_float(value)
+    if parsed is None:
+        return None
+    try:
+        decimal_value = Decimal(str(parsed))
+    except (InvalidOperation, ValueError):
+        return None
+    if not decimal_value.is_finite():
+        return None
+    return decimal_value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _money_decimal_to_float(value: Decimal) -> float:
+    return float(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def _resolve_candidate_recovery_expected_collection_decimal(candidate: Any) -> Decimal:
+    raw_value = None
+    if isinstance(candidate, dict):
+        raw_value = candidate.get("recovery_expected_collection_amount")
+    else:
+        raw_value = getattr(candidate, "recovery_expected_collection_amount", None)
+    if not is_known_recovery_number(raw_value):
+        return Decimal("0.00")
+    positive_value = float(raw_value)
+    if positive_value <= 0.0:
+        return Decimal("0.00")
+    return _to_stable_money_decimal(positive_value) or Decimal("0.00")
+
+
+def apply_collection_target_candidate_selection(
+    ordered_candidates: list[Any],
+    collection_target_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    candidates = list(ordered_candidates or [])
+    raw_mode = None
+    if isinstance(collection_target_context, dict):
+        raw_mode = collection_target_context.get("mode")
+    mode = "target_collection" if raw_mode == "target_collection" else "full_coverage"
+    requested_target_decimal = (
+        _to_stable_money_decimal(
+            collection_target_context.get("requested_target_collection_amount")
+            if isinstance(collection_target_context, dict)
+            else None
+        )
+        if mode == "target_collection"
+        else None
+    )
+    if requested_target_decimal is None or requested_target_decimal <= Decimal("0.00"):
+        mode = "full_coverage"
+        requested_target_decimal = None
+
+    if not candidates:
+        remaining_amount = requested_target_decimal or Decimal("0.00")
+        return {
+            "mode": mode,
+            "requested_target_collection_amount": (
+                _money_decimal_to_float(requested_target_decimal)
+                if requested_target_decimal is not None
+                else None
+            ),
+            "selected_candidates": [],
+            "selected_candidates_count": 0,
+            "selected_estimated_collection_amount": 0.0,
+            "is_target_reached": mode == "full_coverage",
+            "estimated_remaining_amount": _money_decimal_to_float(remaining_amount),
+            "stop_reason": "no_candidates",
+        }
+
+    if mode == "full_coverage":
+        selected_estimated_collection_amount_decimal = Decimal("0.00")
+        for candidate in candidates:
+            selected_estimated_collection_amount_decimal += _resolve_candidate_recovery_expected_collection_decimal(candidate)
+        selected_estimated_collection_amount_decimal = selected_estimated_collection_amount_decimal.quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+        return {
+            "mode": "full_coverage",
+            "requested_target_collection_amount": None,
+            "selected_candidates": candidates[:],
+            "selected_candidates_count": len(candidates),
+            "selected_estimated_collection_amount": _money_decimal_to_float(
+                selected_estimated_collection_amount_decimal
+            ),
+            "is_target_reached": True,
+            "estimated_remaining_amount": 0.0,
+            "stop_reason": "full_coverage",
+        }
+
+    requested_target_decimal = requested_target_decimal or Decimal("0.00")
+    selected_candidates: list[Any] = []
+    selected_estimated_collection_amount_decimal = Decimal("0.00")
+
+    for candidate in candidates:
+        selected_candidates.append(candidate)
+        selected_estimated_collection_amount_decimal += _resolve_candidate_recovery_expected_collection_decimal(candidate)
+        selected_estimated_collection_amount_decimal = selected_estimated_collection_amount_decimal.quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+        if selected_estimated_collection_amount_decimal >= requested_target_decimal:
+            return {
+                "mode": "target_collection",
+                "requested_target_collection_amount": _money_decimal_to_float(requested_target_decimal),
+                "selected_candidates": selected_candidates,
+                "selected_candidates_count": len(selected_candidates),
+                "selected_estimated_collection_amount": _money_decimal_to_float(
+                    selected_estimated_collection_amount_decimal
+                ),
+                "is_target_reached": True,
+                "estimated_remaining_amount": 0.0,
+                "stop_reason": "target_reached",
+            }
+
+    remaining_amount_decimal = max(
+        Decimal("0.00"),
+        requested_target_decimal - selected_estimated_collection_amount_decimal,
+    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return {
+        "mode": "target_collection",
+        "requested_target_collection_amount": _money_decimal_to_float(requested_target_decimal),
+        "selected_candidates": selected_candidates,
+        "selected_candidates_count": len(selected_candidates),
+        "selected_estimated_collection_amount": _money_decimal_to_float(selected_estimated_collection_amount_decimal),
+        "is_target_reached": False,
+        "estimated_remaining_amount": _money_decimal_to_float(remaining_amount_decimal),
+        "stop_reason": "target_unreachable",
+    }
+
+
+def build_collection_target_context(
+    clients: list[NormalizedClient],
+    target_collection_amount: Any,
+) -> dict[str, Any]:
+    requested_target_decimal = _to_stable_money_decimal(target_collection_amount)
+    target_collection_mode = (
+        "target_collection"
+        if requested_target_decimal is not None and requested_target_decimal > Decimal("0.00")
+        else "full_coverage"
+    )
+
+    estimated_available_collection_decimal = Decimal("0.00")
+    clients_with_collection_estimate_count = 0
+    clients_without_collection_estimate_count = 0
+
+    for client in clients or []:
+        expected_collection_amount = getattr(client, "recovery_expected_collection_amount", None)
+        if is_known_recovery_number(expected_collection_amount):
+            clients_with_collection_estimate_count += 1
+            positive_amount = max(0.0, float(expected_collection_amount))
+            estimated_available_collection_decimal += Decimal(str(positive_amount))
+            continue
+        clients_without_collection_estimate_count += 1
+
+    estimated_available_collection_decimal = estimated_available_collection_decimal.quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+
+    if target_collection_mode == "full_coverage":
+        return {
+            "mode": "full_coverage",
+            "requested_target_collection_amount": None,
+            "estimated_available_collection_amount": _money_decimal_to_float(estimated_available_collection_decimal),
+            "estimated_collection_gap_amount": None,
+            "is_target_collection_reachable": None,
+            "clients_with_collection_estimate_count": clients_with_collection_estimate_count,
+            "clients_without_collection_estimate_count": clients_without_collection_estimate_count,
+        }
+
+    requested_target_decimal = requested_target_decimal or Decimal("0.00")
+    estimated_collection_gap_decimal = max(
+        Decimal("0.00"),
+        requested_target_decimal - estimated_available_collection_decimal,
+    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    is_target_collection_reachable = estimated_collection_gap_decimal == Decimal("0.00")
+
+    return {
+        "mode": "target_collection",
+        "requested_target_collection_amount": _money_decimal_to_float(requested_target_decimal),
+        "estimated_available_collection_amount": _money_decimal_to_float(estimated_available_collection_decimal),
+        "estimated_collection_gap_amount": _money_decimal_to_float(estimated_collection_gap_decimal),
+        "is_target_collection_reachable": is_target_collection_reachable,
+        "clients_with_collection_estimate_count": clients_with_collection_estimate_count,
+        "clients_without_collection_estimate_count": clients_without_collection_estimate_count,
+    }
+
+
+def resolve_collection_target_context(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    context = payload.get("collection_target_context")
+    return context if isinstance(context, dict) else None
+
+
+def build_functional_metadata(
+    *,
+    payload: dict[str, Any] | None = None,
+    collection_target_context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    resolved_collection_target_context = (
+        collection_target_context
+        if isinstance(collection_target_context, dict)
+        else resolve_collection_target_context(payload)
+    )
+    if resolved_collection_target_context is None:
+        return None
+    return {
+        "collection_target_context": resolved_collection_target_context,
+    }
+
+
+def finalize_collection_target_context_from_assigned_clients(
+    collection_target_context: dict[str, Any] | None,
+    assigned_clients: list[Any],
+) -> dict[str, Any] | None:
+    if not isinstance(collection_target_context, dict):
+        return None
+
+    finalized_context = dict(collection_target_context)
+    mode = "target_collection" if finalized_context.get("mode") == "target_collection" else "full_coverage"
+    requested_target_decimal = (
+        _to_stable_money_decimal(finalized_context.get("requested_target_collection_amount"))
+        if mode == "target_collection"
+        else None
+    )
+    if requested_target_decimal is None or requested_target_decimal <= Decimal("0.00"):
+        mode = "full_coverage"
+        requested_target_decimal = None
+
+    assigned_collection_decimal = Decimal("0.00")
+    for client in assigned_clients or []:
+        assigned_collection_decimal += _resolve_candidate_recovery_expected_collection_decimal(client)
+    assigned_collection_decimal = assigned_collection_decimal.quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+
+    if mode == "full_coverage":
+        finalized_context.update({
+            "mode": "full_coverage",
+            "requested_target_collection_amount": None,
+            "estimated_assigned_collection_amount": _money_decimal_to_float(assigned_collection_decimal),
+            "estimated_remaining_collection_amount": 0.0,
+            "is_target_collection_reached": True,
+            "collection_target_stop_reason": "full_coverage",
+            "selected_estimated_collection_amount": _money_decimal_to_float(assigned_collection_decimal),
+            "estimated_remaining_amount": 0.0,
+            "is_target_reached": True,
+            "stop_reason": "full_coverage",
+        })
+        return finalized_context
+
+    requested_target_decimal = requested_target_decimal or Decimal("0.00")
+    remaining_amount_decimal = max(
+        Decimal("0.00"),
+        requested_target_decimal - assigned_collection_decimal,
+    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    is_target_reached = assigned_collection_decimal >= requested_target_decimal
+    stop_reason = "target_reached" if is_target_reached else "target_unreachable"
+    finalized_context.update({
+        "mode": "target_collection",
+        "requested_target_collection_amount": _money_decimal_to_float(requested_target_decimal),
+        "estimated_assigned_collection_amount": _money_decimal_to_float(assigned_collection_decimal),
+        "estimated_remaining_collection_amount": _money_decimal_to_float(remaining_amount_decimal),
+        "is_target_collection_reached": is_target_reached,
+        "collection_target_stop_reason": stop_reason,
+        "selected_estimated_collection_amount": _money_decimal_to_float(assigned_collection_decimal),
+        "estimated_remaining_amount": _money_decimal_to_float(remaining_amount_decimal),
+        "is_target_reached": is_target_reached,
+        "stop_reason": stop_reason,
+    })
+    return finalized_context
 
 
 def resolve_client_coverage_urgency_component(client: NormalizedClient, planning_start_date: str | None) -> float:
@@ -1773,6 +2062,7 @@ def build_planning_dates(planning_start_date: str, planning_days: int, working_d
 
 def normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     planning_mode = normalize_planning_mode(payload.get("planning_mode"))
+    sales_mode = planning_mode == PLANNING_MODE_SALES
     planning_start_date = str(
         payload.get("planning_start_date") or
         payload.get("start_date") or
@@ -1793,15 +2083,19 @@ def normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
         ),
     )
     daily_max_mode = normalize_daily_max_mode(payload.get("daily_max_mode"))
-    strict_ca = _safe_bool(payload.get("strict_ca"), False)
+    strict_ca = _safe_bool(payload.get("strict_ca"), False) if sales_mode else False
     allow_commercial_reassignment = _safe_bool(payload.get("allow_commercial_reassignment"), False)
     default_max_visits_per_slot = max(
         1,
         _safe_int(payload.get("default_max_visits_per_slot") or payload.get("max_visits"), 30)
     )
-    min_daily_ca_per_commercial = max(
-        0.0,
-        _safe_float(payload.get("min_daily_ca_per_commercial") or payload.get("min_daily_ca") or payload.get("min_total_ca"), 0.0)
+    min_daily_ca_per_commercial = (
+        max(
+            0.0,
+            _safe_float(payload.get("min_daily_ca_per_commercial") or payload.get("min_daily_ca") or payload.get("min_total_ca"), 0.0)
+        )
+        if sales_mode
+        else 0.0
     )
     allow_partial_plan = _safe_bool(payload.get("allow_partial_plan"), False)
     raw_capacity_mode = payload.get("capacity_mode")
@@ -1871,7 +2165,11 @@ def normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
             parsed_date = parse_iso_date(date_key)
             if not parsed_date:
                 continue
-            min_ca_by_date[parsed_date.strftime(DATE_FMT)] = max(0.0, _safe_float(value, min_daily_ca_per_commercial))
+            min_ca_by_date[parsed_date.strftime(DATE_FMT)] = (
+                max(0.0, _safe_float(value, min_daily_ca_per_commercial))
+                if sales_mode
+                else 0.0
+            )
 
         max_load_units_by_date = {}
         for date_key, value in (raw_commercial.get("max_load_units_by_date") or {}).items():
@@ -2169,29 +2467,37 @@ def normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
         )
         deadline_date = parse_iso_date(next_visit_deadline)
         is_critical = deadline_date is not None and deadline_date <= planning_end
-        raw_predicted_ca = _safe_optional_float(raw_client.get("predicted_ca"))
-        predicted_ca_known = _safe_bool(raw_client.get("predicted_ca_known"), raw_predicted_ca is not None) and raw_predicted_ca is not None
-        predicted_ca_source = str(
-            raw_client.get("predicted_ca_source") or
-            ("sales_history" if predicted_ca_known else "unavailable")
-        ).strip() or ("sales_history" if predicted_ca_known else "unavailable")
+        raw_predicted_ca = _safe_optional_float(raw_client.get("predicted_ca")) if sales_mode else None
+        predicted_ca_known = (
+            _safe_bool(raw_client.get("predicted_ca_known"), raw_predicted_ca is not None) and raw_predicted_ca is not None
+            if sales_mode
+            else False
+        )
+        predicted_ca_source = (
+            str(
+                raw_client.get("predicted_ca_source") or
+                ("sales_history" if predicted_ca_known else "unavailable")
+            ).strip() or ("sales_history" if predicted_ca_known else "unavailable")
+        ) if sales_mode else "unavailable"
         normalized_predicted_ca = None
         if predicted_ca_known:
             normalized_predicted_ca = max(0.0, raw_predicted_ca if raw_predicted_ca is not None else 0.0)
-        purchase_prediction_score = _safe_optional_float(raw_client.get("purchase_prediction_score"))
+        purchase_prediction_score = _safe_optional_float(raw_client.get("purchase_prediction_score")) if sales_mode else None
         if purchase_prediction_score is not None:
             purchase_prediction_score = max(0.0, min(100.0, purchase_prediction_score))
-        predicted_purchase_date = str(raw_client.get("predicted_purchase_date") or "").strip() or None
+        predicted_purchase_date = (str(raw_client.get("predicted_purchase_date") or "").strip() or None) if sales_mode else None
         purchase_days_until_prediction_raw = raw_client.get("purchase_days_until_prediction")
-        purchase_days_until_prediction = None if purchase_days_until_prediction_raw in (None, "") else max(0, _safe_int(purchase_days_until_prediction_raw, 0))
-        recommended_quantity = _safe_optional_float(raw_client.get("recommended_quantity"))
+        purchase_days_until_prediction = (
+            None if purchase_days_until_prediction_raw in (None, "") else max(0, _safe_int(purchase_days_until_prediction_raw, 0))
+        ) if sales_mode else None
+        recommended_quantity = _safe_optional_float(raw_client.get("recommended_quantity")) if sales_mode else None
         if recommended_quantity is not None:
             recommended_quantity = max(0.0, recommended_quantity)
-        expected_order_value = _safe_optional_float(raw_client.get("expected_order_value"))
+        expected_order_value = _safe_optional_float(raw_client.get("expected_order_value")) if sales_mode else None
         if expected_order_value is not None:
             expected_order_value = max(0.0, expected_order_value)
         predicted_products = []
-        for raw_product in (raw_client.get("predicted_products") or []):
+        for raw_product in ((raw_client.get("predicted_products") or []) if sales_mode else []):
             if not isinstance(raw_product, dict):
                 continue
             product_name = str(raw_product.get("name") or raw_product.get("nom") or "").strip()
@@ -2202,15 +2508,17 @@ def normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 "name": product_name,
                 "quantity": round(max(0.0, product_quantity), 2)
             })
-        purchase_prediction_source = str(raw_client.get("purchase_prediction_source") or "").strip() or None
-        purchase_prediction_known = any([
-            purchase_prediction_score is not None,
-            predicted_purchase_date is not None,
-            purchase_days_until_prediction is not None,
-            recommended_quantity is not None,
-            expected_order_value is not None,
-            bool(predicted_products)
-        ]) or _safe_bool(raw_client.get("purchase_prediction_known"), False)
+        purchase_prediction_source = (str(raw_client.get("purchase_prediction_source") or "").strip() or None) if sales_mode else None
+        purchase_prediction_known = (
+            any([
+                purchase_prediction_score is not None,
+                predicted_purchase_date is not None,
+                purchase_days_until_prediction is not None,
+                recommended_quantity is not None,
+                expected_order_value is not None,
+                bool(predicted_products)
+            ]) or _safe_bool(raw_client.get("purchase_prediction_known"), False)
+        ) if sales_mode else False
         recovery_total_balance = _safe_optional_float(raw_client.get("recovery_total_balance"))
         if recovery_total_balance is not None:
             recovery_total_balance = max(0.0, recovery_total_balance)
@@ -2311,7 +2619,7 @@ def normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
         capacity_mode in {CAPACITY_MODE_VALIDATED_VISIT, CAPACITY_MODE_CONFIGURED_HARD}
     )
 
-    return {
+    normalized_payload = {
         "planning_mode": planning_mode,
         "planning_start_date": planning_start.strftime(DATE_FMT),
         "planning_end_date": planning_end.strftime(DATE_FMT),
@@ -2338,6 +2646,14 @@ def normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "input_duplicate_client_ids": duplicate_client_ids,
         "input_duplicate_client_codes": duplicate_client_codes
     }
+
+    if not sales_mode:
+        normalized_payload["collection_target_context"] = build_collection_target_context(
+            deduped_clients,
+            payload.get("target_collection_amount"),
+        )
+
+    return normalized_payload
 
 
 def build_slots(payload: dict[str, Any]) -> list[NormalizedSlot]:
@@ -2763,6 +3079,9 @@ def build_client_priority_breakdown(
     depot_lat, depot_lon = resolve_slot_depot_coordinates(payload, slot)
     distance_km = _get_context_distance_km(context, depot_lat, depot_lon, client.latitude, client.longitude)
     coverage_urgency = resolve_client_coverage_urgency_component(client, payload.get("planning_start_date"))
+    recovery_urgency = None if sales_mode else (
+        round(resolve_client_recovery_urgency_value(client), 2) if client.recovery_data_known else None
+    )
     recovery_priority = None if sales_mode else (
         round(resolve_client_recovery_priority_value(client), 2) if client.recovery_data_known else None
     )
@@ -2810,6 +3129,7 @@ def build_client_priority_breakdown(
 
     return {
         "coverage_urgency": round(coverage_urgency, 2),
+        "recovery_urgency": recovery_urgency,
         "recovery_priority": recovery_priority,
         "expected_collection_amount": expected_collection_amount,
         "purchase_prediction_score": purchase_prediction_score,
@@ -3302,6 +3622,7 @@ def build_coverage_optimization_context(
     payload_already_normalized: bool = False
 ) -> CoverageOptimizationContext:
     payload = payload_or_raw if payload_already_normalized else normalize_payload(payload_or_raw)
+    collection_target_context = resolve_collection_target_context(payload)
     slots = build_slots(payload)
     mandatory_clients = [client for client in payload["clients"] if client.is_mandatory]
     visit_bounds = apply_effective_visit_bounds_to_slots(payload, slots, len(mandatory_clients))
@@ -3329,6 +3650,7 @@ def build_coverage_optimization_context(
 
     context = CoverageOptimizationContext(
         payload=payload,
+        collection_target_context=collection_target_context,
         slots=slots,
         mandatory_clients=mandatory_clients,
         effective_constraints=effective_constraints,
@@ -3529,6 +3851,7 @@ def build_coverage_analysis_summary_from_context(context: CoverageOptimizationCo
     slots = context.slots
     mandatory_clients = context.mandatory_clients
     feasible_slots_by_client = context.feasible_slots_by_client
+    collection_target_context = context.collection_target_context
 
     strict_ca_issues = []
     total_required_ca = round(sum(max(0.0, float(slot.min_ca or 0.0)) for slot in slots), 2)
@@ -3568,7 +3891,7 @@ def build_coverage_analysis_summary_from_context(context: CoverageOptimizationCo
         final_status = "infeasible"
         final_reason = strict_ca_reason
 
-    return {
+    analysis_summary = {
         "status": final_status,
         "reason": final_reason,
         "feasibility": {
@@ -3606,6 +3929,9 @@ def build_coverage_analysis_summary_from_context(context: CoverageOptimizationCo
             "coverage_guarantee_status": "single_visit_only"
         }
     }
+    if collection_target_context is not None:
+        analysis_summary["collection_target_context"] = collection_target_context
+    return analysis_summary
 
 
 def build_candidate_planning_context(
@@ -3651,11 +3977,12 @@ def build_candidate_planning_context(
             slot_date = parse_iso_date(slot.date_iso)
             date_offset_days = max(0, (slot_date - planning_start).days) if slot_date and planning_start else 0
             coverage_urgency_component = float(priority_breakdown.get("coverage_urgency") or 0.0)
-            recovery_urgency_component = 0.0 if sales_mode else float(priority_breakdown.get("recovery_priority") or 0.0)
+            recovery_urgency_component = 0.0 if sales_mode else float(priority_breakdown.get("recovery_urgency") or 0.0)
+            recovery_priority_component = 0.0 if sales_mode else float(priority_breakdown.get("recovery_priority") or 0.0)
             expected_collection_component = 0.0 if sales_mode else float(priority_breakdown.get("expected_collection_amount") or 0.0)
-            purchase_prediction_component = float(priority_breakdown.get("purchase_prediction_score") or 0.0)
-            expected_order_component = float(priority_breakdown.get("expected_order_value") or 0.0)
-            purchase_timing_component = float(priority_breakdown.get("purchase_timing_urgency") or 0.0)
+            purchase_prediction_component = float(priority_breakdown.get("purchase_prediction_score") or 0.0) if sales_mode else 0.0
+            expected_order_component = float(priority_breakdown.get("expected_order_value") or 0.0) if sales_mode else 0.0
+            purchase_timing_component = float(priority_breakdown.get("purchase_timing_urgency") or 0.0) if sales_mode else 0.0
             stop_minutes_started_at = time.perf_counter()
             estimated_stop_minutes = resolve_client_estimated_stop_minutes(slot, client, context=context) or 0.0
             context_build_stop_minutes_seconds += time.perf_counter() - stop_minutes_started_at
@@ -3677,17 +4004,20 @@ def build_candidate_planning_context(
                 "distance_penalty": distance_penalty,
                 "coverage_urgency_component": coverage_urgency_component,
                 "recovery_urgency_component": recovery_urgency_component,
+                "recovery_priority_component": recovery_priority_component,
                 "expected_collection_component": expected_collection_component,
                 "purchase_prediction_component": purchase_prediction_component,
                 "expected_order_component": expected_order_component,
                 "purchase_timing_component": purchase_timing_component,
                 "coverage_date_penalty": int(round(coverage_urgency_component * date_offset_days * 100)),
-                "recovery_date_penalty": int(round(recovery_urgency_component * date_offset_days * 100)),
+                "recovery_urgency_date_penalty": int(round(recovery_urgency_component * date_offset_days * 100)),
+                "recovery_date_penalty": int(round(recovery_priority_component * date_offset_days * 100)),
                 "expected_collection_date_penalty": int(round(min(expected_collection_component, 1_000_000.0) * date_offset_days * 10)),
                 "purchase_score_date_penalty": int(round(purchase_prediction_component * date_offset_days * 100)),
                 "expected_order_date_penalty": int(round(min(expected_order_component, 1_000_000.0) * date_offset_days * 10)),
                 "purchase_timing_date_penalty": int(round(purchase_timing_component * date_offset_days * 100)),
-                "unassigned_recovery_priority_weight": int(round(recovery_urgency_component * 100)),
+                "unassigned_recovery_urgency_weight": int(round(recovery_urgency_component * 100)),
+                "unassigned_recovery_priority_weight": int(round(recovery_priority_component * 100)),
                 "unassigned_expected_collection_weight": int(round(min(expected_collection_component, 1_000_000.0) * 10)),
                 "unassigned_purchase_prediction_weight": int(round(purchase_prediction_component * 100)),
                 "unassigned_expected_order_weight": int(round(min(expected_order_component, 1_000_000.0) * 10)),
@@ -4121,6 +4451,18 @@ def solve_greedy_capacity_plan(
     total_started_at = time.perf_counter()
     greedy_stage_entries: list[dict[str, Any]] = []
     sales_mode = is_sales_coverage_mode(payload)
+    collection_target_context = resolve_collection_target_context(payload)
+    requested_target_collection_decimal = (
+        _to_stable_money_decimal(collection_target_context.get("requested_target_collection_amount"))
+        if isinstance(collection_target_context, dict) and collection_target_context.get("mode") == "target_collection"
+        else None
+    )
+    target_collection_mode = (
+        not sales_mode and
+        requested_target_collection_decimal is not None and
+        requested_target_collection_decimal > Decimal("0.00")
+    )
+    assigned_collection_decimal = Decimal("0.00")
     _increment_context_counter(context, "solve_greedy_capacity_plan_calls")
 
     prepare_indices_started_at = time.perf_counter()
@@ -4269,49 +4611,77 @@ def solve_greedy_capacity_plan(
         deadline_ordinal = deadline.toordinal() if deadline else 999999999
         feasible_count = feasible_slot_count_by_client.get(client.client_id, 0)
         coverage_urgency = resolve_client_coverage_urgency_component(client, payload.get("planning_start_date"))
+        recovery_urgency = resolve_client_recovery_urgency_value(client)
         recovery_priority = resolve_client_recovery_priority_value(client)
         expected_collection = resolve_client_expected_collection_value(client)
         purchase_score = resolve_client_purchase_prediction_score_value(client)
         purchase_timing = resolve_client_purchase_timing_urgency(client)
         expected_order = resolve_client_expected_order_value(client)
         predicted_ca = resolve_client_predicted_ca_value(client)
-        client_sort_keys[client.client_id] = (
-            0 if client.is_critical else 1,
-            -coverage_urgency,
-            feasible_count,
-            deadline_ordinal,
-            0.0 if sales_mode else -recovery_priority,
-            0.0 if sales_mode else -expected_collection,
-            -purchase_score,
-            -purchase_timing,
-            -expected_order,
-            0 if client.historical_commercial_code else 1,
-            -predicted_ca,
-            client.client_id
-        )
+        if sales_mode:
+            client_sort_keys[client.client_id] = (
+                0 if client.is_critical else 1,
+                -coverage_urgency,
+                feasible_count,
+                deadline_ordinal,
+                -purchase_score,
+                -purchase_timing,
+                -expected_order,
+                0 if client.historical_commercial_code else 1,
+                -predicted_ca,
+                client.client_id
+            )
+        else:
+            client_sort_keys[client.client_id] = (
+                -recovery_urgency,
+                -recovery_priority,
+                -expected_collection,
+                0 if client.is_critical else 1,
+                -coverage_urgency,
+                feasible_count,
+                deadline_ordinal,
+                0 if client.historical_commercial_code else 1,
+                client.client_id
+            )
         priority_static_seconds += time.perf_counter() - static_started_at
-        client_repair_sort_keys[client.client_id] = (
-            0 if not client.is_critical else 1,
-            -feasible_count,
-            recovery_priority,
-            expected_collection,
-            purchase_score,
-            purchase_timing,
-            expected_order,
-            predicted_ca,
-            client.client_id
-        )
-        client_rebalance_sort_keys[client.client_id] = (
-            0 if not client.is_critical else 1,
-            feasible_count,
-            recovery_priority,
-            expected_collection,
-            purchase_score,
-            purchase_timing,
-            expected_order,
-            -predicted_ca,
-            client.client_id
-        )
+        if sales_mode:
+            client_repair_sort_keys[client.client_id] = (
+                0 if not client.is_critical else 1,
+                -feasible_count,
+                purchase_score,
+                purchase_timing,
+                expected_order,
+                predicted_ca,
+                client.client_id
+            )
+            client_rebalance_sort_keys[client.client_id] = (
+                0 if not client.is_critical else 1,
+                feasible_count,
+                purchase_score,
+                purchase_timing,
+                expected_order,
+                -predicted_ca,
+                client.client_id
+            )
+        else:
+            client_repair_sort_keys[client.client_id] = (
+                recovery_urgency,
+                recovery_priority,
+                expected_collection,
+                0 if not client.is_critical else 1,
+                -feasible_count,
+                coverage_urgency,
+                client.client_id
+            )
+            client_rebalance_sort_keys[client.client_id] = (
+                recovery_urgency,
+                recovery_priority,
+                expected_collection,
+                0 if not client.is_critical else 1,
+                feasible_count,
+                coverage_urgency,
+                client.client_id
+            )
 
     def compute_uncached_score_components(
         client: NormalizedClient,
@@ -4358,11 +4728,12 @@ def solve_greedy_capacity_plan(
         assembly_started_at = time.perf_counter()
         components = {
             "coverage_date_penalty": int(round(resolve_client_coverage_urgency_component(client, payload.get("planning_start_date")) * day_offset * 100)),
+            "recovery_urgency_date_penalty": 0 if sales_mode else int(round(resolve_client_recovery_urgency_value(client) * day_offset * 100)),
             "recovery_date_penalty": 0 if sales_mode else int(round(resolve_client_recovery_priority_value(client) * day_offset * 100)),
             "expected_collection_date_penalty": 0 if sales_mode else int(round(min(resolve_client_expected_collection_value(client), 1_000_000.0) * day_offset * 10)),
-            "purchase_score_date_penalty": int(round(resolve_client_purchase_prediction_score_value(client) * day_offset * 100)),
-            "purchase_timing_date_penalty": int(round(resolve_client_purchase_timing_urgency(client) * day_offset * 100)),
-            "expected_order_date_penalty": int(round(min(resolve_client_expected_order_value(client), 1_000_000.0) * day_offset * 10)),
+            "purchase_score_date_penalty": int(round(resolve_client_purchase_prediction_score_value(client) * day_offset * 100)) if sales_mode else 0,
+            "purchase_timing_date_penalty": int(round(resolve_client_purchase_timing_urgency(client) * day_offset * 100)) if sales_mode else 0,
+            "expected_order_date_penalty": int(round(min(resolve_client_expected_order_value(client), 1_000_000.0) * day_offset * 10)) if sales_mode else 0,
             "reassignment_penalty": 1 if (
                 client.historical_commercial_code and
                 slot.commercial_code != client.historical_commercial_code
@@ -4388,6 +4759,7 @@ def solve_greedy_capacity_plan(
             if record is not None:
                 components = {
                     "coverage_date_penalty": int(record.get("coverage_date_penalty") or 0),
+                    "recovery_urgency_date_penalty": int(record.get("recovery_urgency_date_penalty") or 0),
                     "recovery_date_penalty": int(record.get("recovery_date_penalty") or 0),
                     "expected_collection_date_penalty": int(record.get("expected_collection_date_penalty") or 0),
                     "purchase_score_date_penalty": int(record.get("purchase_score_date_penalty") or 0),
@@ -4492,12 +4864,32 @@ def solve_greedy_capacity_plan(
         commercial_planned_clients[commercial_code] += delta
         refresh_commercial_ratios()
 
+    def is_collection_target_reached() -> bool:
+        return bool(
+            target_collection_mode and
+            requested_target_collection_decimal is not None and
+            assigned_collection_decimal >= requested_target_collection_decimal
+        )
+
+    def update_assigned_collection(client: NormalizedClient, delta: int) -> None:
+        nonlocal assigned_collection_decimal
+        if not target_collection_mode or delta == 0:
+            return
+        assigned_collection_decimal += (
+            _resolve_candidate_recovery_expected_collection_decimal(client) * Decimal(delta)
+        )
+        assigned_collection_decimal = assigned_collection_decimal.quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+
     def append_client_to_slot(slot: NormalizedSlot, client: NormalizedClient, stop_minutes: float) -> None:
         assigned_clients_by_slot[slot.slot_id].append(client)
         current_load_by_slot[slot.slot_id] += 1
         slot_load_units[slot.slot_id] += client.predicted_load_units
         slot_time_minutes[slot.slot_id] += stop_minutes
         update_commercial_load(slot.commercial_code, 1)
+        update_assigned_collection(client, 1)
 
     def remove_client_from_slot(slot: NormalizedSlot, client: NormalizedClient, stop_minutes: float) -> None:
         assigned_clients_by_slot[slot.slot_id].remove(client)
@@ -4505,6 +4897,7 @@ def solve_greedy_capacity_plan(
         slot_load_units[slot.slot_id] -= client.predicted_load_units
         slot_time_minutes[slot.slot_id] -= stop_minutes
         update_commercial_load(slot.commercial_code, -1)
+        update_assigned_collection(client, -1)
 
     def slot_score(client: NormalizedClient, slot: NormalizedSlot) -> tuple[Any, ...]:
         current_load = current_load_by_slot[slot.slot_id]
@@ -4528,14 +4921,35 @@ def solve_greedy_capacity_plan(
         soft_overload = max(0, next_load - soft_capacity)
         soft_overload_ratio = round(max(0.0, (next_load / max(1, soft_capacity)) - 1.0), 4)
         target_fill_over_ratio = round(max(0.0, (next_load / max(1, target_load)) - 1.0), 4)
+        if sales_mode:
+            return (
+                0 if client.is_critical else 1,
+                int(score_components["coverage_date_penalty"]),
+                int(score_components["purchase_score_date_penalty"]),
+                int(score_components["purchase_timing_date_penalty"]),
+                int(score_components["expected_order_date_penalty"]),
+                round(projected_global_max_ratio, 6),
+                round(projected_ratio_above_target, 6),
+                round(projected_ratio_gap, 6),
+                round(commercial_target_over_ratio, 6),
+                target_fill_over_ratio,
+                soft_overload_ratio,
+                soft_overload,
+                int(score_components["deadline_gap"]),
+                int(score_components["reassignment_penalty"]),
+                user_over_penalty,
+                user_under_penalty,
+                float(score_components["distance_km_rounded4"]),
+                slot.date_iso,
+                slot.commercial_code,
+                current_load
+            )
         return (
-            0 if client.is_critical else 1,
-            int(score_components["coverage_date_penalty"]),
+            int(score_components["recovery_urgency_date_penalty"]),
             int(score_components["recovery_date_penalty"]),
             int(score_components["expected_collection_date_penalty"]),
-            int(score_components["purchase_score_date_penalty"]),
-            int(score_components["purchase_timing_date_penalty"]),
-            int(score_components["expected_order_date_penalty"]),
+            0 if client.is_critical else 1,
+            int(score_components["coverage_date_penalty"]),
             round(projected_global_max_ratio, 6),
             round(projected_ratio_above_target, 6),
             round(projected_ratio_gap, 6),
@@ -4556,6 +4970,8 @@ def solve_greedy_capacity_plan(
     unassigned_clients: list[str] = []
     mandatory_assignment_started_at = time.perf_counter()
     for client in sorted_mandatory_clients:
+        if is_collection_target_reached():
+            break
         best_slot: NormalizedSlot | None = None
         best_score: tuple[Any, ...] | None = None
         best_stop_minutes = 0.0
@@ -4600,9 +5016,11 @@ def solve_greedy_capacity_plan(
     greedy_stage_entries.append(_build_perf_entry("python_greedy_mandatory_assignment", mandatory_assignment_started_at))
 
     repair_started_at = time.perf_counter()
-    if unassigned_clients:
+    if unassigned_clients and not is_collection_target_reached():
         unresolved_clients: list[str] = []
         for client_id in unassigned_clients:
+            if is_collection_target_reached():
+                break
             client = client_by_id[client_id]
             placed = False
             greedy_metrics["repair_iterations"] = int(greedy_metrics.get("repair_iterations") or 0) + 1
@@ -4810,6 +5228,37 @@ def build_coverage_cp_sat_model_artifacts(
 
     user_min_target = max(0, _safe_int(payload.get("user_min_visits_per_slot"), 0))
     user_max_target = max(0, _safe_int(payload.get("user_max_visits_per_slot"), 0))
+    collection_target_context = resolve_collection_target_context(payload)
+    requested_target_collection_decimal = (
+        _to_stable_money_decimal(collection_target_context.get("requested_target_collection_amount"))
+        if isinstance(collection_target_context, dict) and collection_target_context.get("mode") == "target_collection"
+        else None
+    )
+    target_collection_mode = bool(
+        not is_sales_coverage_mode(payload) and
+        requested_target_collection_decimal is not None and
+        requested_target_collection_decimal > Decimal("0.00")
+    )
+    requested_target_collection_cents = (
+        int(requested_target_collection_decimal * 100)
+        if requested_target_collection_decimal is not None
+        else 0
+    )
+    planning_start = parse_iso_date(payload.get("planning_start_date"))
+    recovery_client_order = sorted(
+        mandatory_clients,
+        key=lambda client: (
+            -resolve_client_recovery_urgency_value(client),
+            -resolve_client_recovery_priority_value(client),
+            -resolve_client_expected_collection_value(client),
+            0 if client.is_critical else 1,
+            -resolve_client_coverage_urgency_component(client, payload.get("planning_start_date")),
+            len(candidate_indexes_by_client.get(client.client_id, [])),
+            parse_iso_date(client.next_visit_deadline).toordinal() if parse_iso_date(client.next_visit_deadline) else 999999999,
+            0 if client.historical_commercial_code else 1,
+            client.client_id,
+        ),
+    )
 
     variables_started_at = time.perf_counter()
     x_vars_by_index: list[Any] = []
@@ -4822,10 +5271,19 @@ def build_coverage_cp_sat_model_artifacts(
         builder.register_bool_var(("x", key[0], key[1]), variable)
 
     unassigned_vars: dict[str, Any] = {}
+    assigned_vars: dict[str, Any] = {}
+    client_collection_cents: dict[str, int] = {}
     for client in mandatory_clients:
         variable = model.NewBoolVar(f"unassigned_{client.client_id}")
         unassigned_vars[client.client_id] = variable
         builder.register_bool_var(("unassigned", client.client_id), variable)
+        client_collection_cents[client.client_id] = int(
+            _resolve_candidate_recovery_expected_collection_decimal(client) * 100
+        )
+        if target_collection_mode:
+            assigned_var = model.NewBoolVar(f"assigned_{client.client_id}")
+            assigned_vars[client.client_id] = assigned_var
+            builder.register_bool_var(("assigned", client.client_id), assigned_var)
 
     slot_shortfall_vars: dict[str, Any] = {}
     slot_target_under_vars: dict[str, Any] = {}
@@ -4837,6 +5295,42 @@ def build_coverage_cp_sat_model_artifacts(
     slot_load_units_vars: dict[str, Any] = {}
     slot_route_minutes_vars: dict[str, Any] = {}
     slot_ca_vars: dict[str, Any] = {}
+    target_collection_effective_var = None
+    target_collection_assigned_var = None
+    target_collection_gap_vars: dict[tuple[str, str], Any] = {}
+
+    if target_collection_mode:
+        available_collection_cents = sum(
+            max(0, int(client_collection_cents.get(client.client_id) or 0))
+            for client in mandatory_clients
+        )
+        target_collection_assigned_var = model.NewIntVar(
+            0,
+            max(0, available_collection_cents),
+            "assigned_collection_cents",
+        )
+        builder.register_int_var(
+            ("assigned_collection", "all"),
+            0,
+            max(0, available_collection_cents),
+            target_collection_assigned_var,
+        )
+        target_collection_effective_var = model.NewIntVar(
+            0,
+            max(0, min(requested_target_collection_cents, available_collection_cents)),
+            "effective_collection_cents",
+        )
+        builder.register_int_var(
+            ("effective_collection", "all"),
+            0,
+            max(0, min(requested_target_collection_cents, available_collection_cents)),
+            target_collection_effective_var,
+        )
+        for previous_client, next_client in zip(recovery_client_order, recovery_client_order[1:]):
+            gap_key = (previous_client.client_id, next_client.client_id)
+            gap_var = model.NewBoolVar(f"target_gap_{previous_client.client_id}_{next_client.client_id}")
+            target_collection_gap_vars[gap_key] = gap_var
+            builder.register_bool_var(("target_gap", previous_client.client_id, next_client.client_id), gap_var)
 
     for slot in slots:
         slot_min_visits = resolve_slot_min_visits(slot, payload)
@@ -4946,6 +5440,16 @@ def build_coverage_cp_sat_model_artifacts(
         ]
         assignment_terms.append((("unassigned", client.client_id), unassigned_vars[client.client_id], 1))
         builder.add_linear_constraint(assignment_terms, "==", 1, "client_exactly_one")
+        if target_collection_mode:
+            builder.add_linear_constraint(
+                [(("assigned", client.client_id), assigned_vars[client.client_id], 1)] + [
+                    (("x", unique_assignments[candidate_index]["client_id"], unique_assignments[candidate_index]["slot_id"]), x_vars_by_index[candidate_index], -1)
+                    for candidate_index in candidate_indexes
+                ],
+                "==",
+                0,
+                "client_assigned_balance",
+            )
 
     for slot in slots:
         slot_candidate_indexes = candidate_indexes_by_slot.get(slot.slot_id, [])
@@ -5134,6 +5638,37 @@ def build_coverage_cp_sat_model_artifacts(
         ],
         "max_commercial_ratio"
     )
+    if target_collection_mode and target_collection_assigned_var is not None and target_collection_effective_var is not None:
+        builder.add_linear_constraint(
+            [(("assigned_collection", "all"), target_collection_assigned_var, 1)] + [
+                (("assigned", client.client_id), assigned_vars[client.client_id], -int(client_collection_cents.get(client.client_id) or 0))
+                for client in mandatory_clients
+                if int(client_collection_cents.get(client.client_id) or 0) > 0
+            ],
+            "==",
+            0,
+            "target_collection_assigned_balance",
+        )
+        builder.add_linear_constraint(
+            [
+                (("effective_collection", "all"), target_collection_effective_var, 1),
+                (("assigned_collection", "all"), target_collection_assigned_var, -1),
+            ],
+            "<=",
+            0,
+            "target_collection_effective_cap",
+        )
+        for previous_client, next_client in zip(recovery_client_order, recovery_client_order[1:]):
+            builder.add_linear_constraint(
+                [
+                    (("target_gap", previous_client.client_id, next_client.client_id), target_collection_gap_vars[(previous_client.client_id, next_client.client_id)], 1),
+                    (("assigned", next_client.client_id), assigned_vars[next_client.client_id], -1),
+                    (("unassigned", previous_client.client_id), unassigned_vars[previous_client.client_id], -1),
+                ],
+                ">=",
+                -1,
+                "target_collection_priority_gap",
+            )
     stage_entries.append(_build_perf_entry("python_solver_build_constraints", constraints_started_at))
 
     objective_started_at = time.perf_counter()
@@ -5142,12 +5677,14 @@ def build_coverage_cp_sat_model_artifacts(
     commercial_ratio_gap_weight = 100_000
     commercial_soft_over_weight = 75_000
     commercial_target_over_weight = 25_000
-    coverage_timing_weight = 100
-    recovery_timing_weight = 50 if not is_sales_coverage_mode(payload) else 0
-    expected_collection_timing_weight = 5 if not is_sales_coverage_mode(payload) else 0
-    purchase_score_timing_weight = 1
-    purchase_timing_urgency_weight = 1
-    expected_order_timing_weight = 1
+    recovery_mode = not is_sales_coverage_mode(payload)
+    coverage_timing_weight = 1 if recovery_mode else 100
+    recovery_urgency_timing_weight = 100 if recovery_mode else 0
+    recovery_timing_weight = 10 if recovery_mode else 0
+    expected_collection_timing_weight = 1 if recovery_mode else 0
+    purchase_score_timing_weight = 1 if not recovery_mode else 0
+    purchase_timing_urgency_weight = 1 if not recovery_mode else 0
+    expected_order_timing_weight = 1 if not recovery_mode else 0
     reassignment_weight = 10_000
     geography_weight = 10
     overload_weight = 500
@@ -5158,43 +5695,66 @@ def build_coverage_cp_sat_model_artifacts(
     for client in mandatory_clients:
         priority_multiplier = 2 if client.is_critical else 1
         coverage_urgency_weight = int(round(resolve_client_coverage_urgency_component(client, payload.get("planning_start_date")) * 100))
-        recovery_priority_weight = 0 if is_sales_coverage_mode(payload) else int(round(resolve_client_recovery_priority_value(client) * 100))
-        expected_collection_weight = 0 if is_sales_coverage_mode(payload) else int(round(min(resolve_client_expected_collection_value(client), 1_000_000.0) * 10))
-        purchase_prediction_weight = int(round(resolve_client_purchase_prediction_score_value(client) * 100))
-        expected_order_weight = int(round(min(resolve_client_expected_order_value(client), 1_000_000.0) * 10))
-        predicted_ca_weight = int(round(resolve_client_predicted_ca_value(client) * 100))
-        total_coefficient = (
-            (coverage_weight * priority_multiplier) +
-            (coverage_urgency_weight * 1_000_000) +
-            (recovery_priority_weight * 10_000) +
-            (expected_collection_weight * 10) +
-            (purchase_prediction_weight * 1_000) +
-            expected_order_weight +
-            predicted_ca_weight
-        )
-        builder.add_objective_term(("unassigned", client.client_id), unassigned_vars[client.client_id], total_coefficient)
+        recovery_urgency_weight = 0 if not recovery_mode else int(round(resolve_client_recovery_urgency_value(client) * 100))
+        recovery_priority_weight = 0 if not recovery_mode else int(round(resolve_client_recovery_priority_value(client) * 100))
+        expected_collection_weight = 0 if not recovery_mode else int(round(min(resolve_client_expected_collection_value(client), 1_000_000.0) * 10))
+        purchase_prediction_weight = int(round(resolve_client_purchase_prediction_score_value(client) * 100)) if not recovery_mode else 0
+        expected_order_weight = int(round(min(resolve_client_expected_order_value(client), 1_000_000.0) * 10)) if not recovery_mode else 0
+        predicted_ca_weight = int(round(resolve_client_predicted_ca_value(client) * 100)) if not recovery_mode else 0
+        if recovery_mode:
+            total_coefficient = (
+                (coverage_weight * priority_multiplier) +
+                (recovery_urgency_weight * 1_000_000) +
+                (recovery_priority_weight * 10_000) +
+                (expected_collection_weight * 10) +
+                coverage_urgency_weight
+            )
+        else:
+            total_coefficient = (
+                (coverage_weight * priority_multiplier) +
+                (coverage_urgency_weight * 1_000_000) +
+                (purchase_prediction_weight * 1_000) +
+                expected_order_weight +
+                predicted_ca_weight
+            )
+        if not target_collection_mode:
+            builder.add_objective_term(("unassigned", client.client_id), unassigned_vars[client.client_id], total_coefficient)
+        elif client.client_id in assigned_vars:
+            builder.add_objective_term(("assigned", client.client_id), assigned_vars[client.client_id], 1)
 
-    builder.add_objective_term(("max_commercial_ratio", "all"), max_commercial_ratio_var, max_ratio_weight)
-    for commercial_code in commercial_ratio_gap_vars:
-        builder.add_objective_term(("commercial_ratio_gap", commercial_code), commercial_ratio_gap_vars[commercial_code], commercial_ratio_gap_weight)
-        builder.add_objective_term(("commercial_soft_over", commercial_code), commercial_soft_over_scaled_vars[commercial_code], commercial_soft_over_weight)
-        builder.add_objective_term(("commercial_target_over", commercial_code), commercial_target_over_scaled_vars[commercial_code], commercial_target_over_weight)
+    if not target_collection_mode:
+        builder.add_objective_term(("max_commercial_ratio", "all"), max_commercial_ratio_var, max_ratio_weight)
+        for commercial_code in commercial_ratio_gap_vars:
+            builder.add_objective_term(("commercial_ratio_gap", commercial_code), commercial_ratio_gap_vars[commercial_code], commercial_ratio_gap_weight)
+            builder.add_objective_term(("commercial_soft_over", commercial_code), commercial_soft_over_scaled_vars[commercial_code], commercial_soft_over_weight)
+            builder.add_objective_term(("commercial_target_over", commercial_code), commercial_target_over_scaled_vars[commercial_code], commercial_target_over_weight)
 
-    for slot in slots:
-        if slot_shortfall_vars[slot.slot_id] is not None:
-            builder.add_objective_term(("ca_shortfall", slot.slot_id), slot_shortfall_vars[slot.slot_id], shortfall_weight)
-        builder.add_objective_term(("overload", slot.slot_id), slot_overload_vars[slot.slot_id], overload_weight)
-        builder.add_objective_term(("target_under", slot.slot_id), slot_target_under_vars[slot.slot_id], target_weight)
-        builder.add_objective_term(("target_over", slot.slot_id), slot_target_over_vars[slot.slot_id], target_weight)
-        if slot.slot_id in slot_user_under_vars:
-            builder.add_objective_term(("user_under", slot.slot_id), slot_user_under_vars[slot.slot_id], user_target_weight)
-        if slot.slot_id in slot_user_over_vars:
-            builder.add_objective_term(("user_over", slot.slot_id), slot_user_over_vars[slot.slot_id], user_target_weight)
+        for slot in slots:
+            if slot_shortfall_vars[slot.slot_id] is not None:
+                builder.add_objective_term(("ca_shortfall", slot.slot_id), slot_shortfall_vars[slot.slot_id], shortfall_weight)
+            builder.add_objective_term(("overload", slot.slot_id), slot_overload_vars[slot.slot_id], overload_weight)
+            builder.add_objective_term(("target_under", slot.slot_id), slot_target_under_vars[slot.slot_id], target_weight)
+            builder.add_objective_term(("target_over", slot.slot_id), slot_target_over_vars[slot.slot_id], target_weight)
+            if slot.slot_id in slot_user_under_vars:
+                builder.add_objective_term(("user_under", slot.slot_id), slot_user_under_vars[slot.slot_id], user_target_weight)
+            if slot.slot_id in slot_user_over_vars:
+                builder.add_objective_term(("user_over", slot.slot_id), slot_user_over_vars[slot.slot_id], user_target_weight)
+    else:
+        for previous_client, next_client in zip(recovery_client_order, recovery_client_order[1:]):
+            builder.add_objective_term(
+                ("target_gap", previous_client.client_id, next_client.client_id),
+                target_collection_gap_vars[(previous_client.client_id, next_client.client_id)],
+                10,
+            )
 
     for index, assignment in enumerate(unique_assignments):
         key = candidate_keys[index]
         variable = x_vars_by_index[index]
+        if target_collection_mode:
+            continue
         total_coefficient = 0
+        if int(assignment.get("recovery_urgency_date_penalty") or 0) > 0:
+            total_coefficient += int(assignment["recovery_urgency_date_penalty"]) * recovery_urgency_timing_weight
         if int(assignment.get("coverage_date_penalty") or 0) > 0:
             total_coefficient += int(assignment["coverage_date_penalty"]) * coverage_timing_weight
         if int(assignment.get("recovery_date_penalty") or 0) > 0:
@@ -5214,7 +5774,8 @@ def build_coverage_cp_sat_model_artifacts(
         builder.add_objective_term(("x", key[0], key[1]), variable, total_coefficient)
 
     objective_terms = builder.build_objective_terms()
-    model.Minimize(sum(objective_terms))
+    if not target_collection_mode:
+        model.Minimize(sum(objective_terms))
     stage_entries.append(_build_perf_entry("python_solver_build_objective", objective_started_at))
 
     solver_parameters = {
@@ -5320,7 +5881,9 @@ def build_coverage_cp_sat_model_artifacts(
         slot_shortfall_vars=slot_shortfall_vars,
         slot_load_vars=slot_load_vars,
         model_stats=model_stats,
-        solver_parameters=solver_parameters
+        solver_parameters=solver_parameters,
+        secondary_objective_terms=objective_terms,
+        target_collection_effective_var=target_collection_effective_var,
     ), stage_entries
 
 
@@ -5396,7 +5959,15 @@ def solve_coverage_plan(raw_payload: dict[str, Any]) -> dict[str, Any]:
     analysis_started_at = time.perf_counter()
     analysis_summary = build_coverage_analysis_summary_from_context(context)
     performance_entries.append(_build_perf_entry("python_analysis_summary", analysis_started_at))
+    functional_metadata = build_functional_metadata(
+        collection_target_context=context.collection_target_context,
+    )
     allow_partial_plan = bool(payload["allow_partial_plan"])
+    target_collection_mode = bool(
+        not is_sales_coverage_mode(payload) and
+        isinstance(context.collection_target_context, dict) and
+        context.collection_target_context.get("mode") == "target_collection"
+    )
     user_min_target = max(0, _safe_int(payload.get("user_min_visits_per_slot"), 0))
     user_max_target = max(0, _safe_int(payload.get("user_max_visits_per_slot"), 0))
     solver_min_target = max(0, _safe_int(payload.get("effective_min_visits_per_slot"), 0))
@@ -5411,7 +5982,7 @@ def solve_coverage_plan(raw_payload: dict[str, Any]) -> dict[str, Any]:
         int(round(float(distribution_context.get("global_ratio_target", 1.0) or 1.0) * RATIO_SCALE))
     )
 
-    if feasibility.get("status") != "feasible" and not allow_partial_plan:
+    if feasibility.get("status") != "feasible" and not allow_partial_plan and not target_collection_mode:
         serialize_started_at = time.perf_counter()
         result = {
             "status": "infeasible",
@@ -5473,6 +6044,8 @@ def solve_coverage_plan(raw_payload: dict[str, Any]) -> dict[str, Any]:
             },
             "effective_constraints": effective_constraints
         }
+        if functional_metadata is not None:
+            result["functional_metadata"] = functional_metadata
         performance_entries.append(_build_perf_entry("python_serialize_response", serialize_started_at))
         append_python_total_once()
         return finalize_coverage_debug_result(
@@ -5546,6 +6119,8 @@ def solve_coverage_plan(raw_payload: dict[str, Any]) -> dict[str, Any]:
             },
             "effective_constraints": effective_constraints
         }
+        if functional_metadata is not None:
+            result["functional_metadata"] = functional_metadata
         performance_entries.append(_build_perf_entry("python_serialize_response", serialize_started_at))
         append_python_total_once()
         return finalize_coverage_debug_result(
@@ -5704,7 +6279,24 @@ def solve_coverage_plan(raw_payload: dict[str, Any]) -> dict[str, Any]:
             solve_started_at = time.perf_counter()
             debug_path["cp_sat_solve_reached"] = True
             solver_selection["cp_sat_solve_reached"] = True
-            status = solver.Solve(cp_sat_artifacts.model)
+            if (
+                target_collection_mode and
+                cp_sat_artifacts.target_collection_effective_var is not None
+            ):
+                cp_sat_artifacts.model.Maximize(cp_sat_artifacts.target_collection_effective_var)
+                first_phase_status = solver.Solve(cp_sat_artifacts.model)
+                if first_phase_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                    cp_sat_artifacts.model.Add(
+                        cp_sat_artifacts.target_collection_effective_var ==
+                        solver.Value(cp_sat_artifacts.target_collection_effective_var)
+                    )
+                    cp_sat_artifacts.model.Minimize(sum(cp_sat_artifacts.secondary_objective_terms or []))
+                    status = solver.Solve(cp_sat_artifacts.model)
+                else:
+                    status = first_phase_status
+            else:
+                cp_sat_artifacts.model.Minimize(sum(cp_sat_artifacts.secondary_objective_terms or []))
+                status = solver.Solve(cp_sat_artifacts.model)
             solver_selection["cp_sat_status"] = _status_name(status)
             performance_entries.append(_build_perf_entry("python_solver_cp_sat_solve", solve_started_at))
 
@@ -6024,6 +6616,37 @@ def solve_coverage_plan(raw_payload: dict[str, Any]) -> dict[str, Any]:
     total_predicted_ca = round(total_predicted_ca_value, 2) if total_predicted_ca_known_count > 0 else (None if total_predicted_ca_unknown_count > 0 else 0.0)
     total_predicted_ca_is_complete = total_predicted_ca_unknown_count == 0
     total_ca_shortfall = round(total_ca_shortfall_value, 2) if total_ca_shortfall_is_complete else None
+    finalized_collection_target_context = finalize_collection_target_context_from_assigned_clients(
+        context.collection_target_context,
+        [
+            client
+            for assigned_clients in slot_assignments_by_code.values()
+            for client in assigned_clients
+        ],
+    )
+    if finalized_collection_target_context is not None:
+        if (
+            finalized_collection_target_context.get("mode") == "target_collection" and
+            finalized_collection_target_context.get("collection_target_stop_reason") == "target_unreachable"
+        ):
+            unreachable_context = dict(context.collection_target_context or {})
+            unreachable_context.update({
+                "selected_estimated_collection_amount": finalized_collection_target_context.get("selected_estimated_collection_amount"),
+                "estimated_remaining_amount": finalized_collection_target_context.get("estimated_remaining_amount"),
+                "is_target_reached": finalized_collection_target_context.get("is_target_reached"),
+                "stop_reason": finalized_collection_target_context.get("stop_reason"),
+            })
+            analysis_summary["collection_target_context"] = unreachable_context
+            functional_metadata = build_functional_metadata(
+                collection_target_context=unreachable_context,
+            )
+        for container in (analysis_summary, functional_metadata):
+            if isinstance(container, dict):
+                container["requested_target_collection_amount"] = finalized_collection_target_context.get("requested_target_collection_amount")
+                container["estimated_assigned_collection_amount"] = finalized_collection_target_context.get("estimated_assigned_collection_amount")
+                container["estimated_remaining_collection_amount"] = finalized_collection_target_context.get("estimated_remaining_collection_amount")
+                container["is_target_collection_reached"] = finalized_collection_target_context.get("is_target_collection_reached")
+                container["collection_target_stop_reason"] = finalized_collection_target_context.get("collection_target_stop_reason")
     recovery_summary = build_recovery_summary(mandatory_clients, planned_client_ids)
     purchase_prediction_summary = build_purchase_prediction_summary(mandatory_clients, planned_client_ids)
 
@@ -6202,7 +6825,11 @@ def solve_coverage_plan(raw_payload: dict[str, Any]) -> dict[str, Any]:
     adjusted_inputs = (
         str(payload.get("adjustment_reason") or "") not in {"", "no_adjustment_required", "user_range_respected", "user_range_accepted"}
     )
-    partial_due_to_capacity = missing_clients_count > 0 or feasibility["status"] != "feasible"
+    partial_due_to_capacity = (
+        False
+        if target_collection_mode
+        else missing_clients_count > 0 or feasibility["status"] != "feasible"
+    )
     user_message = (
         "La couverture complete est impossible avec les capacites physiques disponibles. La meilleure repartition possible a ete generee."
         if partial_due_to_capacity and allow_partial_plan
@@ -6286,6 +6913,8 @@ def solve_coverage_plan(raw_payload: dict[str, Any]) -> dict[str, Any]:
             "input_duplicate_clients_removed": sorted(payload["input_duplicate_client_codes"])
         }
     }
+    if functional_metadata is not None:
+        result["functional_metadata"] = functional_metadata
     if is_perf_debug_enabled() and cp_sat_stats is not None:
         result["meta"] = {
             "cp_sat": cp_sat_stats
@@ -6345,18 +6974,29 @@ def build_route_for_slot(
         for client in with_gps:
             distance = _get_context_distance_km(context, current_lat, current_lon, client.latitude, client.longitude)
             distance = distance if distance is not None else 0.0
-            scored.append((
-                distance,
-                0.0 if sales_mode else -resolve_client_recovery_priority_value(client),
-                0.0 if sales_mode else -resolve_client_expected_collection_value(client),
-                -resolve_client_purchase_prediction_score_value(client),
-                -resolve_client_purchase_timing_urgency(client),
-                -resolve_client_expected_order_value(client),
-                -resolve_client_predicted_ca_value(client),
-                client
-            ))
-        scored.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4], item[5], item[6], item[7].client_id))
-        next_client = scored[0][7]
+            if sales_mode:
+                scored.append((
+                    distance,
+                    -resolve_client_purchase_prediction_score_value(client),
+                    -resolve_client_purchase_timing_urgency(client),
+                    -resolve_client_expected_order_value(client),
+                    -resolve_client_predicted_ca_value(client),
+                    client
+                ))
+            else:
+                scored.append((
+                    -resolve_client_recovery_urgency_value(client),
+                    -resolve_client_recovery_priority_value(client),
+                    -resolve_client_expected_collection_value(client),
+                    distance,
+                    client
+                ))
+        if sales_mode:
+            scored.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4], item[5].client_id))
+            next_client = scored[0][5]
+        else:
+            scored.sort(key=lambda item: (item[0], item[1], item[2], item[3], item[4].client_id))
+            next_client = scored[0][4]
         remaining.remove(next_client)
         ordered.append(next_client)
         leg_distance = _get_context_distance_km(context, current_lat, current_lon, next_client.latitude, next_client.longitude) or 0.0
@@ -6394,6 +7034,12 @@ def validate_solution(
     deadline_violations = []
     ca_violations = []
     invalid_gps_clients = sorted(client.client_code for client in clients if client.invalid_gps)
+    collection_target_context = resolve_collection_target_context(payload)
+    target_collection_mode = bool(
+        not is_sales_coverage_mode(payload) and
+        isinstance(collection_target_context, dict) and
+        collection_target_context.get("mode") == "target_collection"
+    )
 
     client_by_id = {client.client_id: client for client in clients}
     slot_by_id = {slot.slot_id: slot for slot in slots}
@@ -6483,7 +7129,7 @@ def validate_solution(
 
     for client in clients:
         count = client_id_counter.get(client.client_id, 0)
-        if client.is_mandatory and count == 0:
+        if client.is_mandatory and count == 0 and not target_collection_mode:
             missing_clients.append(client.client_id)
         if count > 1:
             duplicate_clients.append(client.client_id)

@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  buildCoverageFeasibilityMetrics,
   buildCoverageClientRows,
   buildCoverageDetailHeaderModel,
   buildCoverageSidebarCardModel,
@@ -25,20 +26,16 @@ test('null values stay unavailable and partial collection is labeled as partial'
     commercial_label: 'Comm 1',
     clients_count: 25,
     expected_collection_total: null,
-    predicted_order_value_total: null,
     recovery_data_known_count: 9,
-    purchase_prediction_known_count: 11,
-    recovery_completeness: false,
-    purchase_prediction_completeness: false
+    recovery_completeness: false
   })
 
   assert.equal(summary.collectionLabel, 'Collecte connue : Non disponible')
-  assert.equal(summary.predictedOrderLabel, 'Chiffre predit non disponible')
-  assert.match(summary.completenessLabel, /Donnees partielles/)
-  assert.match(summary.completenessLabel, /Rec\. 9\/25/)
+  assert.match(summary.completenessLabel, /Donnees recouvrement partielles/)
+  assert.match(summary.completenessLabel, /9\/25/)
 })
 
-test('priority reasons are translated to short labels', () => {
+test('priority reasons keep recovery reasons and hide purchase signals', () => {
   assert.deepEqual(
     translatePriorityReasons([
       'credit_overdue',
@@ -46,9 +43,7 @@ test('priority reasons are translated to short labels', () => {
       'purchase_prediction_unavailable'
     ]),
     [
-      'Credit echu',
-      "Forte opportunite d'achat",
-      'Prediction indisponible'
+      'Credit echu'
     ]
   )
 })
@@ -89,8 +84,6 @@ test('detail header exposes GPS counts and keeps unknown values unavailable', ()
     clients_count: 2,
     expected_collection_total: null,
     overdue_balance_total: 120,
-    predicted_order_value_total: 300,
-    recommended_quantity_total: null,
     clients: [
       { latitude: 36.8, longitude: 10.1 },
       { latitude: null, longitude: null }
@@ -109,4 +102,47 @@ test('detail header exposes GPS counts and keeps unknown values unavailable', ()
   assert.equal(header.gpsStats.total, 2)
   assert.equal(header.gpsStats.mapped, 1)
   assert.equal(header.gpsStats.unavailable, 1)
+})
+
+test('feasibility metrics keep legacy planner keys mapped for recovery analysis rendering', () => {
+  const metrics = buildCoverageFeasibilityMetrics({
+    analysis: {
+      clients_to_cover: 12,
+      capacity_total: 9,
+      required_average_per_slot: 1.5,
+      user_max_capacity: 4,
+      adjusted_target_max_capacity: 3,
+      recommended_max_capacity: 5,
+      unavailable_slots_removed: 2,
+      total_required_clients: 12
+    },
+    diagnostics: {
+      recovery_eligibility: {
+        eligible_count: 12
+      }
+    },
+    capacity_precheck: {
+      active_clients_count: 18,
+      available_slots_count: 8,
+      available_slots_after_constraints_count: 6,
+      strict_capacity: 9,
+      required_visits_count: 12,
+      minimum_required_average: 1.5,
+      visits_non_planned_count: 3
+    },
+    operational: {
+      total_required_clients: 12
+    }
+  })
+
+  assert.equal(metrics.activeClientsCount, 18)
+  assert.equal(metrics.recoverableClientsCount, 12)
+  assert.equal(metrics.clientsToCover, 12)
+  assert.equal(metrics.capacityTotal, 9)
+  assert.equal(metrics.requiredAveragePerSlot, 1.5)
+  assert.equal(metrics.userMaxCapacity, 4)
+  assert.equal(metrics.adjustedTargetMaxCapacity, 3)
+  assert.equal(metrics.recommendedMaxCapacity, 5)
+  assert.equal(metrics.totalRequiredClients, 12)
+  assert.equal(metrics.unavailableSlotsRemoved, 2)
 })

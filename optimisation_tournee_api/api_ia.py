@@ -1280,9 +1280,14 @@ def build_dashboard_prediction_output(filtered_clients, selected_limit, selected
                 sorted(score_map.items(), key=lambda item: item[1], reverse=True)
             )
 
+    allocated_quantities_by_client, _ = allocate_dashboard_client_quantities(filtered_head)
+
     result_dict = {}
     for _, row in filtered_head.iterrows():
         code_str = str(row['client_code']).strip()
+        allocated_quantity = int(allocated_quantities_by_client.get(code_str, 0) or 0)
+        if allocated_quantity <= 0:
+            continue
 
         if 'client_code' in effective_prefs.columns and not effective_prefs.empty:
             df_prefs_filtered = effective_prefs[effective_prefs['client_code'] == code_str]
@@ -1307,8 +1312,7 @@ def build_dashboard_prediction_output(filtered_clients, selected_limit, selected
         if not product_weights:
             continue
 
-        qte_predite = float(row['Qte_predite'])
-        details_qte, total_qte = rebalance_quantities(qte_predite, product_weights)
+        details_qte, total_qte = rebalance_quantities(allocated_quantity, product_weights)
         if total_qte <= 0:
             continue
         prix_moyen = float(row['Vn_predit']) / float(total_qte)
@@ -1471,6 +1475,105 @@ def rebalance_quantities(target_total, details_qte):
     if final_total <= 0:
         return {}, 0
     return final_details, final_total
+
+
+def build_dashboard_client_canonical_tie_break(row):
+    raw_client_id = row.get('client_id')
+    if pd.notna(raw_client_id):
+        client_id_str = str(raw_client_id).strip()
+        if client_id_str:
+            if client_id_str.isdigit():
+                return (0, int(client_id_str), client_id_str)
+            return (1, client_id_str)
+
+    client_code_str = str(row.get('client_code', '')).strip()
+    return (2, client_code_str)
+
+
+def build_dashboard_client_priority_key(row):
+    def sanitize(value):
+        numeric = float(value) if pd.notna(value) else 0.0
+        return numeric if np.isfinite(numeric) else 0.0
+
+    return (
+        -sanitize(row.get('Score', 0.0)),
+        -sanitize(row.get('Prob_achat', 0.0)),
+        -sanitize(row.get('Prob_modele', 0.0)),
+        -sanitize(row.get('Vn_predit', 0.0)),
+        -sanitize(row.get('Cadence_score', 0.0)),
+        -sanitize(row.get('Basket_fit_score', 0.0)),
+        -sanitize(row.get('Habit_score', 0.0)),
+        -sanitize(row.get('Recency_score', 0.0)),
+    )
+
+
+def allocate_dashboard_client_quantities(filtered_head):
+    if filtered_head is None or filtered_head.empty:
+        return {}, 0
+
+    weighted_clients = []
+    total_fractional_quantity = 0.0
+
+    for priority_rank, (_, row) in enumerate(filtered_head.iterrows()):
+        client_code = str(row.get('client_code', '')).strip()
+        if not client_code:
+            continue
+
+        raw_quantity = row.get('Qte_predite', 0.0)
+        quantity = float(raw_quantity) if pd.notna(raw_quantity) else 0.0
+        quantity = max(0.0, quantity)
+        base_quantity = int(np.floor(quantity))
+
+        weighted_clients.append({
+            'client_code': client_code,
+            'base_quantity': base_quantity,
+            'remainder': quantity - base_quantity,
+            'priority_rank': priority_rank,
+            'priority_key': build_dashboard_client_priority_key(row),
+            'canonical_tie_break': build_dashboard_client_canonical_tie_break(row),
+        })
+        total_fractional_quantity += quantity
+
+    rounded_total_quantity = int(round(total_fractional_quantity))
+    if rounded_total_quantity <= 0 or not weighted_clients:
+        return {}, 0
+
+    allocated_total_quantity = sum(item['base_quantity'] for item in weighted_clients)
+    diff = rounded_total_quantity - allocated_total_quantity
+
+    if diff > 0:
+        weighted_clients.sort(
+            key=lambda item: (
+                -item['remainder'],
+                item['priority_key'],
+                item['canonical_tie_break'],
+                item['priority_rank'],
+            )
+        )
+        for item in weighted_clients[:diff]:
+            item['base_quantity'] += 1
+    elif diff < 0:
+        weighted_clients.sort(
+            key=lambda item: (
+                item['remainder'],
+                tuple(-value for value in item['priority_key']),
+                item['canonical_tie_break'],
+                -item['priority_rank'],
+            )
+        )
+        for item in weighted_clients:
+            if diff == 0:
+                break
+            removable_units = min(item['base_quantity'], abs(diff))
+            item['base_quantity'] -= removable_units
+            diff += removable_units
+
+    allocations = {
+        item['client_code']: int(item['base_quantity'])
+        for item in weighted_clients
+        if int(item['base_quantity']) > 0
+    }
+    return allocations, sum(allocations.values())
 
 
 def blend_expected_quantity(prob_buy, ca_if_buy, qte_if_buy, price_if_buy, avg_price_hist):

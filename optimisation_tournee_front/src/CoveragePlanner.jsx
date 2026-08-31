@@ -5,7 +5,6 @@ import {
   DEFAULT_COVERAGE_PERIOD_DAYS,
   DEFAULT_COVERAGE_VISIT_FREQUENCY_DAYS,
   computeBlockLoadStats,
-  computeTotalCaShortfall,
   computeTotalEstimatedDistanceKm,
   formatDecimal,
   formatDistanceKm,
@@ -17,9 +16,14 @@ import CoverageTourClientTable from './CoverageTourClientTable'
 import TourRouteMap from './TourRouteMap'
 import useOptimizedTourRoute from './useOptimizedTourRoute'
 import {
+  buildCoverageBlockValidationPayload,
   buildCoverageDetailHeaderModel,
+  buildCoverageFeasibilityMetrics,
   buildCoverageSidebarCardModel,
-  resolveSelectedCoverageBlock
+  buildCoverageBlockValidationScopeKey,
+  resolveSelectedCoverageBlock,
+  shouldApplyCoverageValidationResponse,
+  shouldStartCoverageValidationRequest
 } from './coveragePlannerDetails'
 import {
   buildGoogleMapsUrl,
@@ -30,6 +34,14 @@ import { API_URL } from './apiConfig'
 
 const REQUEST_TIMEOUT_MS = 240000
 const OPTIONS_REQUEST_TIMEOUT_MS = 20000
+const VALIDATION_REQUEST_TIMEOUT_MS = 40000
+const TARGET_COLLECTION_AMOUNT_MESSAGE = "L'objectif de collecte doit etre un nombre superieur ou egal a 0."
+const DEFAULT_COVERAGE_VALIDATION_STATE = Object.freeze({
+  phase: 'idle',
+  message: null,
+  error: null,
+  tourneeCode: null
+})
 
 function normalizeNullableNumber(value) {
   if (value === null || value === undefined || value === '') {
@@ -98,6 +110,29 @@ function normalizeDecimalInput(value, { allowEmpty = false } = {}) {
   return String(parsed)
 }
 
+function normalizeTargetCollectionAmountInput(value) {
+  if (value === null || value === undefined) {
+    return ''
+  }
+
+  return String(value).replace(',', '.').trim()
+}
+
+function resolveTargetCollectionAmount(value) {
+  const normalizedValue = normalizeTargetCollectionAmountInput(value)
+
+  if (normalizedValue === '') {
+    return null
+  }
+
+  const parsed = Number(normalizedValue)
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(TARGET_COLLECTION_AMOUNT_MESSAGE)
+  }
+
+  return parsed
+}
+
 function normalizePlannerFilters(filters) {
   return {
     start_date: String(filters.start_date || todayIsoDate()).slice(0, 10),
@@ -117,30 +152,133 @@ function normalizePlannerFilters(filters) {
       defaultValue: 0,
       allowEmpty: true
     }),
-    min_daily_ca_per_commercial: normalizeDecimalInput(filters.min_daily_ca_per_commercial, {
-      allowEmpty: true
-    })
+    target_collection_amount: normalizeTargetCollectionAmountInput(filters.target_collection_amount)
   }
 }
 
 function buildCoveragePayload(filters, selection = {}) {
   const normalized = normalizePlannerFilters(filters)
+  const targetCollectionAmount = resolveTargetCollectionAmount(normalized.target_collection_amount)
   return {
     planning_mode: 'recovery_coverage',
     start_date: normalized.start_date,
     period_days: Number.parseInt(normalized.period_days, 10),
     min_clients: Number.parseInt(normalized.min_clients, 10) || 0,
     max_clients: normalized.max_clients === '' ? 0 : Number.parseInt(normalized.max_clients, 10) || 0,
-    min_daily_ca_per_commercial: normalized.min_daily_ca_per_commercial === ''
-      ? 0
-      : Number(normalized.min_daily_ca_per_commercial),
+    target_collection_amount: targetCollectionAmount,
     visit_frequency_days: DEFAULT_COVERAGE_VISIT_FREQUENCY_DAYS,
-    strict_ca: false,
     commercials: Array.isArray(selection.selectedCommercials) ? selection.selectedCommercials : [],
     clients: Array.isArray(selection.selectedClientCodes) && selection.selectedClientCodes.length
       ? selection.selectedClientCodes
       : undefined
   }
+}
+
+function normalizeNonNegativeAmount(value) {
+  if (value === null || value === undefined || value === '') {
+    return null
+  }
+
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) {
+    return null
+  }
+
+  return Math.max(0, parsed)
+}
+
+function formatDtAmount(value, fallback = '0,00 DT') {
+  const normalizedValue = normalizeNonNegativeAmount(value)
+  if (normalizedValue === null) {
+    return fallback
+  }
+
+  return `${normalizedValue.toLocaleString('fr-TN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  })} DT`
+}
+
+function resolveCollectionTargetStatus(context, plannedCollectionAmount) {
+  const mode = String(context?.mode || 'target_collection').trim()
+  const stopReason = String(context?.stop_reason || '').trim()
+
+  if (mode === 'full_coverage') {
+    return 'Couverture complete'
+  }
+
+  if (context?.is_target_reached === true) {
+    return 'Objectif atteint'
+  }
+
+  if (stopReason === 'no_candidates') {
+    return 'Aucun client recouvrable'
+  }
+
+  if (stopReason === 'target_unreachable') {
+    return 'Objectif non atteignable avec la capacite disponible'
+  }
+
+  if (stopReason === 'partial_target') {
+    return 'Objectif partiellement atteint'
+  }
+
+  if (plannedCollectionAmount > 0) {
+    return 'Objectif partiellement atteint'
+  }
+
+  return 'Objectif non atteignable avec la capacite disponible'
+}
+
+function resolveCollectionTargetStatusTone(status) {
+  if (status === 'Objectif atteint' || status === 'Couverture complete') {
+    return { color: '#0f766e', background: '#ecfeff', border: '#99f6e4' }
+  }
+
+  if (status === 'Objectif partiellement atteint') {
+    return { color: '#b45309', background: '#fff7ed', border: '#fdba74' }
+  }
+
+  return { color: '#9a3412', background: '#fff7ed', border: '#fed7aa' }
+}
+
+function buildCollectionTargetGlobalKpis(responseData) {
+  const context = responseData?.collection_target_context
+  if (!context || typeof context !== 'object' || Array.isArray(context)) {
+    return null
+  }
+
+  const mode = String(context.mode || 'target_collection').trim()
+  const plannedCollectionAmount = normalizeNonNegativeAmount(context.selected_estimated_collection_amount)
+  const targetCollectionAmount = normalizeNonNegativeAmount(context.requested_target_collection_amount)
+  const estimatedRemainingAmount = normalizeNonNegativeAmount(context.estimated_remaining_amount)
+  const status = resolveCollectionTargetStatus(context, plannedCollectionAmount || 0)
+
+  return [
+    {
+      label: 'Objectif de collecte',
+      value: mode === 'full_coverage'
+        ? 'Non applicable'
+        : formatDtAmount(targetCollectionAmount)
+    },
+    {
+      label: 'Collecte planifiee',
+      value: mode === 'full_coverage'
+        ? (plannedCollectionAmount === null ? 'Non disponible' : formatDtAmount(plannedCollectionAmount))
+        : formatDtAmount(plannedCollectionAmount)
+    },
+    {
+      label: 'Reste estime',
+      value: mode === 'full_coverage'
+        ? 'Non applicable'
+        : formatDtAmount(estimatedRemainingAmount)
+    },
+    {
+      label: "Statut de l'objectif",
+      value: status,
+      tone: resolveCollectionTargetStatusTone(status)
+    }
+  ]
 }
 
 function buildAdjustmentNotes(filters, requestContext = {}) {
@@ -177,59 +315,34 @@ function buildAdjustmentNotes(filters, requestContext = {}) {
 
 function extractAnalysisView(responseData, filters) {
   const analysis = responseData?.analysis || {}
+  const diagnostics = responseData?.diagnostics || {}
+  const capacityPrecheck = responseData?.capacity_precheck || {}
   const operational = responseData?.operational || {}
   const requestContext = responseData?.request_context || {}
   const blockingReasons = Array.isArray(analysis.blocking_reasons) ? analysis.blocking_reasons : []
   const adjustedNotes = buildAdjustmentNotes(filters, requestContext)
-  const capacityMode = String(analysis.capacity_mode || operational.capacity_mode || requestContext.capacity_mode || 'unknown')
-  const operationalCapacityKnown = Boolean(
-    analysis.operational_capacity_known ??
-    operational.operational_capacity_known ??
-    requestContext.operational_capacity_known
-  )
+  const metrics = buildCoverageFeasibilityMetrics(responseData)
+  const capacityMode = metrics.capacityMode
+  const operationalCapacityKnown = metrics.operationalCapacityKnown
   const proxyMessage = "Le plan couvre les clients et repartit la charge selon l'activite de vente historique. La faisabilite terrain reste a confirmer, car les visites reelles, les durees et les temps de trajet ne sont pas encore mesures."
+  const feasibilityStatus = String(
+    analysis.status ||
+    capacityPrecheck.feasibility_status ||
+    responseData?.reason ||
+    responseData?.status ||
+    'unknown'
+  ).trim().toLowerCase()
 
   return {
     raw: responseData,
-    status: String(responseData?.status || 'error'),
-    label: String(analysis.status_label || (responseData?.status === 'feasible' ? 'realisable' : 'a verifier')).replaceAll('_', ' '),
+    status: feasibilityStatus,
+    label: feasibilityStatus ? feasibilityStatus.toUpperCase() : 'UNKNOWN',
     message: !operationalCapacityKnown && capacityMode === 'sales_activity_proxy'
       ? proxyMessage
-      : responseData?.message || '',
-    metrics: {
-      clientsToCover: Number(analysis.clients_to_cover || 0),
-      selectedCommercialsCount: Number(analysis.selected_commercials_count || 0),
-      activeDaysCount: Number(analysis.active_days_count || 0),
-      theoreticalTotalSlots: Number(analysis.theoretical_total_slots || 0),
-      totalSlots: Number(analysis.total_slots || 0),
-      capacityTotal: Number(analysis.capacity_total || 0),
-      requiredAveragePerSlot: Number(analysis.required_average_per_slot || 0),
-      userMaxCapacity: Number(analysis.user_max_capacity || requestContext.user_max_visits_per_slot || 0),
-      adjustedTargetMaxCapacity: Number(
-        analysis.adjusted_target_max_capacity ||
-        requestContext.adjusted_target_max_visits_per_slot ||
-        0
-      ),
-      recommendedMaxCapacity: Number(analysis.recommended_max_capacity || 0),
-      unavailableSlotsRemoved: Number(analysis.unavailable_slots_removed || 0),
-      capacityMode,
-      operationalCapacityKnown,
-      salesActivityProxyTotal: Number(analysis.sales_activity_proxy_total || operational.sales_activity_proxy_total || requestContext.sales_activity_proxy_total || 0),
-      requiredToSalesProxyRatio: Number(analysis.required_to_sales_proxy_ratio || operational.required_to_sales_proxy_ratio || 0),
-      totalHistoricalCapacity: Number(analysis.total_historical_capacity || operational.total_historical_capacity || 0),
-      totalRequiredClients: Number(analysis.total_required_clients || operational.total_required_clients || 0),
-      operationalCapacityGap: Number(analysis.operational_capacity_gap || operational.operational_capacity_gap || 0),
-      requiredCapacityMultiplier: Number(analysis.required_capacity_multiplier || operational.required_capacity_multiplier || 0),
-      estimatedExtraCommercialDays: normalizeNullableNumber(
-        analysis.estimated_extra_commercial_days ??
-        analysis.estimated_extra_commercial_days_needed ??
-        operational.estimated_extra_commercial_days ??
-        operational.estimated_extra_commercial_days_needed
-      ),
-      operationalStatus: String(analysis.operational_status || operational.status || 'unknown'),
-      operationalStatusLabel: String(analysis.operational_status_label || operational.status_label || 'Capacite terrain non mesuree')
-    },
+      : responseData?.message || responseData?.user_message || '',
+    metrics,
     operational,
+    diagnostics,
     requestContext,
     blockingReasons,
     adjustedNotes
@@ -253,54 +366,32 @@ function normalizeDepotOrigin(rawDepot) {
 function extractPlanView(responseData) {
   const summary = responseData?.summary || {}
   const operational = responseData?.operational || {}
+  const feasibilityMetrics = buildCoverageFeasibilityMetrics(responseData)
   const blocks = (Array.isArray(responseData?.blocks) ? responseData.blocks : [])
     .filter(block => Number(block?.clients_count || 0) > 0)
     .map(block => ({
       ...block,
-      predicted_ca: normalizeNullableNumber(block?.predicted_ca),
-      ca_shortfall: normalizeNullableNumber(block?.ca_shortfall),
       expected_collection_total: normalizeNullableNumber(block?.expected_collection_total),
       overdue_balance_total: normalizeNullableNumber(block?.overdue_balance_total),
-      predicted_order_value_total: normalizeNullableNumber(block?.predicted_order_value_total),
-      recommended_quantity_total: normalizeNullableNumber(block?.recommended_quantity_total),
-      predicted_ca_known_count: Number(block?.predicted_ca_known_count ?? 0),
-      predicted_ca_unknown_count: Number(block?.predicted_ca_unknown_count ?? 0),
-      predicted_ca_is_complete: Boolean(block?.predicted_ca_is_complete ?? true),
       recovery_data_known_count: Number(block?.recovery_data_known_count ?? 0),
       recovery_data_unknown_count: Number(block?.recovery_data_unknown_count ?? 0),
       recovery_completeness: Boolean(block?.recovery_completeness ?? true),
-      purchase_prediction_known_count: Number(block?.purchase_prediction_known_count ?? 0),
-      purchase_prediction_unknown_count: Number(block?.purchase_prediction_unknown_count ?? 0),
-      purchase_prediction_completeness: Boolean(block?.purchase_prediction_completeness ?? true),
       estimated_duration_minutes: normalizeNullableNumber(block?.estimated_duration_minutes),
       clients: (Array.isArray(block?.clients) ? block.clients : []).map(client => ({
         ...client,
-        predicted_ca: normalizeNullableNumber(client?.predicted_ca),
-        expected_order_value: normalizeNullableNumber(client?.expected_order_value),
-        recommended_quantity: normalizeNullableNumber(client?.recommended_quantity),
-        purchase_prediction_score: normalizeNullableNumber(client?.purchase_prediction_score),
         recovery_total_balance: normalizeNullableNumber(client?.recovery_total_balance),
         recovery_due_amount: normalizeNullableNumber(client?.recovery_due_amount),
         recovery_expected_collection_amount: normalizeNullableNumber(client?.recovery_expected_collection_amount),
         recovery_priority_score: normalizeNullableNumber(client?.recovery_priority_score),
         recovery_payment_behavior_score: normalizeNullableNumber(client?.recovery_payment_behavior_score),
-        predicted_ca_known: Boolean(client?.predicted_ca_known ?? client?.predicted_ca != null),
-        purchase_prediction_known: Boolean(client?.purchase_prediction_known ?? client?.purchase_prediction_score != null),
-        recovery_data_known: Boolean(client?.recovery_data_known ?? client?.recovery_priority_score != null),
-        predicted_products: Array.isArray(client?.predicted_products) ? client.predicted_products : []
+        recovery_data_known: Boolean(client?.recovery_data_known ?? client?.recovery_priority_score != null)
       }))
     }))
   const loadStats = computeBlockLoadStats(blocks)
   const capacityMode = String(summary.capacity_mode || operational.capacity_mode || 'unknown')
   const operationalCapacityKnown = Boolean(summary.operational_capacity_known ?? operational.operational_capacity_known)
   const proxyMessage = "Le plan couvre les clients et repartit la charge selon l'activite de vente historique. La faisabilite terrain reste a confirmer, car les visites reelles, les durees et les temps de trajet ne sont pas encore mesures."
-  const totalPredictedCa = normalizeNullableNumber(summary.total_predicted_ca)
-  const totalCaShortfall = normalizeNullableNumber(summary.total_ca_shortfall)
-  const predictedCaKnownCount = Number(summary.predicted_ca_known_count ?? 0)
-  const predictedCaUnknownCount = Number(summary.predicted_ca_unknown_count ?? 0)
-  const predictedCaIsComplete = Boolean(summary.predicted_ca_is_complete ?? true)
   const recoverySummary = responseData?.recovery_summary || {}
-  const purchasePredictionSummary = responseData?.purchase_prediction_summary || {}
 
   return {
     raw: responseData,
@@ -310,16 +401,14 @@ function extractPlanView(responseData) {
       ? proxyMessage
       : responseData?.message || responseData?.user_message || '',
     summary: {
+      activeClientsCount: feasibilityMetrics.activeClientsCount,
+      recoverableClientsCount: feasibilityMetrics.recoverableClientsCount,
+      plannedClientsCount: feasibilityMetrics.plannedClientsCount,
       clientsToCover: Number(summary.clients_to_cover || 0),
       uniqueClientsCovered: Number(summary.unique_clients_covered || 0),
       missingClients: Number(summary.missing_clients_count || 0),
       duplicateClients: Number(summary.duplicate_clients_count || 0),
       toursCount: Number(summary.used_slots || blocks.length),
-      totalPredictedCa,
-      totalCaShortfall: totalCaShortfall ?? computeTotalCaShortfall(blocks),
-      predictedCaKnownCount,
-      predictedCaUnknownCount,
-      predictedCaIsComplete,
       totalDistanceKm: Number(summary.total_estimated_km || computeTotalEstimatedDistanceKm(blocks)),
       totalCapacity: Number(summary.total_capacity || 0),
       requiredAveragePerSlot: Number(summary.required_average_per_slot || 0),
@@ -333,8 +422,6 @@ function extractPlanView(responseData) {
       requiredCapacityMultiplier: Number(summary.required_capacity_multiplier || operational.required_capacity_multiplier || 0),
       expectedCollectionTotalKnown: normalizeNullableNumber(recoverySummary.expected_collection_total_known),
       expectedCollectionCompleteness: Boolean(recoverySummary.expected_collection_completeness ?? true),
-      predictedOrderValueTotalKnown: normalizeNullableNumber(purchasePredictionSummary.predicted_order_value_total_known),
-      predictedOrderValueCompleteness: Boolean(purchasePredictionSummary.predicted_order_value_completeness ?? true),
       estimatedExtraCommercialDays: normalizeNullableNumber(
         summary.estimated_extra_commercial_days ??
         summary.estimated_extra_commercial_days_needed ??
@@ -349,7 +436,9 @@ function extractPlanView(responseData) {
     commercialSummaries: Array.isArray(operational.commercial_summaries) ? operational.commercial_summaries : [],
     diagnostics: responseData?.diagnostics || {},
     requestContext: responseData?.request_context || {},
+    collectionTargetKpis: buildCollectionTargetGlobalKpis(responseData),
     analysis: responseData?.analysis || null,
+    predictionRunCode: String(responseData?.prediction_run_code || '').trim() || null,
     blocks
   }
 }
@@ -411,13 +500,12 @@ function BlockSummary({ block, selected, onSelect }) {
       </div>
       <div style={{ fontSize: 13, color: '#5f7389', display: 'grid', gap: 4 }}>
         <span>{summary.collectionLabel}</span>
-        <span>{summary.predictedOrderLabel}</span>
         <span>{summary.completenessLabel}</span>
         <span>Distance estimee : {formatDistanceKm(block.estimated_distance_km || 0)}</span>
       </div>
-      {block.predicted_ca_unknown_count > 0 || block.purchase_prediction_unknown_count > 0 || block.recovery_data_unknown_count > 0 ? (
+      {block.recovery_data_unknown_count > 0 ? (
         <div style={{ marginTop: 6, fontSize: 12, color: '#8a5b18' }}>
-          CA connu : {formatInteger(Math.max(0, Number(block.clients_count || 0) - Number(block.predicted_ca_unknown_count || 0)))}/{formatInteger(block.clients_count || 0)}
+          Recouvrement connu : {formatInteger(Math.max(0, Number(block.clients_count || 0) - Number(block.recovery_data_unknown_count || 0)))}/{formatInteger(block.clients_count || 0)}
         </div>
       ) : null}
     </button>
@@ -677,7 +765,7 @@ export default function CoveragePlanner() {
     period_days: String(DEFAULT_COVERAGE_PERIOD_DAYS),
     min_clients: '1',
     max_clients: '',
-    min_daily_ca_per_commercial: ''
+    target_collection_amount: ''
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -732,6 +820,30 @@ export default function CoveragePlanner() {
     () => buildCoverageDetailHeaderModel(selectedBlock, selectedBlockRoutePlan),
     [selectedBlock, selectedBlockRoutePlan]
   )
+  const selectedBlockValidationKey = useMemo(
+    () => buildCoverageBlockValidationScopeKey(selectedBlock || {}),
+    [selectedBlock]
+  )
+  const [validationStateByBlockKey, setValidationStateByBlockKey] = useState({})
+  const validationRequestIdsRef = useRef({})
+  const validationSubmitGuardRef = useRef({})
+  const mountedRef = useRef(true)
+  const selectedBlockValidationState = validationStateByBlockKey[selectedBlockValidationKey] || DEFAULT_COVERAGE_VALIDATION_STATE
+  const selectedBlockHasClients = Number(selectedBlock?.clients_count || selectedBlock?.clients?.length || 0) > 0
+  const selectedBlockValidated = selectedBlockValidationState.phase === 'success'
+  const validationButtonDisabled = selectedBlockValidationState.phase === 'validating' || selectedBlockValidated
+  const validationButtonLabel = selectedBlockValidationState.phase === 'validating'
+    ? 'Validation en cours...'
+    : selectedBlockValidated
+      ? 'Tournee validee'
+      : 'Valider la tournee'
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -777,9 +889,6 @@ export default function CoveragePlanner() {
 
   const runPlanner = async () => {
     const normalizedFilters = normalizePlannerFilters(filters)
-    const payload = buildCoveragePayload(normalizedFilters, {
-      selectedCommercials
-    })
 
     setFilters(normalizedFilters)
     setLoading(true)
@@ -787,8 +896,15 @@ export default function CoveragePlanner() {
     setAnalysisView(null)
     setPlanView(null)
     setSelectedBlockId(null)
+    setValidationStateByBlockKey({})
+    validationRequestIdsRef.current = {}
+    validationSubmitGuardRef.current = {}
 
     try {
+      const payload = buildCoveragePayload(normalizedFilters, {
+        selectedCommercials
+      })
+
       if (optionsLoading) {
         throw new Error('La liste des commerciaux est encore en chargement.')
       }
@@ -829,6 +945,98 @@ export default function CoveragePlanner() {
     }
   }
 
+  const handleValidateSelectedBlock = async () => {
+    if (!selectedBlock || !selectedBlockHasClients) {
+      return
+    }
+
+    if (!shouldStartCoverageValidationRequest({
+      isSubmitting: Boolean(validationSubmitGuardRef.current[selectedBlockValidationKey]),
+      validationPhase: selectedBlockValidationState.phase,
+      isValidated: selectedBlockValidated
+    })) {
+      return
+    }
+
+    const payload = buildCoverageBlockValidationPayload(
+      selectedBlock,
+      selectedBlockRoutePlan,
+      {
+        depotOrigin: planView?.depotOrigin || null,
+        predictionRunCode: planView?.predictionRunCode || null
+      }
+    )
+    const requestScopeKey = selectedBlockValidationKey
+    const requestId = Number(validationRequestIdsRef.current[requestScopeKey] || 0) + 1
+
+    validationSubmitGuardRef.current[requestScopeKey] = true
+    validationRequestIdsRef.current[requestScopeKey] = requestId
+    setValidationStateByBlockKey(current => ({
+      ...current,
+      [requestScopeKey]: {
+        phase: 'validating',
+        message: null,
+        error: null,
+        tourneeCode: null
+      }
+    }))
+
+    try {
+      const response = await axios.post(
+        `${API_URL}/api/tournees/coverage-plan/validate`,
+        payload,
+        {
+          timeout: VALIDATION_REQUEST_TIMEOUT_MS
+        }
+      )
+
+      const shouldApply = shouldApplyCoverageValidationResponse({
+        requestId,
+        activeRequestId: validationRequestIdsRef.current[requestScopeKey],
+        requestScopeKey,
+        activeScopeKey: requestScopeKey,
+        isMounted: mountedRef.current
+      })
+      if (!shouldApply) {
+        return
+      }
+
+      validationSubmitGuardRef.current[requestScopeKey] = false
+      setValidationStateByBlockKey(current => ({
+        ...current,
+        [requestScopeKey]: {
+          phase: 'success',
+          message: response.data?.message || 'Tournee validee.',
+          error: null,
+          tourneeCode: String(response.data?.tournee_code || '').trim() || null
+        }
+      }))
+    } catch (requestError) {
+      const shouldApply = shouldApplyCoverageValidationResponse({
+        requestId,
+        activeRequestId: validationRequestIdsRef.current[requestScopeKey],
+        requestScopeKey,
+        activeScopeKey: requestScopeKey,
+        isMounted: mountedRef.current
+      })
+      if (!shouldApply) {
+        return
+      }
+
+      validationSubmitGuardRef.current[requestScopeKey] = false
+      setValidationStateByBlockKey(current => ({
+        ...current,
+        [requestScopeKey]: {
+          ...current[requestScopeKey],
+          phase: 'error',
+          message: null,
+          error: requestError?.response?.data?.message || requestError?.response?.data?.error || requestError?.message || 'Erreur inattendue pendant la validation de la tournee.',
+          tourneeCode: null
+        }
+      }))
+    }
+  }
+
   return (
     <div style={{ display: 'grid', gap: 20 }}>
       <section
@@ -840,7 +1048,7 @@ export default function CoveragePlanner() {
         }}
       >
         <div style={{ marginBottom: 18 }}>
-          <h2 style={{ margin: 0, fontSize: 24, color: '#16324f' }}>Plan de couverture</h2>
+          <h2 style={{ margin: 0, fontSize: 24, color: '#16324f' }}>Plan de Recouvrement</h2>
           <p style={{ margin: '8px 0 0', color: '#5f7389', lineHeight: 1.6 }}>
             La frequence de visite reste fixe a {DEFAULT_COVERAGE_VISIT_FREQUENCY_DAYS} jours. Les clients actifs sont charges automatiquement selon les commerciaux utilises, sans liste technique ni selection manuelle massive.
           </p>
@@ -876,6 +1084,19 @@ export default function CoveragePlanner() {
           </label>
 
           <label style={{ display: 'grid', gap: 6 }}>
+            <span style={{ fontSize: 13, color: '#516579' }}>Objectif de collecte sur la periode (DT)</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={filters.target_collection_amount}
+              placeholder="Optionnel"
+              onChange={event => setFilters(current => ({ ...current, target_collection_amount: event.target.value }))}
+              style={{ border: '1px solid #c8d4df', borderRadius: 12, padding: '12px 14px' }}
+            />
+          </label>
+
+          <label style={{ display: 'grid', gap: 6 }}>
             <span style={{ fontSize: 13, color: '#516579' }}>Minimum clients</span>
             <input
               type="number"
@@ -900,18 +1121,6 @@ export default function CoveragePlanner() {
             />
           </label>
 
-          <label style={{ display: 'grid', gap: 6 }}>
-            <span style={{ fontSize: 13, color: '#516579' }}>CA minimum journalier</span>
-            <input
-              type="number"
-              min="0"
-              step="0.1"
-              value={filters.min_daily_ca_per_commercial}
-              placeholder="Optionnel"
-              onChange={event => setFilters(current => ({ ...current, min_daily_ca_per_commercial: event.target.value }))}
-              style={{ border: '1px solid #c8d4df', borderRadius: 12, padding: '12px 14px' }}
-            />
-          </label>
         </div>
 
         <div
@@ -1183,18 +1392,14 @@ export default function CoveragePlanner() {
             <MetricCard label="Charge maximale" value={formatInteger(planView.loadStats.max)} />
             <MetricCard label="Activite de vente historique - proxy" value={formatInteger(planView.summary.salesActivityProxyTotal)} />
             <MetricCard label="Charge planifiee / proxy" value={formatDecimal(planView.summary.plannedToSalesProxyRatio || 0, 2)} />
-            <MetricCard
-              label={planView.summary.predictedCaIsComplete ? 'CA prevu' : 'CA prevu partiel'}
-              value={formatNullableCurrency(planView.summary.totalPredictedCa)}
-              helper={planView.summary.predictedCaUnknownCount > 0
-                ? `${formatInteger(planView.summary.predictedCaUnknownCount)} client(s) sans estimation CA`
-                : null}
-            />
-            <MetricCard
-              label="Deficit total"
-              value={formatNullableCurrency(planView.summary.totalCaShortfall)}
-              tone={planView.summary.totalCaShortfall == null ? null : summaryTone(planView.summary.totalCaShortfall, true)}
-            />
+            {Array.isArray(planView.collectionTargetKpis) ? planView.collectionTargetKpis.map(metric => (
+              <MetricCard
+                key={metric.label}
+                label={metric.label}
+                value={metric.value}
+                tone={metric.tone || null}
+              />
+            )) : null}
             <MetricCard label="Distance estimee" value={formatDistanceKm(planView.summary.totalDistanceKm)} />
             <MetricCard label="Solveur" value={planView.summary.solverStatus || '-'} />
           </div>
@@ -1259,9 +1464,9 @@ export default function CoveragePlanner() {
                           Zone principale : {selectedBlockHeader.zoneLabel}
                         </div>
                       ) : null}
-                      {selectedBlock.predicted_ca_unknown_count > 0 || selectedBlock.purchase_prediction_unknown_count > 0 || selectedBlock.recovery_data_unknown_count > 0 ? (
+                      {selectedBlock.recovery_data_unknown_count > 0 ? (
                         <div style={{ color: '#8a5b18', fontSize: 12 }}>
-                          {formatInteger(selectedBlock.predicted_ca_unknown_count)} client(s) sans estimation CA
+                          {formatInteger(selectedBlock.recovery_data_unknown_count)} client(s) avec donnees recouvrement incompletes
                         </div>
                       ) : null}
                     </div>
@@ -1269,9 +1474,6 @@ export default function CoveragePlanner() {
                       <span className="coverage-inline-badge">{selectedBlockHeader.clientsLabel}</span>
                       {selectedBlock.recovery_completeness === false ? (
                         <span className="coverage-inline-badge coverage-inline-badge-warn">Collecte partielle</span>
-                      ) : null}
-                      {selectedBlock.purchase_prediction_completeness === false ? (
-                        <span className="coverage-inline-badge coverage-inline-badge-warn">Achat partiel</span>
                       ) : null}
                     </div>
                   </div>
@@ -1284,14 +1486,6 @@ export default function CoveragePlanner() {
                     <div className="coverage-detail-metric">
                       <div className="coverage-detail-metric-label">Encours echu</div>
                       <div className="coverage-detail-metric-value">{selectedBlockHeader.overdueBalanceLabel}</div>
-                    </div>
-                    <div className="coverage-detail-metric">
-                      <div className="coverage-detail-metric-label">Chiffre predit</div>
-                      <div className="coverage-detail-metric-value">{selectedBlockHeader.predictedOrderLabel}</div>
-                    </div>
-                    <div className="coverage-detail-metric">
-                      <div className="coverage-detail-metric-label">Qte recommandee</div>
-                      <div className="coverage-detail-metric-value">{selectedBlockHeader.recommendedQuantityLabel}</div>
                     </div>
                     <div className="coverage-detail-metric">
                       <div className="coverage-detail-metric-label">Distance totale</div>
@@ -1312,6 +1506,78 @@ export default function CoveragePlanner() {
                       <div className="coverage-detail-metric-value">{formatInteger(selectedBlockHeader.gpsStats.unavailable)}</div>
                     </div>
                   </div>
+
+                  {selectedBlockHasClients ? (
+                    <div
+                      style={{
+                        display: 'grid',
+                        gap: 12,
+                        border: '1px solid #d7e0ea',
+                        borderRadius: 16,
+                        padding: 16,
+                        background: '#f8fafc'
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <div>
+                          <div style={{ fontSize: 15, fontWeight: 700, color: '#16324f' }}>Validation de la tournee</div>
+                          <div style={{ marginTop: 4, fontSize: 13, color: '#5f7389' }}>
+                            Enregistre ce bloc dans la base sans quitter la navigation courante.
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleValidateSelectedBlock}
+                          disabled={validationButtonDisabled}
+                          style={{
+                            border: 'none',
+                            borderRadius: 12,
+                            padding: '12px 16px',
+                            background: validationButtonDisabled ? '#94a3b8' : '#0d6efd',
+                            color: '#ffffff',
+                            fontWeight: 700,
+                            cursor: validationButtonDisabled ? 'not-allowed' : 'pointer'
+                          }}
+                        >
+                          {validationButtonLabel}
+                        </button>
+                      </div>
+
+                      {selectedBlockValidationState.tourneeCode ? (
+                        <div style={{ fontSize: 13, color: '#516579' }}>
+                          Code tournee : {selectedBlockValidationState.tourneeCode}
+                        </div>
+                      ) : null}
+
+                      {selectedBlockValidationState.message ? (
+                        <div
+                          style={{
+                            border: '1px solid #a7f3d0',
+                            background: '#ecfdf5',
+                            color: '#047857',
+                            borderRadius: 12,
+                            padding: 12
+                          }}
+                        >
+                          {selectedBlockValidationState.message}
+                        </div>
+                      ) : null}
+
+                      {selectedBlockValidationState.error ? (
+                        <div
+                          style={{
+                            border: '1px solid #fecaca',
+                            background: '#fef2f2',
+                            color: '#b91c1c',
+                            borderRadius: 12,
+                            padding: 12
+                          }}
+                        >
+                          {selectedBlockValidationState.error}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
 
                   <div className="coverage-detail-grid">
                     <CoverageTourClientTable block={selectedBlock} />

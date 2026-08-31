@@ -15,15 +15,39 @@ function roundScore(value) {
 
 function parseSqlDate(value) {
   if (!value) return null
-  const datePart = String(value).slice(0, 10)
-  const [year, month, day] = datePart.split('-').map(Number)
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null
+    return new Date(Date.UTC(
+      value.getFullYear(),
+      value.getMonth(),
+      value.getDate()
+    ))
+  }
+  if (typeof value !== 'string') return null
+  const match = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T]\d{2}:\d{2}:\d{2})?$/)
+  if (!match) return null
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
   if (!year || !month || !day) return null
-  return new Date(Date.UTC(year, month - 1, day))
+  const parsed = new Date(Date.UTC(year, month - 1, day))
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month - 1 ||
+    parsed.getUTCDate() !== day
+  ) {
+    return null
+  }
+  return parsed
 }
 
 function formatSqlDate(value) {
   if (!(value instanceof Date) || Number.isNaN(value.getTime())) return null
   return value.toISOString().slice(0, 10)
+}
+
+function normalizeSqlDate(value) {
+  return formatSqlDate(parseSqlDate(value))
 }
 
 function diffDays(dateA, dateB) {
@@ -235,6 +259,211 @@ function buildDefaultProfile(clientRow = {}) {
   }
 }
 
+function hasFiniteRecoveryNumber(value) {
+  return value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
+}
+
+function compareRecoveryProfileEntries(leftEntry, rightEntry) {
+  const leftProfile = leftEntry?.profile || leftEntry || {}
+  const rightProfile = rightEntry?.profile || rightEntry || {}
+
+  const leftCode = normalizeExactClientCode(leftProfile.client_code) || ''
+  const rightCode = normalizeExactClientCode(rightProfile.client_code) || ''
+  const byCode = leftCode.localeCompare(rightCode)
+  if (byCode !== 0) return byCode
+
+  const leftId = normalizeClientId(leftProfile.client_id) || ''
+  const rightId = normalizeClientId(rightProfile.client_id) || ''
+  const byId = leftId.localeCompare(rightId)
+  if (byId !== 0) return byId
+
+  const leftReason = leftEntry?.reason || ''
+  const rightReason = rightEntry?.reason || ''
+  const byReason = leftReason.localeCompare(rightReason)
+  if (byReason !== 0) return byReason
+
+  const leftExpected = String(leftProfile?.payment_behavior?.expected_next_payment_date || '')
+  const rightExpected = String(rightProfile?.payment_behavior?.expected_next_payment_date || '')
+  const byExpected = leftExpected.localeCompare(rightExpected)
+  if (byExpected !== 0) return byExpected
+
+  const leftDue = Number(leftProfile?.credit?.due_amount || 0)
+  const rightDue = Number(rightProfile?.credit?.due_amount || 0)
+  if (leftDue !== rightDue) return leftDue - rightDue
+
+  const leftBalance = Number(leftProfile?.credit?.total_balance || 0)
+  const rightBalance = Number(rightProfile?.credit?.total_balance || 0)
+  if (leftBalance !== rightBalance) return leftBalance - rightBalance
+
+  return 0
+}
+
+function isRecoveryProfileRecoverable(profile = {}, strictMode = true) {
+  const dueAmount = Number(profile.credit?.due_amount || 0)
+  const effectiveDueBalance = Number(profile.legacy?.effective_due_balance || 0)
+  const daysSinceOldestDebt = profile.legacy?.days_since_oldest_debt
+  const graceDays = Math.max(2, Number(profile.legacy?.delai_paiement || 0))
+  const daysSinceLastSale = profile.legacy?.days_since_last_sale
+  const daysSinceLastPayment = profile.legacy?.days_since_last_payment
+  const daysToDue = Number(profile.legacy?.days_to_due || 0)
+  const isDueToday = Number(profile.legacy?.is_due_today || 0) === 1
+  const severeOverdueBalance = Number(profile.legacy?.severe_overdue_balance || 0)
+  const plafondCredit = Number(profile.legacy?.plafond_credit || 0)
+  const selectedDueBalance = strictMode ? dueAmount : effectiveDueBalance
+
+  if (selectedDueBalance <= 0) {
+    return false
+  }
+
+  if (strictMode) {
+    if (daysSinceOldestDebt != null && daysSinceOldestDebt < RECOVERY_MIN_DEBT_DAYS) {
+      return false
+    }
+
+    if (daysSinceOldestDebt != null && daysSinceOldestDebt < graceDays) {
+      return false
+    }
+
+    if (daysSinceLastSale != null && daysSinceLastSale < Math.max(RECOVERY_MIN_SALE_GAP_DAYS, Math.min(graceDays, 7))) {
+      return false
+    }
+
+    if (daysSinceLastPayment != null && daysSinceLastPayment < RECOVERY_MIN_PAYMENT_GAP_DAYS) {
+      return false
+    }
+
+    return dueAmount > 0
+  }
+
+  const urgentExposure = selectedDueBalance >= Math.max(150, plafondCredit * 0.35)
+  const canVisitToday = isDueToday || severeOverdueBalance > 0 || urgentExposure
+
+  if (!canVisitToday) {
+    return false
+  }
+
+  if (daysSinceLastPayment != null && daysSinceLastPayment < 1) {
+    return false
+  }
+
+  if (daysSinceLastSale != null && daysSinceLastSale < 1) {
+    return false
+  }
+
+  return daysToDue >= 0
+}
+
+function classifyRecoveryProfilesForPeriod({
+  profiles = [],
+  startDate,
+  endDate
+} = {}) {
+  const normalizedStartDate = formatSqlDate(parseSqlDate(startDate))
+  const normalizedEndDate = formatSqlDate(parseSqlDate(endDate))
+
+  if (!normalizedStartDate || !normalizedEndDate) {
+    throw new Error('classifyRecoveryProfilesForPeriod requires valid startDate and endDate.')
+  }
+  if (normalizedStartDate > normalizedEndDate) {
+    throw new Error('classifyRecoveryProfilesForPeriod requires startDate to be on or before endDate.')
+  }
+
+  const reasonCounts = Object.create(null)
+  const eligibleEntries = []
+  const excludedEntries = []
+
+  function registerDecision(bucket, profile, reason) {
+    reasonCounts[reason] = (reasonCounts[reason] || 0) + 1
+    bucket.push({ profile, reason })
+  }
+
+  ;(Array.isArray(profiles) ? profiles : []).forEach(profile => {
+    const historicalCodeStatus = profile?.diagnostics?.historical_code_status
+    const clientId = normalizeClientId(profile?.client_id)
+    const clientCode = normalizeExactClientCode(profile?.client_code)
+    const hasExactIdentity = Boolean(clientId && clientCode) &&
+      historicalCodeStatus !== 'missing_client_code' &&
+      historicalCodeStatus !== 'ambiguous_exact_code'
+
+    if (!hasExactIdentity) {
+      registerDecision(excludedEntries, profile, 'missing_exact_identity')
+      return
+    }
+
+    const rawTotalBalance = profile?.credit?.total_balance
+    const rawDueAmount = profile?.credit?.due_amount
+    const rawExpectedPaymentDate = profile?.payment_behavior?.expected_next_payment_date
+    const hasTotalBalance = hasFiniteRecoveryNumber(rawTotalBalance)
+    const hasDueAmount = hasFiniteRecoveryNumber(rawDueAmount)
+    const hasExpectedPaymentDate = rawExpectedPaymentDate !== null &&
+      rawExpectedPaymentDate !== undefined &&
+      String(rawExpectedPaymentDate).trim() !== ''
+
+    if (!hasTotalBalance || (!hasDueAmount && !hasExpectedPaymentDate)) {
+      registerDecision(excludedEntries, profile, 'missing_recovery_data')
+      return
+    }
+
+    const totalBalance = Number(rawTotalBalance)
+    if (!(totalBalance > 0)) {
+      registerDecision(excludedEntries, profile, 'non_positive_total_balance')
+      return
+    }
+
+    const dueAmount = hasDueAmount ? Number(rawDueAmount) : 0
+    if (dueAmount > 0) {
+      registerDecision(eligibleEntries, profile, 'positive_due_amount')
+      return
+    }
+
+    const relaxedRecoverable = isRecoveryProfileRecoverable(profile, false)
+
+    const normalizedExpectedPaymentDate = formatSqlDate(parseSqlDate(rawExpectedPaymentDate))
+    if (!normalizedExpectedPaymentDate) {
+      if (relaxedRecoverable) {
+        registerDecision(eligibleEntries, profile, 'positive_total_balance_relaxed')
+        return
+      }
+      registerDecision(excludedEntries, profile, 'missing_recovery_data')
+      return
+    }
+
+    if (normalizedExpectedPaymentDate < normalizedStartDate) {
+      registerDecision(eligibleEntries, profile, 'expected_payment_overdue')
+      return
+    }
+
+    if (normalizedExpectedPaymentDate <= normalizedEndDate) {
+      registerDecision(eligibleEntries, profile, 'expected_payment_in_period')
+      return
+    }
+
+    if (relaxedRecoverable) {
+      registerDecision(eligibleEntries, profile, 'positive_total_balance_relaxed')
+      return
+    }
+
+    registerDecision(excludedEntries, profile, 'payment_due_after_period')
+  })
+
+  eligibleEntries.sort(compareRecoveryProfileEntries)
+  excludedEntries.sort(compareRecoveryProfileEntries)
+
+  return {
+    eligibleProfiles: eligibleEntries.map(entry => entry.profile),
+    excludedProfiles: excludedEntries.map(entry => ({
+      client_id: normalizeClientId(entry.profile?.client_id),
+      client_code: normalizeExactClientCode(entry.profile?.client_code),
+      reason: entry.reason,
+      profile: entry.profile
+    })),
+    reasonCounts,
+    eligibleCount: eligibleEntries.length,
+    excludedCount: excludedEntries.length,
+    totalCount: eligibleEntries.length + excludedEntries.length
+  }
+}
+
 async function loadRecoveryProfiles({
   clientIds = [],
   referenceDate,
@@ -418,7 +647,7 @@ async function loadRecoveryProfiles({
       creditDocsByClientId,
       row.client_code,
       {
-        credit_date: row.credit_date,
+        credit_date: normalizeSqlDate(row.credit_date),
         doc_solde: Number(row.doc_solde || 0),
         doc_credit_amount: Number(row.doc_credit_amount || 0)
       },
@@ -430,7 +659,7 @@ async function loadRecoveryProfiles({
     const exactCode = normalizeExactClientCode(row.client_code)
     const matchedClientIds = clientIdsByCode.get(exactCode) || []
     if (matchedClientIds.length !== 1) return
-    lastSalesByClientId.set(matchedClientIds[0], row.last_sale_date || null)
+    lastSalesByClientId.set(matchedClientIds[0], normalizeSqlDate(row.last_sale_date))
   })
 
   ;(paymentRows || []).forEach(row => {
@@ -439,7 +668,7 @@ async function loadRecoveryProfiles({
       row.client_code,
       {
         payment_id: normalizeClientId(row.payment_id),
-        payment_date: row.payment_date,
+        payment_date: normalizeSqlDate(row.payment_date),
         payment_amount: Number(row.payment_amount || 0),
         payment_ref: row.payment_ref ? String(row.payment_ref).trim() : null,
         codeAnnulation: row.codeAnnulation,
@@ -684,59 +913,7 @@ function buildRecoveryPlanRowsFromProfiles({
     .filter(item => item.profile && item.profile.client_id)
 
   function isRecoverable(item, strictMode) {
-    const profile = item.profile
-    const dueAmount = Number(profile.credit?.due_amount || 0)
-    const effectiveDueBalance = Number(profile.legacy?.effective_due_balance || 0)
-    const daysSinceOldestDebt = profile.legacy?.days_since_oldest_debt
-    const graceDays = Math.max(2, Number(profile.legacy?.delai_paiement || 0))
-    const daysSinceLastSale = profile.legacy?.days_since_last_sale
-    const daysSinceLastPayment = profile.legacy?.days_since_last_payment
-    const daysToDue = Number(profile.legacy?.days_to_due || 0)
-    const isDueToday = Number(profile.legacy?.is_due_today || 0) === 1
-    const severeOverdueBalance = Number(profile.legacy?.severe_overdue_balance || 0)
-    const plafondCredit = Number(profile.legacy?.plafond_credit || 0)
-    const selectedDueBalance = strictMode ? dueAmount : effectiveDueBalance
-
-    if (selectedDueBalance <= 0) {
-      return false
-    }
-
-    if (strictMode) {
-      if (daysSinceOldestDebt != null && daysSinceOldestDebt < RECOVERY_MIN_DEBT_DAYS) {
-        return false
-      }
-
-      if (daysSinceOldestDebt != null && daysSinceOldestDebt < graceDays) {
-        return false
-      }
-
-      if (daysSinceLastSale != null && daysSinceLastSale < Math.max(RECOVERY_MIN_SALE_GAP_DAYS, Math.min(graceDays, 7))) {
-        return false
-      }
-
-      if (daysSinceLastPayment != null && daysSinceLastPayment < RECOVERY_MIN_PAYMENT_GAP_DAYS) {
-        return false
-      }
-
-      return dueAmount > 0
-    }
-
-    const urgentExposure = selectedDueBalance >= Math.max(150, plafondCredit * 0.35)
-    const canVisitToday = isDueToday || severeOverdueBalance > 0 || urgentExposure
-
-    if (!canVisitToday) {
-      return false
-    }
-
-    if (daysSinceLastPayment != null && daysSinceLastPayment < 1) {
-      return false
-    }
-
-    if (daysSinceLastSale != null && daysSinceLastSale < 1) {
-      return false
-    }
-
-    return daysToDue >= 0
+    return isRecoveryProfileRecoverable(item.profile, strictMode)
   }
 
   function buildRow(item, selectedDueBalance, maxDueBalance, maxLikelyRecovery, maxSevereOverdue) {
@@ -856,6 +1033,7 @@ module.exports = {
   RECOVERY_PAYMENT_SOURCE,
   buildRecoveryNonCancelledDocumentSqlCondition,
   buildValidRecoveryPaymentSqlCondition,
+  classifyRecoveryProfilesForPeriod,
   buildRecoveryPlanRowsFromProfiles,
   computeSmartRecoveryScore,
   estimateLikelyRecoveryAmount,

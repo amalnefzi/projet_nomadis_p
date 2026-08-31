@@ -5,6 +5,7 @@ const {
   buildRecoveryNonCancelledDocumentSqlCondition,
   buildRecoveryPlanRowsFromProfiles,
   buildValidRecoveryPaymentSqlCondition,
+  classifyRecoveryProfilesForPeriod,
   loadRecoveryProfiles
 } = require('../coverage_recovery_profiles')
 
@@ -30,6 +31,29 @@ function createQueryRowsMock({
     }
 
     throw new Error(`Unexpected SQL in test mock: ${sql.slice(0, 80)}`)
+  }
+}
+
+function createRecoveryProfile(overrides = {}) {
+  const clientId = overrides.client_id ?? 'client-1'
+  const clientCode = overrides.client_code ?? 'C-001'
+  return {
+    client_id: clientId,
+    client_code: clientCode,
+    credit: {
+      total_balance: 100,
+      due_amount: 0,
+      ...(overrides.credit || {})
+    },
+    payment_behavior: {
+      expected_next_payment_date: null,
+      ...(overrides.payment_behavior || {})
+    },
+    diagnostics: {
+      historical_code_status: 'matched',
+      ...(overrides.diagnostics || {})
+    },
+    ...overrides
   }
 }
 
@@ -60,6 +84,31 @@ test('distinct client ids keep exact historical codes 00152 and 152 separate', a
   assert.equal(byId.get('2').credit.total_balance, 200)
   assert.equal(byId.get('1').payment_behavior.total_paid_history, 40)
   assert.equal(byId.get('2').payment_behavior.total_paid_history, 90)
+})
+
+test('javascript Date credit rows keep overdue debt and earliest due date without timezone drift', async () => {
+  const [profile] = await loadRecoveryProfiles({
+    clientIds: ['3330'],
+    referenceDate: '2026-08-30',
+    clientRows: [
+      { client_id: '3330', nbr_client: '00003330', plafond: 20000, delai_paiement: 0 }
+    ],
+    queryRows: createQueryRowsMock({
+      creditRows: [
+        {
+          client_code: '00003330',
+          credit_date: new Date('2026-06-01'),
+          doc_solde: 14565.052,
+          doc_credit_amount: 14565.052
+        }
+      ]
+    })
+  })
+
+  assert.equal(profile.credit.oldest_credit_date, '2026-06-01')
+  assert.equal(profile.credit.last_credit_date, '2026-06-01')
+  assert.equal(profile.credit.due_amount > 0, true)
+  assert.equal(profile.credit.days_past_due > 0, true)
 })
 
 test('cancelled credit documents are excluded by the SQL filter and do not change balances', async () => {
@@ -263,4 +312,134 @@ test('legacy recouvrement rows remain compatible with the historical /api/tourne
   assert.ok(Object.hasOwn(rows[0], 'encours_total'))
   assert.ok(Object.hasOwn(rows[0], 'last_payment_date'))
   assert.ok(Object.hasOwn(rows[0], 'avg_payment_amount'))
+})
+
+test('classifyRecoveryProfilesForPeriod keeps already due debt eligible', () => {
+  const result = classifyRecoveryProfilesForPeriod({
+    profiles: [
+      createRecoveryProfile({
+        client_id: 'due-1',
+        client_code: '0100',
+        credit: { total_balance: 320, due_amount: 320 }
+      })
+    ],
+    startDate: '2026-08-01',
+    endDate: '2026-08-31'
+  })
+
+  assert.equal(result.eligibleCount, 1)
+  assert.equal(result.excludedCount, 0)
+  assert.equal(result.eligibleProfiles[0].client_code, '0100')
+  assert.equal(result.reasonCounts.positive_due_amount, 1)
+})
+
+test('classifyRecoveryProfilesForPeriod keeps expected payments in period or already overdue eligible', () => {
+  const result = classifyRecoveryProfilesForPeriod({
+    profiles: [
+      createRecoveryProfile({
+        client_id: 'window-1',
+        client_code: '0200',
+        payment_behavior: { expected_next_payment_date: '2026-08-20' }
+      }),
+      createRecoveryProfile({
+        client_id: 'late-1',
+        client_code: '0300',
+        payment_behavior: { expected_next_payment_date: '2026-07-28' }
+      })
+    ],
+    startDate: '2026-08-01',
+    endDate: '2026-08-31'
+  })
+
+  assert.equal(result.eligibleCount, 2)
+  assert.equal(result.excludedCount, 0)
+  assert.deepEqual(
+    result.eligibleProfiles.map(profile => profile.client_code),
+    ['0200', '0300']
+  )
+  assert.equal(result.reasonCounts.expected_payment_in_period, 1)
+  assert.equal(result.reasonCounts.expected_payment_overdue, 1)
+})
+
+test('classifyRecoveryProfilesForPeriod excludes future, zero-balance and missing-data profiles with explicit reasons', () => {
+  const result = classifyRecoveryProfilesForPeriod({
+    profiles: [
+      createRecoveryProfile({
+        client_id: 'future-1',
+        client_code: '0400',
+        payment_behavior: { expected_next_payment_date: '2026-09-15' }
+      }),
+      createRecoveryProfile({
+        client_id: 'zero-1',
+        client_code: '0500',
+        credit: { total_balance: 0, due_amount: 0 }
+      }),
+      createRecoveryProfile({
+        client_id: 'missing-1',
+        client_code: '0600',
+        credit: { total_balance: null, due_amount: null },
+        payment_behavior: { expected_next_payment_date: null }
+      })
+    ],
+    startDate: '2026-08-01',
+    endDate: '2026-08-31'
+  })
+
+  assert.equal(result.eligibleCount, 0)
+  assert.equal(result.excludedCount, 3)
+  assert.deepEqual(
+    result.excludedProfiles.map(profile => [profile.client_code, profile.reason]),
+    [
+      ['0400', 'payment_due_after_period'],
+      ['0500', 'non_positive_total_balance'],
+      ['0600', 'missing_recovery_data']
+    ]
+  )
+  assert.equal(result.reasonCounts.payment_due_after_period, 1)
+  assert.equal(result.reasonCounts.non_positive_total_balance, 1)
+  assert.equal(result.reasonCounts.missing_recovery_data, 1)
+})
+
+test('classifyRecoveryProfilesForPeriod preserves exact identities 00152 and 152 and remains deterministic', () => {
+  const profiles = [
+    createRecoveryProfile({
+      client_id: 'id-152',
+      client_code: '152',
+      payment_behavior: { expected_next_payment_date: '2026-08-18' }
+    }),
+    createRecoveryProfile({
+      client_id: 'id-00152',
+      client_code: '00152',
+      payment_behavior: { expected_next_payment_date: '2026-08-18' }
+    })
+  ]
+
+  const forward = classifyRecoveryProfilesForPeriod({
+    profiles,
+    startDate: '2026-08-01',
+    endDate: '2026-08-31'
+  })
+  const reversed = classifyRecoveryProfilesForPeriod({
+    profiles: [...profiles].reverse(),
+    startDate: '2026-08-01',
+    endDate: '2026-08-31'
+  })
+
+  assert.deepEqual(
+    forward.eligibleProfiles.map(profile => [profile.client_id, profile.client_code]),
+    [
+      ['id-00152', '00152'],
+      ['id-152', '152']
+    ]
+  )
+  assert.deepEqual(
+    reversed.eligibleProfiles.map(profile => [profile.client_id, profile.client_code]),
+    [
+      ['id-00152', '00152'],
+      ['id-152', '152']
+    ]
+  )
+  assert.deepEqual(forward.reasonCounts, reversed.reasonCounts)
+  assert.equal(forward.totalCount, reversed.totalCount)
+  assert.equal(forward.excludedCount, reversed.excludedCount)
 })
