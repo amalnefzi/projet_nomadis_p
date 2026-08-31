@@ -1,0 +1,177 @@
+[dotenv@17.3.1] injecting env (14) from .env -- tip: ⚙️  load multiple .env files with { path: ['.env.local', '.env'] }
+Serveur API pret sur http://localhost:5000
+Connecte a la base de donnees dist_utic1 (127.0.0.1:3306) !
+Le reentrainement automatique est desactive dans server.js. Utilisez le scheduler systeme.
+Sales V2 automatic learning scheduler enabled (interval=1800000ms, startup_delay=15000ms).
+Tables support mouvements verifiees.
+Table client_visits verifiee.
+Table feedback IA verifiee.
+Tables logging IA verifiees.
+Table sales_v2_visit_feedback verifiee.
+Next Best Visit profiles already ready; startup rebuild skipped.
+Sales V2 automatic learning waiting for new valid feedback.
+[COVERAGE_PERF] request_id=e20bd887-bd62-43e4-abce-7a5c74463cd8 stage=load_active_clients duration_ms=86
+[COVERAGE_PERF] request_id=e20bd887-bd62-43e4-abce-7a5c74463cd8 stage=load_client_history duration_ms=15780
+[COVERAGE_HISTORY_CACHE] type=client_history status=miss key=934834565bd169d4 build_ms=16067
+[COVERAGE_PERF] request_id=e20bd887-bd62-43e4-abce-7a5c74463cd8 stage=load_constraints duration_ms=4
+[COVERAGE_PERF] request_id=e20bd887-bd62-43e4-abce-7a5c74463cd8 stage=load_validated_visits duration_ms=2
+[COVERAGE_HISTORY_CACHE] type=validated_visit_profiles status=miss key=aa50d8fab7089cac build_ms=10
+[COVERAGE_PERF] request_id=e20bd887-bd62-43e4-abce-7a5c74463cd8 stage=load_sales_profiles duration_ms=3857
+[COVERAGE_HISTORY_CACHE] type=sales_profiles status=miss key=0f9b161ffd763427 build_ms=3863
+[COVERAGE_PERF] request_id=e20bd887-bd62-43e4-abce-7a5c74463cd8 stage=build_slots duration_ms=3
+[COVERAGE_PERF] request_id=e20bd887-bd62-43e4-abce-7a5c74463cd8 stage=total duration_ms=20184
+[COVERAGE_PERF] request_id=1671d335-b5de-45fc-a651-78cdf22c7d3e stage=load_active_clients duration_ms=87
+[COVERAGE_HISTORY_CACHE] type=client_history status=hit_memory key=934834565bd169d4 age_ms=17808
+[COVERAGE_PERF] request_id=1671d335-b5de-45fc-a651-78cdf22c7d3e stage=load_constraints duration_ms=1
+[COVERAGE_HISTORY_CACHE] type=sales_profiles status=hit_memory key=0f9b161ffd763427 age_ms=13841
+[COVERAGE_HISTORY_CACHE] type=validated_visit_profiles status=hit_memory key=aa50d8fab7089cac age_ms=17701
+[COVERAGE_PERF] request_id=1671d335-b5de-45fc-a651-78cdf22c7d3e stage=build_slots duration_ms=1
+[COVERAGE_PERF] request_id=1671d335-b5de-45fc-a651-78cdf22c7d3e stage=total duration_ms=260
+[COVERAGE_PERF] request_id=00da539c-fc53-4757-9767-eac832d14b6f stage=load_active_clients duration_ms=264
+[COVERAGE_HISTORY_CACHE] type=client_history status=hit_memory key=934834565bd169d4 age_ms=17989
+[COVERAGE_PERF] request_id=00da539c-fc53-4757-9767-eac832d14b6f stage=load_constraints duration_ms=0
+[COVERAGE_HISTORY_CACHE] type=sales_profiles status=hit_memory key=0f9b161ffd763427 age_ms=13993
+[COVERAGE_HISTORY_CACHE] type=validated_visit_profiles status=hit_memory key=aa50d8fab7089cac age_ms=17854
+[COVERAGE_PERF] request_id=00da539c-fc53-4757-9767-eac832d14b6f stage=build_slots duration_ms=1
+[COVERAGE_PERF] request_id=00da539c-fc53-4757-9767-eac832d14b6f stage=total duration_ms=402
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=load_active_clients duration_ms=118
+[COVERAGE_HISTORY_CACHE] type=client_history status=hit_memory key=934834565bd169d4 age_ms=73488
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=load_active_clients duration_ms=302
+[COVERAGE_HISTORY_CACHE] type=client_history status=hit_memory key=934834565bd169d4 age_ms=73653
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=load_constraints duration_ms=0
+[COVERAGE_HISTORY_CACHE] type=sales_profiles status=hit_memory key=0f9b161ffd763427 age_ms=69775
+[COVERAGE_HISTORY_CACHE] type=validated_visit_profiles status=hit_memory key=aa50d8fab7089cac age_ms=73635
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=build_slots duration_ms=1
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=build_client_payload duration_ms=1
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=load_constraints duration_ms=0
+[COVERAGE_HISTORY_CACHE] type=sales_profiles status=hit_memory key=0f9b161ffd763427 age_ms=69808
+[COVERAGE_HISTORY_CACHE] type=validated_visit_profiles status=hit_memory key=aa50d8fab7089cac age_ms=73668
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=build_slots duration_ms=0
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=build_client_payload duration_ms=0
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=call_python duration_ms=112
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=python_normalization duration_ms=5
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=python_candidates duration_ms=2
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=context_build_records duration_ms=1
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=context_build_key_maps duration_ms=0
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=context_build_client_indexes duration_ms=0
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=context_build_slot_indexes duration_ms=0
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=context_build_score_components duration_ms=0
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=context_build_stop_minutes duration_ms=0
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=context_finalize duration_ms=0
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=python_candidate_context_build duration_ms=2
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=python_solver_build_assignment_records duration_ms=0
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=python_solver_build_candidate_indexes duration_ms=0
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=python_solver_build_visit_order duration_ms=1
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=python_solver_build_statistics duration_ms=0
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=python_solver_total duration_ms=61
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=python_total duration_ms=67
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=serialize_response duration_ms=1
+[COVERAGE_PERF] request_id=78f4bd9e-fc9f-4803-a169-27d150fec376 stage=total duration_ms=666
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=call_python duration_ms=94
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=python_normalization duration_ms=7
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=python_candidates duration_ms=2
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=context_build_records duration_ms=1
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=context_build_key_maps duration_ms=0
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=context_build_client_indexes duration_ms=0
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=context_build_slot_indexes duration_ms=0
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=context_build_score_components duration_ms=0
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=context_build_stop_minutes duration_ms=0
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=context_finalize duration_ms=0
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=python_candidate_context_build duration_ms=1
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=python_solver_build_assignment_records duration_ms=0
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=python_solver_build_candidate_indexes duration_ms=0
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=python_solver_build_visit_order duration_ms=1
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=python_solver_build_statistics duration_ms=0
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=python_solver_total duration_ms=46
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=python_total duration_ms=54
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=serialize_response duration_ms=0
+[COVERAGE_PERF] request_id=d51c8a3a-bb57-46cb-8d97-61bb226111ec stage=total duration_ms=689
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=load_active_clients duration_ms=98
+[COVERAGE_HISTORY_CACHE] type=client_history status=hit_memory key=934834565bd169d4 age_ms=908295
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=load_constraints duration_ms=0
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=load_validated_visits duration_ms=1
+[COVERAGE_HISTORY_CACHE] type=validated_visit_profiles status=miss key=b45deb83c1a938ed build_ms=7
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=load_sales_profiles duration_ms=31725
+[COVERAGE_HISTORY_CACHE] type=sales_profiles status=miss key=9df206f823bdf7c8 build_ms=31732
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=build_slots duration_ms=2
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=build_client_payload duration_ms=4
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=call_python duration_ms=31062
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=python_normalization duration_ms=27
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=python_candidates duration_ms=35
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=context_build_records duration_ms=238
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=context_build_key_maps duration_ms=2
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=context_build_client_indexes duration_ms=1
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=context_build_slot_indexes duration_ms=1
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=context_build_score_components duration_ms=0
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=context_build_stop_minutes duration_ms=9
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=context_finalize duration_ms=0
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=python_candidate_context_build duration_ms=246
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=python_solver_build_assignment_records duration_ms=0
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=python_solver_build_candidate_indexes duration_ms=0
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=python_solver_build_visit_order duration_ms=6
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=python_solver_build_statistics duration_ms=2
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=python_solver_total duration_ms=30948
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=python_total duration_ms=31014
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=serialize_response duration_ms=1
+[COVERAGE_PERF] request_id=80241276-b717-4232-8a75-c3c385064b5a stage=total duration_ms=63530
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=load_active_clients duration_ms=121
+[COVERAGE_HISTORY_CACHE] type=client_history status=hit_memory key=934834565bd169d4 age_ms=980965
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=load_constraints duration_ms=1
+[COVERAGE_HISTORY_CACHE] type=sales_profiles status=hit_memory key=9df206f823bdf7c8 age_ms=40974
+[COVERAGE_HISTORY_CACHE] type=validated_visit_profiles status=hit_memory key=b45deb83c1a938ed age_ms=72705
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=build_slots duration_ms=2
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=build_client_payload duration_ms=1
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=call_python duration_ms=1545
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=python_normalization duration_ms=24
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=python_candidates duration_ms=35
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=context_build_records duration_ms=217
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=context_build_key_maps duration_ms=2
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=context_build_client_indexes duration_ms=1
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=context_build_slot_indexes duration_ms=1
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=context_build_score_components duration_ms=0
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=context_build_stop_minutes duration_ms=8
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=context_finalize duration_ms=0
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=python_candidate_context_build duration_ms=224
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=python_solver_build_assignment_records duration_ms=0
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=python_solver_build_candidate_indexes duration_ms=0
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=python_greedy_total duration_ms=50
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=python_solver_build_visit_order duration_ms=4
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=python_solver_build_statistics duration_ms=2
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=python_solver_total duration_ms=1438
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=python_total duration_ms=1499
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=serialize_response duration_ms=1
+[COVERAGE_PERF] request_id=d4423fbb-94b0-4ed5-a563-e55a699075a0 stage=total duration_ms=2284
+[COVERAGE_VALIDATE] Debut validation -> date=2026-08-31 commercial=1 stops=1
+[COVERAGE_VALIDATE] Succes -> code=coverage-20260831-1 rows=1
+Sales V2 automatic learning waiting for new valid feedback.
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=load_active_clients duration_ms=114
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=load_client_history duration_ms=22126
+[COVERAGE_HISTORY_CACHE] type=client_history status=miss key=94aa7142b06e6a12 build_ms=22414
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=load_constraints duration_ms=0
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=load_validated_visits duration_ms=2
+[COVERAGE_HISTORY_CACHE] type=validated_visit_profiles status=miss key=67c66d9e3a98c60f build_ms=9
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=load_sales_profiles duration_ms=38119
+[COVERAGE_HISTORY_CACHE] type=sales_profiles status=miss key=2d177fdfba019c25 build_ms=38130
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=build_slots duration_ms=2
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=build_client_payload duration_ms=0
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=call_python duration_ms=1842
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=python_normalization duration_ms=27
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=python_candidates duration_ms=42
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=context_build_records duration_ms=230
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=context_build_key_maps duration_ms=2
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=context_build_client_indexes duration_ms=1
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=context_build_slot_indexes duration_ms=1
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=context_build_score_components duration_ms=0
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=context_build_stop_minutes duration_ms=8
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=context_finalize duration_ms=0
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=python_candidate_context_build duration_ms=237
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=python_solver_build_assignment_records duration_ms=0
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=python_solver_build_candidate_indexes duration_ms=0
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=python_greedy_total duration_ms=63
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=python_solver_build_visit_order duration_ms=6
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=python_solver_build_statistics duration_ms=4
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=python_solver_total duration_ms=1700
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=python_total duration_ms=1771
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=serialize_response duration_ms=2
+[COVERAGE_PERF] request_id=090b7628-ff0b-4a1c-a34b-adc3c3abbba5 stage=total duration_ms=63175
+Sales V2 automatic learning waiting for new valid feedback.

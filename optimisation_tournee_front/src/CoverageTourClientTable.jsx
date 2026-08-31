@@ -25,9 +25,6 @@ export default function CoverageTourClientTable({ block }) {
             <th>Client</th>
             <th>Recouvrement</th>
             <th>Collecte prevue</th>
-            <th>Score achat</th>
-            <th>Qte recommandee</th>
-            <th>Chiffre predit</th>
             <th>Zone</th>
             <th>Raisons</th>
           </tr>
@@ -40,7 +37,7 @@ export default function CoverageTourClientTable({ block }) {
                 <div className="coverage-priority-stack">
                   <span>Couverture: {renderPriority(row.coverageUrgency)}</span>
                   <span>Recouvrement: {renderPriority(row.recoveryPriorityScore)}</span>
-                  <span>Achat: {renderPriority(row.purchasePredictionScore)}</span>
+                  <span>Paiement: {renderPriority(row.paymentBehaviorScore)}</span>
                 </div>
               </td>
               <td>
@@ -60,19 +57,6 @@ export default function CoverageTourClientTable({ block }) {
                 </div>
               </td>
               <td>{formatNullableCurrency(row.expectedCollectionAmount)}</td>
-              <td>
-                <div className="coverage-priority-stack">
-                  <span>{renderPriority(row.purchasePredictionScore)}</span>
-                  <span>{row.predictedPurchaseDate || 'Non disponible'}</span>
-                </div>
-              </td>
-              <td>{row.recommendedQuantity == null ? 'Non disponible' : `${formatDecimal(row.recommendedQuantity, 1)} u`}</td>
-              <td>
-                <div className="coverage-priority-stack">
-                  <span>{formatNullableCurrency(row.expectedOrderValue)}</span>
-                  <span>CA slot: {formatNullableCurrency(row.predictedCa)}</span>
-                </div>
-              </td>
               <td>{row.zoneLabel || 'Non disponible'}</td>
               <td>
                 <div className="coverage-reason-list">

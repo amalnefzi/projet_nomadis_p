@@ -45,6 +45,7 @@ const {
 } = require('./coverage_constraints_provider')
 const {
   buildRecoveryPlanRowsFromProfiles,
+  classifyRecoveryProfilesForPeriod,
   loadRecoveryProfiles
 } = require('./coverage_recovery_profiles')
 const {
@@ -1699,7 +1700,8 @@ async function reconcilePredictionFeedbackActualSales({
   }
 }
 
-async function fetchLoggedAiPredictions(requestPayload, loggingContext = {}) {
+async function fetchLoggedAiPredictions(requestPayload, loggingContext = {}, options = {}) {
+  const bypassPersistentCache = Boolean(options?.bypassPersistentCache)
   const purchaseCacheKey = COVERAGE_PURCHASE_CACHE_ENABLED
     ? buildCoveragePurchaseCacheKey({
         requestPayload,
@@ -1709,7 +1711,7 @@ async function fetchLoggedAiPredictions(requestPayload, loggingContext = {}) {
   const cacheKey = purchaseCacheKey || buildPredictionRequestCacheKey(requestPayload)
   const now = Date.now()
 
-  if (purchaseCacheKey) {
+  if (purchaseCacheKey && !bypassPersistentCache) {
     const cachedData = await coveragePurchasePredictionCache.getOrCreate({
       key: purchaseCacheKey,
       type: 'purchase_predictions',
@@ -3150,6 +3152,7 @@ function buildCoveragePlanInputFromQuery(query = {}) {
     max_clients: query.max_clients ?? query.max_visits,
     coverage_window_days: query.coverage_window_days,
     visit_frequency_days: query.visit_frequency_days || query.coverage_frequency_days,
+    target_collection_amount: query.target_collection_amount,
     daily_max_mode: query.daily_max_mode,
     default_max_visits_per_slot: query.default_max_visits_per_slot || query.max_visits,
     min_daily_ca_per_commercial: query.min_daily_ca_per_commercial ?? query.min_daily_ca ?? query.min_total_ca,
@@ -3174,6 +3177,32 @@ function parseOptionalCoverageMaxVisits(rawValue) {
   }
 
   return Math.max(1, Math.min(250, parsed))
+}
+
+function parseCoverageTargetCollectionAmount(rawValue, planningMode) {
+  if (planningMode !== COVERAGE_PLANNING_MODE_RECOVERY) {
+    return { value: undefined }
+  }
+
+  if (rawValue === null || rawValue === undefined) {
+    return { value: null }
+  }
+
+  if (typeof rawValue === 'string' && rawValue.trim() === '') {
+    return { value: null }
+  }
+
+  const parsed = Number(rawValue)
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return {
+      invalidResponse: {
+        status: 'invalid_parameters',
+        message: 'target_collection_amount doit etre un nombre fini superieur ou egal a 0 en mode recovery_coverage.'
+      }
+    }
+  }
+
+  return { value: parsed }
 }
 
 function computeCoverageRecommendedMaxCapacity(clientsToCover, totalSlots) {
@@ -3629,6 +3658,9 @@ function buildCoverageRequestContext(planningContext, strictCaValue) {
     sales_activity_proxy_total: planningContext.salesActivityProxyTotal || 0,
     validated_visit_min_active_days: COVERAGE_VALIDATED_VISIT_MIN_ACTIVE_DAYS,
     min_daily_ca_per_commercial: roundScore(planningContext.minDailyCaPerCommercial),
+    ...(planningContext.planningMode === COVERAGE_PLANNING_MODE_RECOVERY
+      ? { target_collection_amount: planningContext.targetCollectionAmount ?? null }
+      : {}),
     allow_commercial_reassignment: planningContext.allowCommercialReassignment,
     working_days: planningContext.workingDaySelection,
     history_cache_hits: Number(planningContext.historyCacheHits || 0),
@@ -3649,7 +3681,97 @@ function buildCoverageRequestContext(planningContext, strictCaValue) {
   }
 }
 
+function roundCoverageCollectionAmount(value) {
+  if (value === null || value === undefined || value === '') {
+    return null
+  }
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue)) {
+    return null
+  }
+  return Number(numericValue.toFixed(2))
+}
+
+function normalizeRecoveryCollectionTargetContext(planningContext, sourceContext = null, overrides = {}) {
+  const requestedTargetFromRequest = roundCoverageCollectionAmount(planningContext?.targetCollectionAmount)
+  const requestedTargetFromSource = roundCoverageCollectionAmount(sourceContext?.requested_target_collection_amount)
+  const requestedTargetCollectionAmount = requestedTargetFromRequest !== null
+    ? requestedTargetFromRequest
+    : requestedTargetFromSource
+  const hasPositiveTarget = requestedTargetCollectionAmount !== null && requestedTargetCollectionAmount > 0
+
+  if (!hasPositiveTarget) {
+    return {
+      mode: 'full_coverage',
+      requested_target_collection_amount: requestedTargetCollectionAmount,
+      selected_estimated_collection_amount: null,
+      estimated_remaining_amount: null,
+      is_target_reached: null,
+      stop_reason: 'full_coverage'
+    }
+  }
+
+  const normalizedSourceContext = sourceContext && typeof sourceContext === 'object'
+    ? sourceContext
+    : {}
+  const selectedAmountOverride = Object.prototype.hasOwnProperty.call(overrides, 'selected_estimated_collection_amount')
+    ? overrides.selected_estimated_collection_amount
+    : normalizedSourceContext.selected_estimated_collection_amount
+  const remainingAmountOverride = Object.prototype.hasOwnProperty.call(overrides, 'estimated_remaining_amount')
+    ? overrides.estimated_remaining_amount
+    : normalizedSourceContext.estimated_remaining_amount
+  let selectedEstimatedCollectionAmount = roundCoverageCollectionAmount(selectedAmountOverride)
+  let estimatedRemainingAmount = roundCoverageCollectionAmount(remainingAmountOverride)
+
+  if (selectedEstimatedCollectionAmount === null && estimatedRemainingAmount !== null) {
+    selectedEstimatedCollectionAmount = roundCoverageCollectionAmount(
+      Math.max(0, requestedTargetCollectionAmount - estimatedRemainingAmount)
+    )
+  }
+
+  if (estimatedRemainingAmount === null && selectedEstimatedCollectionAmount !== null) {
+    estimatedRemainingAmount = roundCoverageCollectionAmount(
+      Math.max(0, requestedTargetCollectionAmount - selectedEstimatedCollectionAmount)
+    )
+  }
+
+  const isTargetReached = typeof overrides.is_target_reached === 'boolean'
+    ? overrides.is_target_reached
+    : typeof normalizedSourceContext.is_target_reached === 'boolean'
+      ? normalizedSourceContext.is_target_reached
+      : selectedEstimatedCollectionAmount !== null
+        ? selectedEstimatedCollectionAmount >= requestedTargetCollectionAmount
+        : false
+  const stopReason = String(
+    overrides.stop_reason ??
+    normalizedSourceContext.stop_reason ??
+    (isTargetReached ? 'target_reached' : 'target_unreachable')
+  ).trim() || (isTargetReached ? 'target_reached' : 'target_unreachable')
+
+  return {
+    mode: String(normalizedSourceContext.mode || 'target_collection').trim() === 'full_coverage'
+      ? 'full_coverage'
+      : 'target_collection',
+    requested_target_collection_amount: requestedTargetCollectionAmount,
+    selected_estimated_collection_amount: selectedEstimatedCollectionAmount,
+    estimated_remaining_amount: estimatedRemainingAmount,
+    is_target_reached: isTargetReached,
+    stop_reason: stopReason
+  }
+}
+
 function buildCoveragePlannerEmptyResponse(planningContext) {
+  const recoveryEligibilityDiagnostic = planningContext?.recoveryEligibilityDiagnostic
+    ? {
+        population_before_filtering: Number(planningContext.recoveryEligibilityDiagnostic.population_before_filtering || 0),
+        eligible_count: Number(planningContext.recoveryEligibilityDiagnostic.eligible_count || 0),
+        excluded_count: Number(planningContext.recoveryEligibilityDiagnostic.excluded_count || 0),
+        reasonCounts: {
+          ...(planningContext.recoveryEligibilityDiagnostic.reasonCounts || {})
+        }
+      }
+    : null
+
   return {
     status: 'success',
     summary: {
@@ -3689,7 +3811,8 @@ function buildCoveragePlannerEmptyResponse(planningContext) {
       deadline_issues: [],
       ca_issues: [],
       invalid_gps_clients: [],
-      input_duplicate_clients_removed: []
+      input_duplicate_clients_removed: [],
+      ...(recoveryEligibilityDiagnostic ? { recovery_eligibility: recoveryEligibilityDiagnostic } : {})
     },
     depot: SHARED_DEPOT_ORIGIN,
     client_scope: buildCoverageClientScopePayload(
@@ -3698,7 +3821,25 @@ function buildCoveragePlannerEmptyResponse(planningContext) {
     ),
     capacity_precheck: buildCoverageCapacityPrecheck(planningContext),
     request_context: buildCoverageRequestContext(planningContext, planningContext.strictCa),
-    message: `Aucun client actif a couvrir sur la periode analysee. ${buildCoverageSingleVisitDisclaimer(planningContext)}`
+    ...(planningContext?.planningMode === COVERAGE_PLANNING_MODE_RECOVERY
+      ? {
+          collection_target_context: normalizeRecoveryCollectionTargetContext(
+            planningContext,
+            null,
+            Number(planningContext?.targetCollectionAmount || 0) > 0
+              ? {
+                  selected_estimated_collection_amount: 0,
+                  estimated_remaining_amount: planningContext.targetCollectionAmount,
+                  is_target_reached: false,
+                  stop_reason: 'no_candidates'
+                }
+              : {}
+          )
+        }
+      : {}),
+    message: planningContext?.planningMode === COVERAGE_PLANNING_MODE_RECOVERY && recoveryEligibilityDiagnostic
+      ? `Aucun client recouvrable sur la periode analysee. ${buildCoverageSingleVisitDisclaimer(planningContext)}`
+      : `Aucun client actif a couvrir sur la periode analysee. ${buildCoverageSingleVisitDisclaimer(planningContext)}`
   }
 }
 
@@ -3718,6 +3859,16 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
   const precheckOnly = Boolean(runtimeOptions?.precheckOnly)
   const planningMode = resolveCoveragePlanningMode(rawBody.planning_mode)
   const isSalesCoverageMode = planningMode === COVERAGE_PLANNING_MODE_SALES
+  const targetCollectionAmountResult = parseCoverageTargetCollectionAmount(
+    rawBody.target_collection_amount,
+    planningMode
+  )
+  if (targetCollectionAmountResult.invalidResponse) {
+    return {
+      invalidResponse: targetCollectionAmountResult.invalidResponse
+    }
+  }
+  const targetCollectionAmount = targetCollectionAmountResult.value
   const coverageHistoryCacheMetrics = createCoverageHistoryCacheMetrics()
   const todayIso = formatLocalDate(new Date())
   const startDate = normalizeDateOnly(rawBody.start_date || rawBody.planning_start_date) || todayIso
@@ -3730,11 +3881,13 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
   const requestedManualMaxVisits = parseOptionalCoverageMaxVisits(rawBody.default_max_visits_per_slot)
   const requestedUserMinVisits = Math.max(0, Number.parseInt(rawBody.min_clients ?? rawBody.min_visits, 10) || 0)
   const requestedUserMaxVisits = Math.max(0, Number.parseInt(rawBody.max_clients ?? rawBody.max_visits, 10) || 0)
-  const minDailyCaPerCommercial = Math.max(
+  const requestedMinDailyCaPerCommercial = Math.max(
     0,
     Number(rawBody.min_daily_ca_per_commercial ?? rawBody.min_daily_ca ?? rawBody.min_total_ca ?? 0) || 0
   )
-  const strictCa = parseBooleanFlag(rawBody.strict_ca, false)
+  const requestedStrictCa = parseBooleanFlag(rawBody.strict_ca, false)
+  const minDailyCaPerCommercial = isSalesCoverageMode ? requestedMinDailyCaPerCommercial : 0
+  const strictCa = isSalesCoverageMode ? requestedStrictCa : false
   const allowCommercialReassignment = parseBooleanFlag(rawBody.allow_commercial_reassignment, true)
   const selectedCommercialCodes = parseCommercialSelection(rawBody.commercials ?? rawBody.commercial_codes)
   const selectedClientIds = parseClientSelection(rawBody.clients ?? rawBody.client_ids ?? rawBody.client_codes)
@@ -3812,11 +3965,45 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
   const historyMatchDiagnostics = coverageClientDirectory.historySnapshot.diagnostics
   const clients = coverageClientDirectory.clients
   const planningEndDate = planningDaysList[planningDaysList.length - 1]?.date || startDate
+  let recoveryEligibilityDiagnostic
+  let planningClients = clients
+  let eligibleRecoveryProfiles = []
+
+  if (!isSalesCoverageMode) {
+    const loadedRecoveryProfiles = await loadRecoveryProfilesImpl({
+      clientIds: clients.map(client => client.client_id),
+      referenceDate: startDate,
+      queryRows: recoveryQueryRows,
+      clientRows: clients,
+    })
+    const recoveryClassification = classifyRecoveryProfilesForPeriod({
+      profiles: loadedRecoveryProfiles,
+      startDate,
+      endDate: planningEndDate
+    })
+    const eligibleRecoveryClientIds = new Set(
+      recoveryClassification.eligibleProfiles
+        .map(profile => String(profile?.client_id || '').trim())
+        .filter(Boolean)
+    )
+
+    planningClients = clients.filter(client => eligibleRecoveryClientIds.has(String(client?.client_id || '').trim()))
+    eligibleRecoveryProfiles = recoveryClassification.eligibleProfiles
+    recoveryEligibilityDiagnostic = {
+      population_before_filtering: clients.length,
+      eligible_count: recoveryClassification.eligibleCount,
+      excluded_count: recoveryClassification.excludedCount,
+      reasonCounts: {
+        ...(recoveryClassification.reasonCounts || {})
+      }
+    }
+  }
+
   const coverageConstraints = await runCoveragePerfStage(perfTracker, 'load_constraints', async () => loadCoverageConstraintsImpl({
     startDate,
     endDate: planningEndDate,
     commercialCodes: selectedCommercials.map(item => item.value),
-    clientIds: clients.map(client => client.client_id)
+    clientIds: planningClients.map(client => client.client_id)
   }, {
     queryAsync,
     database: DB_CONFIG.database
@@ -3854,15 +4041,15 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
       }
     }
   }
-  const recommendedMaxVisitsPerSlot = computeCoverageRecommendedMaxCapacity(clients.length, totalSlots)
+  const recommendedMaxVisitsPerSlot = computeCoverageRecommendedMaxCapacity(planningClients.length, totalSlots)
   const flexibleCapacityTarget = computeAdjustedTargetMaxVisits({
     userMaxVisits: requestedUserMaxVisits,
-    activeClients: clients.length,
+    activeClients: planningClients.length,
     availableSlots: totalSlots,
     manualMaxVisits: requestedManualMaxVisits
   })
   const theoreticalTotalSlots = planningDaysList.length * selectedCommercials.length
-  const requiredVisitsCount = clients.length
+  const requiredVisitsCount = planningClients.length
   const strictCapacity = theoreticalTotalSlots > 0 && requestedUserMaxVisits > 0
     ? theoreticalTotalSlots * requestedUserMaxVisits
     : 0
@@ -4144,13 +4331,12 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
     )
     return Math.max(max, commercialMax)
   }, adjustedTargetMaxVisitsPerSlot)
+  const totalConfiguredCapacity = commercials.reduce(
+    (sum, item) => sum + Object.values(item.max_visits_by_date || {}).reduce((slotSum, value) => slotSum + Number(value || 0), 0),
+    0
+  )
 
-  if (!clients.length) {
-    const totalConfiguredCapacity = commercials.reduce(
-      (sum, item) => sum + Object.values(item.max_visits_by_date || {}).reduce((slotSum, value) => slotSum + Number(value || 0), 0),
-      0
-    )
-
+  if (!planningClients.length) {
     return {
       startDate,
       planningMode,
@@ -4193,7 +4379,9 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
       totalConfiguredCapacity,
       theoreticalTotalSlots: planningDaysList.length * selectedCommercials.length,
       activeDaysCount: planningDaysList.length,
-      selectedClientsCount: clients.length,
+      selectedClientsCount: planningClients.length,
+      targetCollectionAmount,
+      recoveryEligibilityDiagnostic,
       dedupedClientResult,
       historyMatchDiagnostics,
       emptyResponse: buildCoveragePlannerEmptyResponse({
@@ -4229,7 +4417,9 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
         planningDaysList,
         selectedCommercials,
         clientScope,
-        selectedClientsCount: clients.length,
+        selectedClientsCount: planningClients.length,
+        targetCollectionAmount,
+        recoveryEligibilityDiagnostic,
         totalSlots,
         totalConfiguredCapacity,
         dedupedClientResult,
@@ -4238,7 +4428,7 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
     }
   }
   const purchasePredictionDistanceContext = buildDistanceMap(
-    clients.map(client => ({
+    planningClients.map(client => ({
       nbr_client: client.client_code,
       latitude: client.latitude,
       longitude: client.longitude
@@ -4287,77 +4477,76 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
       totalConfiguredCapacity,
       theoreticalTotalSlots: planningDaysList.length * selectedCommercials.length,
       activeDaysCount: planningDaysList.length,
-      selectedClientsCount: clients.length,
+      selectedClientsCount: planningClients.length,
+      targetCollectionAmount,
+      recoveryEligibilityDiagnostic,
       dedupedClientResult,
       historyMatchDiagnostics,
       coverageConstraints
     }
   }
-  const recoveryProfilesPromise = isSalesCoverageMode
-    ? Promise.resolve([])
-    : loadRecoveryProfilesImpl({
-        clientIds: clients.map(client => client.client_id),
+  const exactClientIds = planningClients.map(client => client.client_id)
+  const exactClientCodes = planningClients.map(client => client.client_code)
+  const purchasePredictionProfilesResult = isSalesCoverageMode && planningClients.length > 0
+    ? await runCoveragePerfStage(perfTracker, 'load_purchase_predictions', async () => loadCoveragePurchasePredictionProfilesImpl({
+        clientRows: planningClients.map(client => ({
+          client_id: client.client_id,
+          client_code: client.client_code,
+          nom: client.nom,
+          latitude: client.latitude,
+          longitude: client.longitude
+        })),
+        planningDates: isSalesCoverageMode ? planningDaysList.map(day => day.date) : [],
         referenceDate: startDate,
-        queryRows: recoveryQueryRows
-      })
-  const exactClientIds = clients.map(client => client.client_id)
-  const exactClientCodes = clients.map(client => client.client_code)
-  const purchasePredictionProfilesPromise = runCoveragePerfStage(perfTracker, 'load_purchase_predictions', async () => loadCoveragePurchasePredictionProfilesImpl({
-    clientRows: clients.map(client => ({
-      client_id: client.client_id,
-      client_code: client.client_code,
-      nom: client.nom,
-      latitude: client.latitude,
-      longitude: client.longitude
-    })),
-    planningDates: planningDaysList.map(day => day.date),
-    referenceDate: startDate,
-    fetchPredictionsForDate: async ({ date }) => {
-      const { response } = await fetchLoggedAiPredictionsImpl(
-        { date },
-        {
-          sourceContext: 'coverage_purchase_profiles',
-          sourceMode: 'coverage',
-          requestContext: {
-            date_reference: startDate,
-            prediction_date: date
-          },
-          cacheContext: {
-            activeClientIds: exactClientIds,
-            exactClientCodes,
-            modelVersion: process.env.AI_MODEL_VERSION || 'unknown',
-            datasetCutoff: process.env.AI_DATASET_CUTOFF || '',
-            scoreVersion: process.env.AI_SCORE_VERSION || 'computePriorityScore',
-            requestContext: {
-              planning_mode: planningMode,
-              prediction_date: date
-            }
+        fetchPredictionsForDate: async ({ date }) => {
+          if (!isSalesCoverageMode) {
+            return null
           }
-        }
-      )
-      return response?.data || null
-    },
-    scorePredictionCandidate: ({ clientRow, rawPrediction, predictionPayloadMeta }) => {
-      const distanceKm = purchasePredictionDistanceContext.distanceMap.get(String(clientRow.client_code || '').trim()) || 0
-      return computePriorityScore(
-        Number(rawPrediction?.chiffre || 0) || 0,
-        Number(predictionPayloadMeta?.maxPredictedValue || 0) || 0,
-        Number(rawPrediction?.prob_achat || 0) || 0,
-        Number(rawPrediction?.habit_score || 0) || 0,
-        Number(rawPrediction?.recency_score || 0) || 0,
-        distanceKm,
-        purchasePredictionDistanceContext.maxDistance || 0
-      )
-    },
-    logger: console,
-    concurrency: COVERAGE_AI_CONCURRENCY
-  }))
-  const [recoveryProfiles, purchasePredictionProfilesResult] = await Promise.all([
-    recoveryProfilesPromise,
-    purchasePredictionProfilesPromise
-  ])
+          const { response } = await fetchLoggedAiPredictionsImpl(
+            { date },
+            {
+              sourceContext: 'coverage_purchase_profiles',
+              sourceMode: 'coverage',
+              requestContext: {
+                date_reference: startDate,
+                prediction_date: date
+              },
+              cacheContext: {
+                activeClientIds: exactClientIds,
+                exactClientCodes,
+                modelVersion: process.env.AI_MODEL_VERSION || 'unknown',
+                datasetCutoff: process.env.AI_DATASET_CUTOFF || '',
+                scoreVersion: process.env.AI_SCORE_VERSION || 'computePriorityScore',
+                requestContext: {
+                  planning_mode: planningMode,
+                  prediction_date: date
+                }
+              }
+            }
+          )
+          return response?.data || null
+        },
+        scorePredictionCandidate: ({ clientRow, rawPrediction, predictionPayloadMeta }) => {
+          if (!isSalesCoverageMode) {
+            return 0
+          }
+          const distanceKm = purchasePredictionDistanceContext.distanceMap.get(String(clientRow.client_code || '').trim()) || 0
+          return computePriorityScore(
+            Number(rawPrediction?.chiffre || 0) || 0,
+            Number(predictionPayloadMeta?.maxPredictedValue || 0) || 0,
+            Number(rawPrediction?.prob_achat || 0) || 0,
+            Number(rawPrediction?.habit_score || 0) || 0,
+            Number(rawPrediction?.recency_score || 0) || 0,
+            distanceKm,
+            purchasePredictionDistanceContext.maxDistance || 0
+          )
+        },
+        logger: console,
+        concurrency: COVERAGE_AI_CONCURRENCY
+      }))
+    : { profiles: [] }
   const recoveryProfileByClientId = new Map(
-    (Array.isArray(recoveryProfiles) ? recoveryProfiles : [])
+    (Array.isArray(eligibleRecoveryProfiles) ? eligibleRecoveryProfiles : [])
       .map(profile => [String(profile?.client_id || '').trim(), profile])
       .filter(entry => entry[0])
   )
@@ -4374,6 +4563,7 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
     planning_horizon_days: planningDays,
     visit_frequency_days: visitFrequencyDays,
     coverage_window_days: visitFrequencyDays,
+    ...(isSalesCoverageMode ? {} : { target_collection_amount: targetCollectionAmount }),
     daily_max_mode: dailyMaxMode,
     strict_ca: strictCa,
     default_max_visits_per_slot: adjustedTargetMaxVisitsPerSlot,
@@ -4387,15 +4577,25 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
     operational_capacity_known: operationalCapacityKnown,
     depot: SHARED_DEPOT_ORIGIN,
     commercials,
-    clients: clients.map(client => {
-      const purchasePredictionContext = purchasePredictionProfileByClientId.get(String(client.client_id || '').trim()) || null
-      const predictedCaContext = isSalesCoverageMode && purchasePredictionContext?.purchase_prediction_known
-        ? {
-            predicted_ca: purchasePredictionContext.expected_order_value,
-            predicted_ca_known: purchasePredictionContext.expected_order_value != null,
-            predicted_ca_source: purchasePredictionContext.purchase_prediction_source || 'dashboard_fetchLoggedAiPredictions'
+    clients: planningClients.map(client => {
+      const purchasePredictionContext = isSalesCoverageMode
+        ? purchasePredictionProfileByClientId.get(String(client.client_id || '').trim()) || null
+        : null
+      const predictedCaContext = isSalesCoverageMode
+        ? (
+            purchasePredictionContext?.purchase_prediction_known
+              ? {
+                  predicted_ca: purchasePredictionContext.expected_order_value,
+                  predicted_ca_known: purchasePredictionContext.expected_order_value != null,
+                  predicted_ca_source: purchasePredictionContext.purchase_prediction_source || 'dashboard_fetchLoggedAiPredictions'
+                }
+              : resolveCoveragePredictedCa(client.history_metrics)
+          )
+        : {
+            predicted_ca: null,
+            predicted_ca_known: false,
+            predicted_ca_source: null
           }
-        : resolveCoveragePredictedCa(client.history_metrics)
       const recoveryContext = isSalesCoverageMode
         ? buildCoverageRecoveryPayloadFields(null)
         : buildCoverageRecoveryPayloadFields(
@@ -4457,19 +4657,19 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
         recovery_priority_score: recoveryContext.recovery_priority_score,
         recovery_data_known: recoveryContext.recovery_data_known,
         recovery_source: recoveryContext.recovery_source,
-        purchase_prediction_score: purchasePredictionContext?.purchase_prediction_score ?? null,
-        predicted_purchase_date: purchasePredictionContext?.predicted_purchase_date ?? null,
-        purchase_days_until_prediction: purchasePredictionContext?.purchase_days_until_prediction ?? null,
-        recommended_quantity: purchasePredictionContext?.recommended_quantity ?? null,
-        expected_order_value: purchasePredictionContext?.expected_order_value ?? null,
-        predicted_products: Array.isArray(purchasePredictionContext?.predicted_products)
+        purchase_prediction_score: isSalesCoverageMode ? (purchasePredictionContext?.purchase_prediction_score ?? null) : null,
+        predicted_purchase_date: isSalesCoverageMode ? (purchasePredictionContext?.predicted_purchase_date ?? null) : null,
+        purchase_days_until_prediction: isSalesCoverageMode ? (purchasePredictionContext?.purchase_days_until_prediction ?? null) : null,
+        recommended_quantity: isSalesCoverageMode ? (purchasePredictionContext?.recommended_quantity ?? null) : null,
+        expected_order_value: isSalesCoverageMode ? (purchasePredictionContext?.expected_order_value ?? null) : null,
+        predicted_products: isSalesCoverageMode && Array.isArray(purchasePredictionContext?.predicted_products)
           ? purchasePredictionContext.predicted_products.map(item => ({
               name: String(item?.name || '').trim(),
               quantity: roundScore(Math.max(0, Number(item?.quantity || 0) || 0))
             })).filter(item => item.name && item.quantity > 0)
           : [],
-        purchase_prediction_known: Boolean(purchasePredictionContext?.purchase_prediction_known),
-        purchase_prediction_source: purchasePredictionContext?.purchase_prediction_source ?? null,
+        purchase_prediction_known: isSalesCoverageMode && Boolean(purchasePredictionContext?.purchase_prediction_known),
+        purchase_prediction_source: isSalesCoverageMode ? (purchasePredictionContext?.purchase_prediction_source ?? null) : null,
         last_real_visit_date: client.last_real_visit_date || null,
         visit_frequency_days: visitFrequencyDays,
         is_mandatory: true
@@ -4477,11 +4677,6 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
     })
   }))
   assertCoverageConstraintPayload(optimizerPayload)
-
-  const totalConfiguredCapacity = commercials.reduce(
-    (sum, item) => sum + Object.values(item.max_visits_by_date || {}).reduce((slotSum, value) => slotSum + Number(value || 0), 0),
-    0
-  )
 
   return {
     startDate,
@@ -4525,7 +4720,9 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
     totalConfiguredCapacity,
     theoreticalTotalSlots: planningDaysList.length * selectedCommercials.length,
     activeDaysCount: planningDaysList.length,
-    selectedClientsCount: clients.length,
+    selectedClientsCount: planningClients.length,
+    targetCollectionAmount,
+    recoveryEligibilityDiagnostic,
     dedupedClientResult,
     historyMatchDiagnostics,
     coverageConstraints,
@@ -6421,7 +6618,26 @@ async function saveValidatedTourneePlan({
   predictionRunCode = null,
   loadingProducts = null,
   logPrefix = 'PLAN_VALIDATE'
-}) {
+}, dependencyOverrides = {}) {
+  const queryExecutor = typeof dependencyOverrides.queryAsync === 'function'
+    ? dependencyOverrides.queryAsync
+    : queryAsync
+  const ensureMovementSupportTablesImpl = typeof dependencyOverrides.ensureMovementSupportTables === 'function'
+    ? dependencyOverrides.ensureMovementSupportTables
+    : ensureMovementSupportTables
+  const ensureValidatedTourneeIdentityColumnsImpl = typeof dependencyOverrides.ensureValidatedTourneeIdentityColumns === 'function'
+    ? dependencyOverrides.ensureValidatedTourneeIdentityColumns
+    : ensureValidatedTourneeIdentityColumns
+  const withTransactionImpl = typeof dependencyOverrides.withTransaction === 'function'
+    ? dependencyOverrides.withTransaction
+    : withTransaction
+  const replaceValidatedLoadingPredictionImpl = typeof dependencyOverrides.replaceValidatedLoadingPrediction === 'function'
+    ? dependencyOverrides.replaceValidatedLoadingPrediction
+    : replaceValidatedLoadingPrediction
+  const replaceValidatedTourneeRowsInTransactionImpl = typeof dependencyOverrides.replaceValidatedTourneeRowsInTransaction === 'function'
+    ? dependencyOverrides.replaceValidatedTourneeRowsInTransaction
+    : replaceValidatedTourneeRowsInTransaction
+
   const selectedDate = formatLocalDate(parseLocalDate(date))
 
   if (!commercialCode) {
@@ -6431,18 +6647,18 @@ async function saveValidatedTourneePlan({
   }
 
   const normalizedStops = await validateAndResolveValidatedTourneeStops(stops, {
-    queryExecutor: queryAsyncImpl
+    queryExecutor
   })
 
   console.log(`[${logPrefix}] Debut validation -> date=${selectedDate} commercial=${commercialCode} stops=${normalizedStops.length}`)
 
   try {
-    await ensureMovementSupportTables()
-    await ensureValidatedTourneeIdentityColumns()
+    await ensureMovementSupportTablesImpl()
+    await ensureValidatedTourneeIdentityColumnsImpl()
 
-    const loadingResult = await withTransaction(async connection => {
-      await ensureValidatedTourneeIdentityColumns(connection)
-      const persistedTournee = await replaceValidatedTourneeRowsInTransaction({
+    const loadingResult = await withTransactionImpl(async connection => {
+      await ensureValidatedTourneeIdentityColumnsImpl(connection)
+      const persistedTournee = await replaceValidatedTourneeRowsInTransactionImpl({
         selectedDate,
         dayLabel,
         commercialCode,
@@ -6455,11 +6671,12 @@ async function saveValidatedTourneePlan({
         categorieCode,
         typeClient,
         codePrefix,
-        connection
+        connection,
+        queryExecutor
       })
 
       return Array.isArray(loadingProducts)
-        ? replaceValidatedLoadingPrediction({
+        ? replaceValidatedLoadingPredictionImpl({
           date: selectedDate,
           commercialCode,
           depotCode: persistedTournee.depotValue,
@@ -6567,6 +6784,41 @@ async function saveValidatedTourneePlan({
     }
   } catch (error) {
     throw error
+  }
+}
+
+async function handleCoveragePlanValidationRoute(req, res, dependencyOverrides = {}) {
+  const payload = req.body && typeof req.body === 'object' ? req.body : {}
+  const commercialCode = String(payload.commercial_code || '').trim()
+  const commercialLabel = String(payload.commercial_label || `Commercial ${commercialCode}`).trim()
+  const routeCode = String(payload.route_code || '').trim()
+  const depotCode = String(payload.depot_code || '').trim()
+  const depotName = String(payload.depot_name || '').trim()
+  const stops = payload.stops
+
+  try {
+    const result = await saveValidatedTourneePlan({
+      date: payload.date,
+      dayLabel: payload.day_label,
+      commercialCode,
+      commercialLabel,
+      routeCode,
+      depotCode,
+      depotName,
+      stops,
+      frequence: 'couverture_ia',
+      categorieCode: 'coverage_ia',
+      typeClient: 'coverage_plan',
+      codePrefix: 'coverage',
+      predictionRunCode: payload.prediction_run_code,
+      logPrefix: 'COVERAGE_VALIDATE'
+    }, dependencyOverrides)
+
+    return res.json(result)
+  } catch (error) {
+    const statusCode = error.statusCode || 500
+    console.error('[COVERAGE_VALIDATE] Erreur validation plan de route:', error.message)
+    return res.status(statusCode).json({ error: error.message || "Impossible d'enregistrer la tournee finale." })
   }
 }
 
@@ -7922,38 +8174,7 @@ app.get('/api/tournees/options', async (req, res) => {
 })
 
 app.post('/api/tournees/coverage-plan/validate', async (req, res) => {
-  const payload = req.body || {}
-  const commercialCode = String(payload.commercial_code || '').trim()
-  const commercialLabel = String(payload.commercial_label || `Commercial ${commercialCode}`).trim()
-  const routeCode = String(payload.route_code || '').trim()
-  const depotCode = String(payload.depot_code || '').trim()
-  const depotName = String(payload.depot_name || '').trim()
-  const stops = payload.stops
-
-  try {
-    const result = await saveValidatedTourneePlan({
-      date: payload.date,
-      dayLabel: payload.day_label,
-      commercialCode,
-      commercialLabel,
-      routeCode,
-      depotCode,
-      depotName,
-      stops,
-      frequence: 'couverture_ia',
-      categorieCode: 'coverage_ia',
-      typeClient: 'coverage_plan',
-      codePrefix: 'coverage',
-      predictionRunCode: payload.prediction_run_code,
-      logPrefix: 'COVERAGE_VALIDATE'
-    })
-
-    return res.json(result)
-  } catch (error) {
-    const statusCode = error.statusCode || 500
-    console.error('[COVERAGE_VALIDATE] Erreur validation plan de route:', error.message)
-    return res.status(statusCode).json({ error: error.message || "Impossible d'enregistrer la tournee finale." })
-  }
+  return handleCoveragePlanValidationRoute(req, res)
 })
 
 app.post('/api/tournees/plan/validate', async (req, res) => {
@@ -8047,6 +8268,20 @@ async function generateCoveragePlanResponse(rawBody = {}, dependencyOverrides = 
   if (hardReason === 'no_available_slots') {
     perfTracker.mark('total', totalStartedAt)
     const capacityPrecheck = buildCoverageCapacityPrecheck(planningContext)
+    const recoveryCollectionTargetContext = planningContext?.planningMode === COVERAGE_PLANNING_MODE_RECOVERY
+      ? normalizeRecoveryCollectionTargetContext(
+          planningContext,
+          optimizerResult?.functional_metadata?.collection_target_context || analysisResult?.collection_target_context || null,
+          Number(planningContext?.targetCollectionAmount || 0) > 0
+            ? {
+                selected_estimated_collection_amount: 0,
+                estimated_remaining_amount: planningContext.targetCollectionAmount,
+                is_target_reached: false,
+                stop_reason: 'target_unreachable'
+              }
+            : {}
+        )
+      : null
     return {
       statusCode: 200,
       payload: {
@@ -8087,7 +8322,19 @@ async function generateCoveragePlanResponse(rawBody = {}, dependencyOverrides = 
           deadline_issues: [],
           ca_issues: [],
           invalid_gps_clients: [],
-          input_duplicate_clients_removed: []
+          input_duplicate_clients_removed: [],
+          ...(planningContext?.recoveryEligibilityDiagnostic
+            ? {
+                recovery_eligibility: {
+                  population_before_filtering: Number(planningContext.recoveryEligibilityDiagnostic.population_before_filtering || 0),
+                  eligible_count: Number(planningContext.recoveryEligibilityDiagnostic.eligible_count || 0),
+                  excluded_count: Number(planningContext.recoveryEligibilityDiagnostic.excluded_count || 0),
+                  reasonCounts: {
+                    ...(planningContext.recoveryEligibilityDiagnostic.reasonCounts || {})
+                  }
+                }
+              }
+            : {})
         },
         depot: SHARED_DEPOT_ORIGIN,
         analysis: analysisResult,
@@ -8097,6 +8344,9 @@ async function generateCoveragePlanResponse(rawBody = {}, dependencyOverrides = 
         ),
         capacity_precheck: capacityPrecheck,
         request_context: buildCoverageRequestContext(planningContext, false),
+        ...(recoveryCollectionTargetContext
+          ? { collection_target_context: recoveryCollectionTargetContext }
+          : {}),
         message: blockingReasons.length
           ? blockingReasons.map(item => item.title).join(' - ')
           : `Le plan de couverture n'est pas realisable sur cette periode. ${buildCoverageSingleVisitDisclaimer(planningContext)}`
@@ -8109,10 +8359,34 @@ async function generateCoveragePlanResponse(rawBody = {}, dependencyOverrides = 
   const baseResponsePayload = await runCoveragePerfStage(perfTracker, 'serialize_response', async () => {
     const decoratedBlocks = decorateCoverageBlocks(optimizerResult?.blocks, planningContext)
     const decoratedSummary = decorateCoverageSummary(optimizerResult?.summary || {}, planningContext, decoratedBlocks)
+    const optimizerDiagnostics = optimizerResult?.diagnostics && typeof optimizerResult.diagnostics === 'object'
+      ? optimizerResult.diagnostics
+      : {}
+    const recoveryCollectionTargetContext = planningContext?.planningMode === COVERAGE_PLANNING_MODE_RECOVERY
+      ? normalizeRecoveryCollectionTargetContext(
+          planningContext,
+          optimizerResult?.functional_metadata?.collection_target_context || analysisResult?.collection_target_context || null
+        )
+      : null
     return {
       ...optimizerResult,
       summary: decoratedSummary,
       blocks: decoratedBlocks,
+      diagnostics: {
+        ...optimizerDiagnostics,
+        ...(planningContext?.recoveryEligibilityDiagnostic
+          ? {
+              recovery_eligibility: {
+                population_before_filtering: Number(planningContext.recoveryEligibilityDiagnostic.population_before_filtering || 0),
+                eligible_count: Number(planningContext.recoveryEligibilityDiagnostic.eligible_count || 0),
+                excluded_count: Number(planningContext.recoveryEligibilityDiagnostic.excluded_count || 0),
+                reasonCounts: {
+                  ...(planningContext.recoveryEligibilityDiagnostic.reasonCounts || {})
+                }
+              }
+            }
+          : {})
+      },
       depot: SHARED_DEPOT_ORIGIN,
       analysis: analysisResult,
       client_scope: buildCoverageClientScopePayload(
@@ -8121,6 +8395,9 @@ async function generateCoveragePlanResponse(rawBody = {}, dependencyOverrides = 
       ),
       capacity_precheck: buildCoverageCapacityPrecheck(planningContext),
       request_context: buildCoverageRequestContext(planningContext, optimizerPayload.strict_ca),
+      ...(recoveryCollectionTargetContext
+        ? { collection_target_context: recoveryCollectionTargetContext }
+        : {}),
       message: buildCoverageResponseMessage(optimizerResult, planningContext, decoratedSummary, decoratedBlocks)
     }
   })
@@ -9231,6 +9508,9 @@ app.get('/api/tournees/plan', async (req, res) => {
               route_code: route || null,
               commercial_code: commercial || null
             }
+          },
+          {
+            bypassPersistentCache: true
           }
         )
         const normalizedAiResult = normalizeFutureSalesAiResult(aiResponse)
@@ -9412,14 +9692,17 @@ module.exports = {
     validateNextBestVisitBlockPlan,
     handleNextBestVisitRoute,
     handleNextBestVisitValidationRoute,
+    handleCoveragePlanValidationRoute,
     fetchAiPredictionsForClientBatch,
     generateNextBestVisitPlan,
     resolveCoverageClientScope,
     countCoverageActiveClientsLight,
+    buildCoveragePlanInputFromQuery,
     buildCoveragePurchaseCacheKey,
     buildCoverageRecoveryQueryRows,
     buildCoverageRecoveryPayloadFields,
     buildCoverageRequestContext,
+    normalizeRecoveryCollectionTargetContext,
     buildCanonicalCoverageFunctionalSnapshot,
     computeStableObjectHash,
     computeCoverageFunctionalResultHash,
@@ -9447,6 +9730,8 @@ module.exports = {
     queryAsync,
     generateCoveragePlanResponse,
     coveragePurchasePredictionCache,
+    aiPredictionRequestCache,
+    clearAiPredictionRequestCache: () => aiPredictionRequestCache.clear(),
     sharedDepotOrigin: SHARED_DEPOT_ORIGIN,
     closeOpenHandles: () => new Promise(resolve => {
       try {

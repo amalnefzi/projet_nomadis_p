@@ -99,6 +99,7 @@ test('sales_coverage planning context skips recovery loading and uses grouped pu
   assert.equal(planningContext.planningMode, 'sales_coverage')
   assert.equal(planningContext.optimizerPayload.planning_mode, 'sales_coverage')
   assert.equal(recoveryCalls, 0)
+  assert.equal(planningContext.recoveryEligibilityDiagnostic, undefined)
   assert.equal(planningContext.selectedCommercials.length, 1)
   assert.equal(planningContext.selectedCommercials[0].value, 'C01')
   assert.equal(client.client_id, '15')
@@ -188,6 +189,130 @@ test('sales_coverage planning context preserves exact multi-commercial codes as 
     planningContext.optimizerPayload.commercials.map(item => item.code),
     ['0001', 'VL1900']
   )
+})
+
+test('sales_coverage 1c still loads and uses grouped purchase predictions while keeping recovery neutralized', async () => {
+  let recoveryCalls = 0
+  let purchasePredictionCalls = 0
+  let purchasePredictionArgs = null
+
+  const planningContext = await __testables.buildCoveragePlanningContext(
+    {
+      planning_mode: 'sales_coverage',
+      planning_start_date: '2026-08-03',
+      planning_days: 1,
+      working_days: [1],
+      commercial_codes: ['C01'],
+      strict_ca: true,
+      min_daily_ca_per_commercial: 900
+    },
+    {
+      fetchCommercialOptions: async () => [{ value: 'C01', label: 'Commercial C01' }],
+      fetchCoverageActiveClients: async () => ({
+        clients: [
+          {
+            client_id: '15',
+            client_code: '00152',
+            nbr_client: '00152',
+            nom: 'Client 00152',
+            adresse: 'Adresse test',
+            latitude: 36.8,
+            longitude: 10.1,
+            user_code: '1',
+            delegation: 'ELMENZAH',
+            routing_code: 'Route Nord',
+            region: 'Nord',
+            historical_commercial_code: 'C01',
+            resolved_commercial_code: 'C01',
+            last_real_visit_date: '2026-07-20',
+            history_metrics: {
+              avg_ca_hist: 150,
+              avg_load_units_hist: 2
+            }
+          }
+        ],
+        dedupedClientResult: {
+          duplicateRows: 0
+        },
+        historySnapshot: {
+          diagnostics: {
+            resolution_counts: {
+              exact_match: 0,
+              unique_normalized_match: 0,
+              ambiguous_match: 0,
+              no_match: 0
+            },
+            ambiguous_match_rows: 0,
+            no_match_rows: 0,
+            ambiguous_normalized_codes: []
+          }
+        }
+      }),
+      loadCoverageConstraints: async () => ({
+        commercials: {},
+        client_restrictions: {},
+        diagnostic: {
+          time_capacity_known: false
+        }
+      }),
+      fetchCoverageCommercialCapacityProfiles: async () => new Map(),
+      fetchCoverageValidatedVisitCapacityProfiles: async () => new Map(),
+      loadRecoveryProfiles: async () => {
+        recoveryCalls += 1
+        return []
+      },
+      loadCoveragePurchasePredictionProfiles: async args => {
+        purchasePredictionCalls += 1
+        purchasePredictionArgs = args
+        return {
+          profiles: [
+            {
+              client_id: '15',
+              client_code: '00152',
+              purchase_prediction_score: 85,
+              predicted_purchase_date: '2026-08-05',
+              purchase_days_until_prediction: 2,
+              recommended_quantity: 6,
+              expected_order_value: 410.2,
+              predicted_products: [
+                { name: 'BISKREMCACAO', quantity: 3 }
+              ],
+              purchase_prediction_known: true,
+              purchase_prediction_source: 'dashboard_fetchLoggedAiPredictions'
+            }
+          ]
+        }
+      }
+    }
+  )
+
+  const [client] = planningContext.optimizerPayload.clients
+
+  assert.equal(recoveryCalls, 0)
+  assert.equal(purchasePredictionCalls, 1)
+  assert.deepEqual(
+    purchasePredictionArgs.clientRows.map(item => item.client_id),
+    ['15']
+  )
+  assert.deepEqual(purchasePredictionArgs.planningDates, ['2026-08-03'])
+  assert.equal(planningContext.strictCa, true)
+  assert.equal(planningContext.minDailyCaPerCommercial, 900)
+  assert.equal(planningContext.optimizerPayload.strict_ca, true)
+  assert.equal(planningContext.optimizerPayload.min_daily_ca_per_commercial, 900)
+  assert.equal(client.predicted_ca, 410.2)
+  assert.equal(client.predicted_ca_known, true)
+  assert.equal(client.predicted_ca_source, 'dashboard_fetchLoggedAiPredictions')
+  assert.equal(client.purchase_prediction_score, 85)
+  assert.equal(client.predicted_purchase_date, '2026-08-05')
+  assert.equal(client.purchase_days_until_prediction, 2)
+  assert.equal(client.recommended_quantity, 6)
+  assert.equal(client.expected_order_value, 410.2)
+  assert.deepEqual(client.predicted_products, [
+    { name: 'BISKREMCACAO', quantity: 3 }
+  ])
+  assert.equal(client.recovery_priority_score, null)
+  assert.equal(client.recovery_expected_collection_amount, null)
+  assert.equal(client.recovery_data_known, false)
 })
 
 test('coverage-plan main flow uses a single optimize call and keeps the same functional hash despite technical path metadata', async () => {
@@ -1339,4 +1464,233 @@ test('coverage-plan result reports flexible overruns explicitly when strict capa
   assert.equal(result.payload.summary.maximum_block_overage, 1)
   assert.equal(result.payload.summary.coverage_guarantee_status, 'single_visit_only')
   assert.ok(result.payload.message.includes('insuffisante de 1 visite'))
+})
+
+test('sales_coverage ignores target_collection_amount entirely and keeps current behavior unchanged', async () => {
+  let recoveryCalls = 0
+
+  const planningContext = await __testables.buildCoveragePlanningContext(
+    {
+      planning_mode: 'sales_coverage',
+      planning_start_date: '2026-08-03',
+      planning_days: 1,
+      working_days: [1],
+      commercial_codes: ['C01'],
+      target_collection_amount: 'not-a-number'
+    },
+    {
+      fetchCommercialOptions: async () => [{ value: 'C01', label: 'Commercial C01' }],
+      fetchCoverageActiveClients: async () => ({
+        clients: [
+          {
+            client_id: '15',
+            client_code: '00152',
+            nbr_client: '00152',
+            nom: 'Client 00152',
+            adresse: 'Adresse test',
+            latitude: 36.8,
+            longitude: 10.1,
+            user_code: '1',
+            delegation: 'ELMENZAH',
+            routing_code: 'Route Nord',
+            region: 'Nord',
+            historical_commercial_code: 'C01',
+            resolved_commercial_code: 'C01',
+            last_real_visit_date: '2026-07-20',
+            history_metrics: {
+              avg_ca_hist: 150,
+              avg_load_units_hist: 2
+            }
+          }
+        ],
+        dedupedClientResult: {
+          duplicateRows: 0
+        },
+        historySnapshot: {
+          diagnostics: {
+            resolution_counts: {
+              exact_match: 0,
+              unique_normalized_match: 0,
+              ambiguous_match: 0,
+              no_match: 0
+            },
+            ambiguous_match_rows: 0,
+            no_match_rows: 0,
+            ambiguous_normalized_codes: []
+          }
+        }
+      }),
+      loadCoverageConstraints: async () => ({
+        commercials: {},
+        client_restrictions: {},
+        diagnostic: {
+          time_capacity_known: false
+        }
+      }),
+      fetchCoverageCommercialCapacityProfiles: async () => new Map(),
+      fetchCoverageValidatedVisitCapacityProfiles: async () => new Map(),
+      loadRecoveryProfiles: async () => {
+        recoveryCalls += 1
+        return []
+      },
+      loadCoveragePurchasePredictionProfiles: async () => ({
+        profiles: [
+          {
+            client_id: '15',
+            client_code: '00152',
+            purchase_prediction_score: 85,
+            predicted_purchase_date: '2026-08-05',
+            purchase_days_until_prediction: 2,
+            recommended_quantity: 6,
+            expected_order_value: 410.2,
+            predicted_products: [
+              { name: 'BISKREMCACAO', quantity: 3 }
+            ],
+            purchase_prediction_known: true,
+            purchase_prediction_source: 'dashboard_fetchLoggedAiPredictions'
+          }
+        ]
+      })
+    }
+  )
+
+  const requestContext = __testables.buildCoverageRequestContext(planningContext, planningContext.strictCa)
+  const [client] = planningContext.optimizerPayload.clients
+
+  assert.equal(planningContext.invalidResponse, undefined)
+  assert.equal(recoveryCalls, 0)
+  assert.equal(planningContext.optimizerPayload.planning_mode, 'sales_coverage')
+  assert.equal(Object.prototype.hasOwnProperty.call(planningContext.optimizerPayload, 'target_collection_amount'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(requestContext, 'target_collection_amount'), false)
+  assert.equal(client.predicted_ca, 410.2)
+  assert.equal(client.purchase_prediction_score, 85)
+  assert.equal(client.recovery_expected_collection_amount, null)
+})
+
+test('sales_coverage success keeps its existing contract and does not add collection_target_context', async () => {
+  const planningContext = await __testables.buildCoveragePlanningContext(
+    {
+      planning_mode: 'sales_coverage',
+      planning_start_date: '2026-08-03',
+      planning_days: 1,
+      working_days: [1],
+      commercial_codes: ['C01']
+    },
+    {
+      fetchCommercialOptions: async () => [{ value: 'C01', label: 'Commercial C01' }],
+      fetchCoverageActiveClients: async () => ({
+        clients: [
+          {
+            client_id: '15',
+            client_code: '00152',
+            nbr_client: '00152',
+            nom: 'Client 00152',
+            adresse: 'Adresse test',
+            latitude: 36.8,
+            longitude: 10.1,
+            user_code: '1',
+            delegation: 'ELMENZAH',
+            routing_code: 'Route Nord',
+            region: 'Nord',
+            historical_commercial_code: 'C01',
+            resolved_commercial_code: 'C01',
+            last_real_visit_date: '2026-07-20',
+            history_metrics: {
+              avg_ca_hist: 150,
+              avg_load_units_hist: 2
+            }
+          }
+        ],
+        dedupedClientResult: {
+          duplicateRows: 0
+        },
+        historySnapshot: {
+          diagnostics: {
+            resolution_counts: {
+              exact_match: 0,
+              unique_normalized_match: 0,
+              ambiguous_match: 0,
+              no_match: 0
+            },
+            ambiguous_match_rows: 0,
+            no_match_rows: 0,
+            ambiguous_normalized_codes: []
+          }
+        }
+      }),
+      loadCoverageConstraints: async () => ({
+        commercials: {},
+        client_restrictions: {},
+        diagnostic: {
+          time_capacity_known: false
+        }
+      }),
+      fetchCoverageCommercialCapacityProfiles: async () => new Map(),
+      fetchCoverageValidatedVisitCapacityProfiles: async () => new Map(),
+      loadRecoveryProfiles: async () => [],
+      loadCoveragePurchasePredictionProfiles: async () => ({
+        profiles: [
+          {
+            client_id: '15',
+            client_code: '00152',
+            purchase_prediction_score: 85,
+            predicted_purchase_date: '2026-08-05',
+            purchase_days_until_prediction: 2,
+            recommended_quantity: 6,
+            expected_order_value: 410.2,
+            predicted_products: [],
+            purchase_prediction_known: true,
+            purchase_prediction_source: 'dashboard_fetchLoggedAiPredictions'
+          }
+        ]
+      })
+    }
+  )
+
+  const result = await __testables.generateCoveragePlanResponse(
+    { planning_mode: 'sales_coverage' },
+    {
+      buildCoveragePlanningContext: async () => planningContext,
+      fetchOrToolsCoveragePlan: async () => ({
+        data: {
+          status: 'success',
+          reason: null,
+          summary: {
+            planning_start_date: '2026-08-03',
+            planning_end_date: '2026-08-03',
+            clients_to_cover: 1,
+            unique_clients_covered: 1,
+            missing_clients_count: 0,
+            duplicate_clients_count: 0,
+            total_visits: 1,
+            total_slots: 1,
+            used_slots: 1,
+            unused_slots: 0,
+            total_capacity: 1,
+            required_average_per_slot: 1,
+            required_minimum_max_per_slot: 1,
+            total_predicted_ca: 410.2,
+            total_ca_shortfall: 0,
+            solver_status: 'OPTIMAL'
+          },
+          blocks: [],
+          diagnostics: {},
+          analysis: {
+            status: 'feasible',
+            collection_target_context: {
+              mode: 'target_collection'
+            }
+          },
+          functional_metadata: {
+            collection_target_context: {
+              mode: 'target_collection'
+            }
+          }
+        }
+      })
+    }
+  )
+
+  assert.equal(Object.prototype.hasOwnProperty.call(result.payload, 'collection_target_context'), false)
+  assert.equal(result.payload.request_context.planning_mode, 'sales_coverage')
 })

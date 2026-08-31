@@ -6,6 +6,8 @@ import importlib
 import json
 from pathlib import Path
 
+import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -13,9 +15,11 @@ import coverage_optimizer as optimizer_module  # noqa: E402
 
 from coverage_optimizer import (  # noqa: E402
     CoverageModelBuilder,
+    apply_collection_target_candidate_selection,
     apply_effective_visit_bounds_to_slots,
     build_assignment_candidates,
     build_capacity_distribution_context,
+    build_collection_target_context,
     build_client_priority_breakdown,
     build_coverage_analysis_summary_from_context,
     build_coverage_cp_sat_model_artifacts,
@@ -153,6 +157,20 @@ def build_clients(total, allowed_codes=None, predicted_ca=100.0, deadline=None, 
             "is_mandatory": True
         })
     return clients
+
+
+def build_normalized_clients_for_collection_target_context(expected_collection_amounts):
+    clients = build_clients(len(expected_collection_amounts), allowed_codes=["C001"], predicted_ca=100.0)
+    for client, expected_collection_amount in zip(clients, expected_collection_amounts):
+        client["recovery_expected_collection_amount"] = expected_collection_amount
+
+    normalized_payload = normalize_payload(
+        base_payload(
+            clients=clients,
+            commercials=build_commercials(count=1, days=7, max_visits=5),
+        )
+    )
+    return normalized_payload["clients"]
 
 
 def base_payload(
@@ -1115,6 +1133,7 @@ def test_k_strict_daily_ca():
         min_daily_ca_per_commercial=200,
         planning_days=1
     )
+    payload["planning_mode"] = "sales_coverage"
     payload["allow_commercial_reassignment"] = False
 
     result = solve_coverage_plan(payload)
@@ -1133,6 +1152,7 @@ def test_l_soft_daily_ca_reports_shortfall():
         min_daily_ca_per_commercial=500,
         planning_days=1
     )
+    payload["planning_mode"] = "sales_coverage"
 
     result = solve_coverage_plan(payload)
 
@@ -1515,6 +1535,7 @@ def test_y_normalize_payload_preserves_known_zero_and_unknown_predicted_ca_state
         commercials=build_commercials(count=1, days=1, max_visits=5),
         planning_days=1
     )
+    payload["planning_mode"] = "sales_coverage"
 
     normalized = normalize_payload(payload)
     known_zero_client = normalized["clients"][0]
@@ -1572,6 +1593,7 @@ def test_z_partial_predicted_ca_aggregation_marks_blocks_and_summary_as_incomple
         }
     ]
     payload = base_payload(clients=clients, commercials=commercials, planning_days=1)
+    payload["planning_mode"] = "sales_coverage"
     payload["allow_commercial_reassignment"] = False
 
     result = solve_coverage_plan(payload)
@@ -2465,6 +2487,7 @@ def test_bg_sales_coverage_daily_ca_target_influences_composition_when_realisabl
         planning_mode="sales_coverage"
     )
     payload["allow_partial_plan"] = True
+    payload["planning_mode"] = "sales_coverage"
 
     result = solve_coverage_plan(payload)
     planned_ids = [
@@ -2798,6 +2821,8 @@ def test_ax_purchase_score_breaks_partial_capacity_ties_after_urgencies():
         operational_capacity_known=True
     )
     payload["allow_partial_plan"] = True
+    payload["planning_mode"] = "sales_coverage"
+
 
     result = solve_coverage_plan(payload)
     planned_ids = [
@@ -2873,6 +2898,212 @@ def test_az_high_purchase_score_never_breaks_hard_constraints():
     assert result["diagnostics"]["truck_capacity_issues"] == []
 
 
+def test_1c_recovery_sales_only_signal_changes_do_not_change_selected_clients_dates_or_commercials():
+    clients = build_clients(3, allowed_codes=["C001"], predicted_ca=50.0)
+    recovery_priorities = [95, 60, 20]
+    recovery_collections = [900, 500, 120]
+    recovery_overdue_days = [18, 7, 1]
+    for index, client in enumerate(clients):
+        client["client_id"] = f"1c-recovery-{index + 1}"
+        client["client_code"] = f"1CR{index + 1:03d}"
+        client["recovery_priority_score"] = recovery_priorities[index]
+        client["recovery_expected_collection_amount"] = recovery_collections[index]
+        client["recovery_days_past_due"] = recovery_overdue_days[index]
+        client["recovery_due_amount"] = recovery_collections[index]
+        client["recovery_data_known"] = True
+
+    payload = base_payload(
+        clients=clients,
+        commercials=build_commercials(
+            count=1,
+            days=3,
+            max_visits=2,
+            commercial_codes=["C001"],
+            hard_capacities={"C001": 1}
+        ),
+        planning_days=3,
+        capacity_mode="configured_hard_capacity",
+        operational_capacity_known=True
+    )
+
+    baseline_result = solve_coverage_plan(payload)
+
+    sales_only_changed_payload = json.loads(json.dumps(payload))
+    for index, client in enumerate(sales_only_changed_payload["clients"]):
+        client["predicted_ca"] = [0.0, 1500.0, 9999.0][index]
+        client["predicted_ca_known"] = True
+        client["predicted_ca_source"] = "dashboard_fetchLoggedAiPredictions"
+        client["purchase_prediction_score"] = [5, 85, 99][index]
+        client["predicted_purchase_date"] = ["2026-08-12", "2026-08-04", "2026-08-03"][index]
+        client["purchase_days_until_prediction"] = [9, 1, 0][index]
+        client["recommended_quantity"] = [1, 12, 40][index]
+        client["expected_order_value"] = [20.0, 600.0, 5000.0][index]
+        client["purchase_prediction_known"] = True
+
+    changed_result = solve_coverage_plan(sales_only_changed_payload)
+
+    def assignment_map(result):
+        return {
+            client["client_id"]: (block["date"], block["commercial_code"])
+            for block in result["blocks"]
+            for client in block["clients"]
+        }
+
+    assert baseline_result["status"] == "success"
+    assert changed_result["status"] == "success"
+    assert assignment_map(baseline_result) == assignment_map(changed_result)
+
+
+def test_1c_recovery_high_priority_stays_ahead_of_sales_only_client():
+    clients = build_clients(2, allowed_codes=["C001"], predicted_ca=50.0)
+    clients[0]["client_id"] = "1c-recovery-first"
+    clients[0]["client_code"] = "1CRF"
+    clients[0]["recovery_priority_score"] = 95
+    clients[0]["recovery_expected_collection_amount"] = 700
+    clients[0]["recovery_days_past_due"] = 20
+    clients[0]["recovery_due_amount"] = 700
+    clients[0]["recovery_data_known"] = True
+    clients[1]["client_id"] = "1c-sales-only"
+    clients[1]["client_code"] = "1CSO"
+    clients[1]["predicted_ca"] = 9000.0
+    clients[1]["predicted_ca_known"] = True
+    clients[1]["purchase_prediction_score"] = 99
+    clients[1]["predicted_purchase_date"] = "2026-08-04"
+    clients[1]["purchase_days_until_prediction"] = 1
+    clients[1]["expected_order_value"] = 9000.0
+    clients[1]["recommended_quantity"] = 50
+    clients[1]["purchase_prediction_known"] = True
+
+    payload = base_payload(
+        clients=clients,
+        commercials=build_commercials(
+            count=1,
+            days=2,
+            max_visits=2,
+            commercial_codes=["C001"],
+            hard_capacities={"C001": 1}
+        ),
+        planning_days=2,
+        capacity_mode="configured_hard_capacity",
+        operational_capacity_known=True
+    )
+
+    result = solve_coverage_plan(payload)
+    dates = {
+        client["client_id"]: block["date"]
+        for block in result["blocks"]
+        for client in block["clients"]
+    }
+
+    assert result["status"] == "success"
+    assert dates["1c-recovery-first"] < dates["1c-sales-only"]
+
+
+def test_1c_recovery_physical_constraints_still_hold_under_sales_noise():
+    clients = build_clients(5, allowed_codes=["C001"], predicted_ca=50.0)
+    for index, client in enumerate(clients):
+        client["client_id"] = f"1c-physical-{index + 1}"
+        client["client_code"] = f"1CP{index + 1:03d}"
+        client["recovery_priority_score"] = 100 - (index * 10)
+        client["recovery_expected_collection_amount"] = 1000 - (index * 100)
+        client["recovery_days_past_due"] = 20 - index
+        client["recovery_due_amount"] = 1000 - (index * 100)
+        client["recovery_data_known"] = True
+        client["predicted_ca"] = 5000.0 - (index * 250)
+        client["predicted_ca_known"] = True
+        client["purchase_prediction_score"] = 95 - (index * 5)
+        client["predicted_purchase_date"] = "2026-08-04"
+        client["purchase_days_until_prediction"] = 1 + index
+        client["expected_order_value"] = 1200.0 - (index * 100)
+        client["recommended_quantity"] = 12 - index
+        client["purchase_prediction_known"] = True
+        client["service_minutes"] = 15
+        client["service_minutes_known"] = True
+        client["predicted_load_units"] = 2.6
+        client["estimated_stop_minutes_by_commercial_date"] = {
+            f"{START_DATE}::C001": 15
+        }
+
+    payload = base_payload(
+        clients=clients,
+        commercials=build_commercials(
+            count=1,
+            days=1,
+            max_visits=10,
+            commercial_codes=["C001"]
+        ),
+        planning_days=1,
+        capacity_mode="configured_hard_capacity",
+        operational_capacity_known=True
+    )
+    payload["allow_partial_plan"] = True
+    payload["time_capacity_known"] = True
+    payload["commercials"][0]["max_route_minutes_by_date"] = {START_DATE: 40}
+    payload["commercials"][0]["max_load_units_by_date"] = {START_DATE: 5.0}
+
+    result = solve_coverage_plan(payload)
+
+    assert result["status"] == "partial_success"
+    assert result["blocks"][0]["capacity"]["planned_load_units"] <= 5.0 + 1e-9
+    assert result["blocks"][0]["time"]["route_minutes_without_break"] <= 40.0 + 1e-9
+    assert result["diagnostics"]["truck_capacity_issues"] == []
+    assert result["diagnostics"]["time_capacity_issues"] == []
+
+
+def test_1c_sales_v2_ignores_recovery_only_value_changes():
+    clients = build_clients(3, allowed_codes=["C001"], predicted_ca=50.0)
+    sales_scores = [90, 60, 20]
+    sales_values = [800, 400, 120]
+    sales_dates = ["2026-08-04", "2026-08-05", "2026-08-06"]
+    for index, client in enumerate(clients):
+        client["client_id"] = f"1c-sales-{index + 1}"
+        client["client_code"] = f"1CS{index + 1:03d}"
+        client["purchase_prediction_score"] = sales_scores[index]
+        client["predicted_purchase_date"] = sales_dates[index]
+        client["purchase_days_until_prediction"] = index + 1
+        client["expected_order_value"] = sales_values[index]
+        client["recommended_quantity"] = index + 2
+        client["purchase_prediction_known"] = True
+
+    payload = base_payload(
+        clients=clients,
+        commercials=build_commercials(
+            count=1,
+            days=3,
+            max_visits=2,
+            commercial_codes=["C001"],
+            hard_capacities={"C001": 1}
+        ),
+        planning_days=3,
+        capacity_mode="configured_hard_capacity",
+        operational_capacity_known=True,
+        planning_mode="sales_coverage"
+    )
+
+    baseline_result = solve_coverage_plan(payload)
+
+    recovery_only_changed_payload = json.loads(json.dumps(payload))
+    for index, client in enumerate(recovery_only_changed_payload["clients"]):
+        client["recovery_priority_score"] = [5, 900, 1200][index]
+        client["recovery_expected_collection_amount"] = [10.0, 5000.0, 9000.0][index]
+        client["recovery_days_past_due"] = [0, 30, 45][index]
+        client["recovery_due_amount"] = [0.0, 5000.0, 9000.0][index]
+        client["recovery_data_known"] = True
+
+    changed_result = solve_coverage_plan(recovery_only_changed_payload)
+
+    def assignment_map(result):
+        return {
+            client["client_id"]: (block["date"], block["commercial_code"])
+            for block in result["blocks"]
+            for client in block["clients"]
+        }
+
+    assert baseline_result["status"] == "success"
+    assert changed_result["status"] == "success"
+    assert assignment_map(baseline_result) == assignment_map(changed_result)
+
+
 def test_ba_client_ids_keep_purchase_predictions_distinct_for_00152_and_152():
     clients = build_clients(2, allowed_codes=["C001"], predicted_ca=50.0)
     clients[0]["client_id"] = "1"
@@ -2905,6 +3136,7 @@ def test_ba_client_ids_keep_purchase_predictions_distinct_for_00152_and_152():
         capacity_mode="configured_hard_capacity",
         operational_capacity_known=True
     )
+    payload["planning_mode"] = "sales_coverage"
 
     result = solve_coverage_plan(payload)
     dates = {
@@ -2946,6 +3178,7 @@ def test_bb_complete_coverage_keeps_all_clients_and_adjusts_dates_by_purchase_op
         capacity_mode="configured_hard_capacity",
         operational_capacity_known=True
     )
+    payload["planning_mode"] = "sales_coverage"
 
     result = solve_coverage_plan(payload)
     ordered_rows = sorted(
@@ -4023,6 +4256,724 @@ def test_cf_sales_coverage_normalize_payload_keeps_horizon_window_and_mode_disti
     assert normalized["coverage_window_days"] == 14
     assert normalized["daily_max_mode"] == "strict"
     assert normalized["clients"][0].last_real_visit_date is None
+
+
+def test_collection_target_context_full_coverage_for_empty_invalid_negative_and_zero_targets():
+    normalized_clients = build_normalized_clients_for_collection_target_context([120.12, None, 0.0])
+
+    for invalid_target in ("", "abc", None, -10, 0):
+        result = build_collection_target_context(normalized_clients, invalid_target)
+        assert result == {
+            "mode": "full_coverage",
+            "requested_target_collection_amount": None,
+            "estimated_available_collection_amount": 120.12,
+            "estimated_collection_gap_amount": None,
+            "is_target_collection_reachable": None,
+            "clients_with_collection_estimate_count": 2,
+            "clients_without_collection_estimate_count": 1,
+        }
+
+
+def test_collection_target_context_uses_only_known_positive_estimates_and_rounds_stably():
+    normalized_clients = build_normalized_clients_for_collection_target_context([120.125, 50.335, 0.0, None])
+
+    result = build_collection_target_context(normalized_clients, 200.005)
+
+    assert result == {
+        "mode": "target_collection",
+        "requested_target_collection_amount": 200.01,
+        "estimated_available_collection_amount": 170.46,
+        "estimated_collection_gap_amount": 29.55,
+        "is_target_collection_reachable": False,
+        "clients_with_collection_estimate_count": 3,
+        "clients_without_collection_estimate_count": 1,
+    }
+
+
+def test_collection_target_context_is_order_independent_and_detects_reachable_target():
+    normalized_clients = build_normalized_clients_for_collection_target_context([120.125, 50.335, 0.0, None])
+
+    ordered_result = build_collection_target_context(normalized_clients, 170.459)
+    reversed_result = build_collection_target_context(list(reversed(normalized_clients)), 170.459)
+
+    assert ordered_result == {
+        "mode": "target_collection",
+        "requested_target_collection_amount": 170.46,
+        "estimated_available_collection_amount": 170.46,
+        "estimated_collection_gap_amount": 0.0,
+        "is_target_collection_reachable": True,
+        "clients_with_collection_estimate_count": 3,
+        "clients_without_collection_estimate_count": 1,
+    }
+    assert reversed_result == ordered_result
+
+
+def test_collection_target_payload_propagates_recovery_context_into_normalized_analysis_and_functional_metadata():
+    clients = build_clients(3, allowed_codes=["C001"], predicted_ca=100.0)
+    recovery_amounts = [120.125, 50.335, None]
+    for index, client in enumerate(clients):
+        client["client_id"] = f"ctp-recovery-{index + 1}"
+        client["client_code"] = f"CTPR{index + 1:03d}"
+        client["recovery_expected_collection_amount"] = recovery_amounts[index]
+        client["recovery_priority_score"] = 90 - (index * 10)
+        client["recovery_data_known"] = recovery_amounts[index] is not None
+
+    payload = base_payload(
+        clients=clients,
+        commercials=build_commercials(count=1, days=3, max_visits=3, commercial_codes=["C001"]),
+        planning_days=3,
+        capacity_mode="configured_hard_capacity",
+        operational_capacity_known=True,
+    )
+    payload["target_collection_amount"] = 170.459
+
+    expected_context = {
+        "mode": "target_collection",
+        "requested_target_collection_amount": 170.46,
+        "estimated_available_collection_amount": 170.46,
+        "estimated_collection_gap_amount": 0.0,
+        "is_target_collection_reachable": True,
+        "clients_with_collection_estimate_count": 2,
+        "clients_without_collection_estimate_count": 1,
+    }
+
+    normalized = normalize_payload(payload)
+    assert normalized["collection_target_context"] == expected_context
+
+    context = build_coverage_optimization_context(normalized, payload_already_normalized=True)
+    analysis = build_coverage_analysis_summary_from_context(context)
+    assert analysis["collection_target_context"] == expected_context
+
+    result = solve_coverage_plan(payload)
+    assert result["analysis"]["collection_target_context"] == expected_context
+    assert result["functional_metadata"]["collection_target_context"] == expected_context
+
+
+def test_collection_target_payload_defaults_to_full_coverage_by_default_in_recovery():
+    clients = build_clients(2, allowed_codes=["C001"], predicted_ca=100.0)
+    recovery_amounts = [120.12, None]
+    for index, client in enumerate(clients):
+        client["client_id"] = f"ctp-default-{index + 1}"
+        client["client_code"] = f"CTPD{index + 1:03d}"
+        client["recovery_expected_collection_amount"] = recovery_amounts[index]
+        client["recovery_data_known"] = recovery_amounts[index] is not None
+
+    payload = base_payload(
+        clients=clients,
+        commercials=build_commercials(count=1, days=2, max_visits=2, commercial_codes=["C001"]),
+        planning_days=2,
+        capacity_mode="configured_hard_capacity",
+        operational_capacity_known=True,
+    )
+
+    expected_context = {
+        "mode": "full_coverage",
+        "requested_target_collection_amount": None,
+        "estimated_available_collection_amount": 120.12,
+        "estimated_collection_gap_amount": None,
+        "is_target_collection_reachable": None,
+        "clients_with_collection_estimate_count": 1,
+        "clients_without_collection_estimate_count": 1,
+    }
+
+    normalized = normalize_payload(payload)
+    assert normalized["collection_target_context"] == expected_context
+
+    zero_target_payload = json.loads(json.dumps(payload))
+    zero_target_payload["target_collection_amount"] = 0
+    result = solve_coverage_plan(zero_target_payload)
+    assert result["analysis"]["collection_target_context"] == expected_context
+    assert result["functional_metadata"]["collection_target_context"] == expected_context
+
+
+def test_collection_target_payload_sales_v2_ignores_target_collection_amount():
+    clients = build_clients(3, allowed_codes=["C001"], predicted_ca=50.0)
+    for index, client in enumerate(clients):
+        client["client_id"] = f"ctp-sales-{index + 1}"
+        client["client_code"] = f"CTPS{index + 1:03d}"
+        client["purchase_prediction_score"] = 90 - (index * 20)
+        client["predicted_purchase_date"] = f"2026-08-0{index + 4}"
+        client["purchase_days_until_prediction"] = index + 1
+        client["expected_order_value"] = 700 - (index * 100)
+        client["recommended_quantity"] = index + 1
+        client["purchase_prediction_known"] = True
+        client["recovery_expected_collection_amount"] = 5000.0 + (index * 1000.0)
+        client["recovery_priority_score"] = 1000.0 - (index * 100.0)
+        client["recovery_data_known"] = True
+
+    payload = base_payload(
+        clients=clients,
+        commercials=build_commercials(
+            count=1,
+            days=3,
+            max_visits=1,
+            commercial_codes=["C001"],
+            hard_capacities={"C001": 1},
+        ),
+        planning_days=3,
+        capacity_mode="configured_hard_capacity",
+        operational_capacity_known=True,
+        planning_mode="sales_coverage",
+    )
+    payload["target_collection_amount"] = 9999.99
+
+    normalized = normalize_payload(payload)
+    assert "collection_target_context" not in normalized
+
+    context = build_coverage_optimization_context(normalized, payload_already_normalized=True)
+    analysis = build_coverage_analysis_summary_from_context(context)
+    assert "collection_target_context" not in analysis
+
+    result = solve_coverage_plan(payload)
+    assert "collection_target_context" not in result["analysis"]
+    assert "functional_metadata" not in result
+
+
+def test_collection_target_payload_applies_target_after_solver_integration():
+    clients = build_clients(3, allowed_codes=["C001"], predicted_ca=100.0)
+    recovery_amounts = [180.0, 110.0, 60.0]
+    for index, client in enumerate(clients):
+        client["client_id"] = f"ctp-stable-{index + 1}"
+        client["client_code"] = f"CTPI{index + 1:03d}"
+        client["recovery_expected_collection_amount"] = recovery_amounts[index]
+        client["recovery_priority_score"] = 90 - (index * 20)
+        client["recovery_days_past_due"] = 30 - (index * 5)
+        client["recovery_due_amount"] = recovery_amounts[index]
+        client["recovery_data_known"] = True
+
+    payload = base_payload(
+        clients=clients,
+        commercials=build_commercials(
+            count=1,
+            days=3,
+            max_visits=1,
+            commercial_codes=["C001"],
+            hard_capacities={"C001": 1},
+        ),
+        planning_days=3,
+        capacity_mode="configured_hard_capacity",
+        operational_capacity_known=True,
+    )
+
+    baseline_result = solve_coverage_plan(json.loads(json.dumps(payload)))
+    targeted_payload = json.loads(json.dumps(payload))
+    targeted_payload["target_collection_amount"] = 200.0
+    targeted_result = solve_coverage_plan(targeted_payload)
+
+    assert baseline_result["analysis"]["collection_target_context"]["mode"] == "full_coverage"
+    assert targeted_result["analysis"]["collection_target_context"]["mode"] == "target_collection"
+
+    baseline_ids = {
+        client["client_id"]
+        for block in baseline_result["blocks"]
+        for client in block["clients"]
+    }
+    targeted_ids = {
+        client["client_id"]
+        for block in targeted_result["blocks"]
+        for client in block["clients"]
+    }
+    targeted_analysis = targeted_result["analysis"]
+
+    assert baseline_ids == {"ctp-stable-1", "ctp-stable-2", "ctp-stable-3"}
+    assert targeted_ids == {"ctp-stable-1", "ctp-stable-2"}
+    assert targeted_analysis["estimated_assigned_collection_amount"] == 290.0
+    assert targeted_analysis["is_target_collection_reached"] is True
+    assert targeted_analysis["collection_target_stop_reason"] == "target_reached"
+
+
+def build_collection_target_solver_contract_recovery_payload(
+    client_specs,
+    *,
+    commercial_codes=None,
+):
+    commercial_codes = list(commercial_codes or ["C001", "C002", "C003"])
+    clients = build_clients(
+        len(client_specs),
+        allowed_codes=[commercial_codes[0]],
+        predicted_ca=100.0,
+    )
+
+    for index, (client, spec) in enumerate(zip(clients, client_specs)):
+        allowed_codes = list(spec.get("allowed_commercial_codes") or [commercial_codes[min(index, len(commercial_codes) - 1)]])
+        expected_collection_amount = spec.get("recovery_expected_collection_amount")
+        client["client_id"] = spec["client_id"]
+        client["client_code"] = spec.get("client_code", f"CTSC{index + 1:03d}")
+        client["client_name"] = spec.get("client_name", f"Collection Contract {index + 1}")
+        client["allowed_commercial_codes"] = allowed_codes
+        client["historical_commercial_code"] = spec.get(
+            "historical_commercial_code",
+            allowed_codes[0] if allowed_codes else None,
+        )
+        client["recovery_expected_collection_amount"] = expected_collection_amount
+        client["recovery_priority_score"] = spec.get("recovery_priority_score", 0.0)
+        client["recovery_days_past_due"] = spec.get("recovery_days_past_due", 30 - index)
+        client["recovery_due_amount"] = spec.get("recovery_due_amount", expected_collection_amount)
+        client["recovery_data_known"] = spec.get("recovery_data_known", True)
+        client["next_visit_deadline"] = spec.get("next_visit_deadline", START_DATE)
+        client["is_mandatory"] = spec.get("is_mandatory", True)
+
+    return base_payload(
+        clients=clients,
+        commercials=build_commercials(
+            count=len(commercial_codes),
+            days=1,
+            max_visits=1,
+            commercial_codes=commercial_codes,
+            hard_capacities={commercial_code: 1 for commercial_code in commercial_codes},
+        ),
+        planning_days=1,
+        capacity_mode="configured_hard_capacity",
+        operational_capacity_known=True,
+    )
+
+
+def collection_target_solver_contract_planned_clients(result):
+    return [
+        client
+        for block in result["blocks"]
+        for client in block["clients"]
+    ]
+
+
+def collection_target_solver_contract_selection_snapshot(result):
+    return sorted(
+        (
+            block["date"],
+            block["commercial_code"],
+            tuple(client["client_id"] for client in block["clients"]),
+        )
+        for block in result["blocks"]
+        if block["clients"]
+    )
+
+
+def collection_target_solver_contract_planned_collection_amount(result):
+    total = 0.0
+    for client in collection_target_solver_contract_planned_clients(result):
+        amount = client.get("recovery_expected_collection_amount")
+        if isinstance(amount, (int, float)) and amount > 0:
+            total += float(amount)
+    return round(total, 2)
+
+
+def solve_collection_target_solver_contract(payload, monkeypatch, solver_kind):
+    monkeypatch.setenv("COVERAGE_PERF_DEBUG", "true")
+    if solver_kind == "greedy":
+        monkeypatch.setattr(optimizer_module, "GREEDY_CP_SAT_CANDIDATE_THRESHOLD", 0)
+        expected_solver = "solve_greedy_capacity_plan"
+    else:
+        if optimizer_module.cp_model is None:
+            pytest.skip("OR-Tools indisponible dans l'environnement Python.")
+        monkeypatch.setattr(optimizer_module, "GREEDY_CP_SAT_CANDIDATE_THRESHOLD", 10_000)
+        expected_solver = "CpSolver.Solve"
+
+    result = solve_coverage_plan(json.loads(json.dumps(payload)))
+
+    assert result["status"] == "success"
+    assert result["meta"]["solver_selection"]["selected_solver"] == expected_solver
+    return result
+
+
+@pytest.mark.parametrize("solver_kind", ["greedy", "cp_sat"], ids=["greedy", "cp_sat"])
+def test_collection_target_solver_contract_full_coverage_keeps_current_selection(monkeypatch, solver_kind):
+    payload = build_collection_target_solver_contract_recovery_payload([
+        {
+            "client_id": "full-001",
+            "client_code": "FULL001",
+            "allowed_commercial_codes": ["C001"],
+            "recovery_expected_collection_amount": 80.0,
+            "recovery_priority_score": 100.0,
+        },
+        {
+            "client_id": "full-002",
+            "client_code": "FULL002",
+            "allowed_commercial_codes": ["C002"],
+            "recovery_expected_collection_amount": 50.0,
+            "recovery_priority_score": 90.0,
+        },
+        {
+            "client_id": "full-003",
+            "client_code": "FULL003",
+            "allowed_commercial_codes": ["C003"],
+            "recovery_expected_collection_amount": 30.0,
+            "recovery_priority_score": 80.0,
+        },
+    ])
+
+    baseline_result = solve_collection_target_solver_contract(payload, monkeypatch, solver_kind)
+    zero_target_payload = json.loads(json.dumps(payload))
+    zero_target_payload["target_collection_amount"] = 0.0
+    zero_target_result = solve_collection_target_solver_contract(zero_target_payload, monkeypatch, solver_kind)
+
+    assert baseline_result["analysis"]["collection_target_context"]["mode"] == "full_coverage"
+    assert zero_target_result["analysis"]["collection_target_context"]["mode"] == "full_coverage"
+    assert collection_target_solver_contract_selection_snapshot(baseline_result) == collection_target_solver_contract_selection_snapshot(zero_target_result)
+    assert compute_functional_result_hash(baseline_result) == compute_functional_result_hash(zero_target_result)
+
+
+@pytest.mark.parametrize("solver_kind", ["greedy", "cp_sat"], ids=["greedy", "cp_sat"])
+def test_collection_target_solver_contract_target_collection_keeps_enough_actual_clients_without_selecting_everyone(monkeypatch, solver_kind):
+    payload = build_collection_target_solver_contract_recovery_payload([
+        {
+            "client_id": "target-001",
+            "client_code": "TARG001",
+            "allowed_commercial_codes": ["C001"],
+            "recovery_expected_collection_amount": 70.0,
+            "recovery_priority_score": 100.0,
+        },
+        {
+            "client_id": "target-002",
+            "client_code": "TARG002",
+            "allowed_commercial_codes": ["C002"],
+            "recovery_expected_collection_amount": 60.0,
+            "recovery_priority_score": 90.0,
+        },
+        {
+            "client_id": "target-003",
+            "client_code": "TARG003",
+            "allowed_commercial_codes": ["C003"],
+            "recovery_expected_collection_amount": 500.0,
+            "recovery_priority_score": 80.0,
+        },
+    ])
+    payload["target_collection_amount"] = 130.0
+
+    result = solve_collection_target_solver_contract(payload, monkeypatch, solver_kind)
+    planned_client_ids = sorted(client["client_id"] for client in collection_target_solver_contract_planned_clients(result))
+
+    assert planned_client_ids == ["target-001", "target-002"]
+    assert collection_target_solver_contract_planned_collection_amount(result) == 130.0
+    assert len(planned_client_ids) == 2
+
+
+@pytest.mark.parametrize("solver_kind", ["greedy", "cp_sat"], ids=["greedy", "cp_sat"])
+def test_collection_target_solver_contract_continues_with_next_candidates_when_shared_slot_blocks_priority_client(monkeypatch, solver_kind):
+    payload = build_collection_target_solver_contract_recovery_payload([
+        {
+            "client_id": "slot-anchor",
+            "client_code": "ANCHOR001",
+            "allowed_commercial_codes": ["C001"],
+            "recovery_expected_collection_amount": 100.0,
+            "recovery_priority_score": 100.0,
+        },
+        {
+            "client_id": "blocked-priority",
+            "client_code": "BLOCK001",
+            "allowed_commercial_codes": ["C001"],
+            "recovery_expected_collection_amount": 90.0,
+            "recovery_priority_score": 95.0,
+        },
+        {
+            "client_id": "fallback-001",
+            "client_code": "FALL001",
+            "allowed_commercial_codes": ["C002"],
+            "recovery_expected_collection_amount": 65.0,
+            "recovery_priority_score": 90.0,
+        },
+        {
+            "client_id": "fallback-002",
+            "client_code": "FALL002",
+            "allowed_commercial_codes": ["C003"],
+            "recovery_expected_collection_amount": 20.0,
+            "recovery_priority_score": 80.0,
+        },
+    ])
+    payload["target_collection_amount"] = 165.0
+
+    result = solve_collection_target_solver_contract(payload, monkeypatch, solver_kind)
+    planned_client_ids = sorted(client["client_id"] for client in collection_target_solver_contract_planned_clients(result))
+
+    assert planned_client_ids == ["fallback-001", "slot-anchor"]
+    assert "blocked-priority" not in planned_client_ids
+    assert collection_target_solver_contract_planned_collection_amount(result) == 165.0
+
+
+def test_collection_target_solver_contract_metadata_reports_only_really_assigned_collection_and_best_effort_when_target_is_unreachable(monkeypatch):
+    payload = build_collection_target_solver_contract_recovery_payload(
+        [
+            {
+                "client_id": "meta-anchor",
+                "client_code": "META001",
+                "allowed_commercial_codes": ["C001"],
+                "recovery_expected_collection_amount": 100.0,
+                "recovery_priority_score": 100.0,
+            },
+            {
+                "client_id": "meta-blocked",
+                "client_code": "META002",
+                "allowed_commercial_codes": ["C001"],
+                "recovery_expected_collection_amount": 90.0,
+                "recovery_priority_score": 95.0,
+            },
+            {
+                "client_id": "meta-fallback",
+                "client_code": "META003",
+                "allowed_commercial_codes": ["C002"],
+                "recovery_expected_collection_amount": 60.0,
+                "recovery_priority_score": 90.0,
+            },
+        ],
+        commercial_codes=["C001", "C002"],
+    )
+    payload["target_collection_amount"] = 180.0
+
+    result = solve_collection_target_solver_contract(payload, monkeypatch, "greedy")
+    planned_client_ids = sorted(client["client_id"] for client in collection_target_solver_contract_planned_clients(result))
+    achieved_collection_amount = collection_target_solver_contract_planned_collection_amount(result)
+    expected_context = {
+        "mode": "target_collection",
+        "requested_target_collection_amount": 180.0,
+        "selected_estimated_collection_amount": 160.0,
+        "estimated_remaining_amount": 20.0,
+        "is_target_reached": False,
+    }
+
+    assert result["status"] == "success"
+    assert result["summary"]["solver_status"] == "FEASIBLE"
+    assert planned_client_ids == ["meta-anchor", "meta-fallback"]
+    assert "meta-blocked" not in planned_client_ids
+    assert achieved_collection_amount == 160.0
+    for key, value in expected_context.items():
+        assert result["analysis"]["collection_target_context"][key] == value
+        assert result["functional_metadata"]["collection_target_context"][key] == value
+
+
+@pytest.mark.parametrize("solver_kind", ["greedy", "cp_sat"], ids=["greedy", "cp_sat"])
+def test_collection_target_solver_contract_distinguishes_00152_from_152_in_blocks(monkeypatch, solver_kind):
+    payload = build_collection_target_solver_contract_recovery_payload(
+        [
+            {
+                "client_id": "00152",
+                "client_code": "00152",
+                "allowed_commercial_codes": ["C001"],
+                "recovery_expected_collection_amount": 10.0,
+                "recovery_priority_score": 100.0,
+            },
+            {
+                "client_id": "152",
+                "client_code": "152",
+                "allowed_commercial_codes": ["C002"],
+                "recovery_expected_collection_amount": 15.0,
+                "recovery_priority_score": 90.0,
+            },
+        ],
+        commercial_codes=["C001", "C002"],
+    )
+    payload["target_collection_amount"] = 25.0
+
+    result = solve_collection_target_solver_contract(payload, monkeypatch, solver_kind)
+    planned_client_ids = sorted(client["client_id"] for client in collection_target_solver_contract_planned_clients(result))
+    planned_client_codes = sorted(client["client_code"] for client in collection_target_solver_contract_planned_clients(result))
+
+    assert planned_client_ids == ["00152", "152"]
+    assert planned_client_codes == ["00152", "152"]
+    assert len(set(planned_client_ids)) == 2
+
+
+def test_collection_target_solver_contract_sales_v2_remains_unchanged(monkeypatch):
+    baseline_result = solve_collection_target_solver_contract(
+        build_perf4b_sales_greedy_payload(),
+        monkeypatch,
+        "greedy",
+    )
+    targeted_payload = build_perf4b_sales_greedy_payload()
+    targeted_payload["target_collection_amount"] = 9999.99
+    targeted_result = solve_collection_target_solver_contract(
+        targeted_payload,
+        monkeypatch,
+        "greedy",
+    )
+
+    assert collection_target_solver_contract_selection_snapshot(baseline_result) == collection_target_solver_contract_selection_snapshot(targeted_result)
+    assert compute_functional_result_hash(baseline_result) == compute_functional_result_hash(targeted_result)
+    assert "collection_target_context" not in targeted_result["analysis"]
+    assert "functional_metadata" not in targeted_result
+
+
+def test_collection_target_candidate_selection_full_coverage_keeps_all_candidates_in_order():
+    ordered_candidates = [
+        {"client_id": "001", "recovery_expected_collection_amount": 10.125},
+        {"client_id": "002", "recovery_expected_collection_amount": None},
+        {"client_id": "003", "recovery_expected_collection_amount": 0},
+    ]
+
+    result = apply_collection_target_candidate_selection(
+        ordered_candidates,
+        {"mode": "full_coverage", "requested_target_collection_amount": None},
+    )
+
+    assert result == {
+        "mode": "full_coverage",
+        "requested_target_collection_amount": None,
+        "selected_candidates": ordered_candidates,
+        "selected_candidates_count": 3,
+        "selected_estimated_collection_amount": 10.13,
+        "is_target_reached": True,
+        "estimated_remaining_amount": 0.0,
+        "stop_reason": "full_coverage",
+    }
+
+
+def test_collection_target_candidate_selection_keeps_minimal_prefix_when_target_is_reached():
+    ordered_candidates = [
+        {"client_id": "001", "recovery_expected_collection_amount": None},
+        {"client_id": "002", "recovery_expected_collection_amount": 40.0},
+        {"client_id": "003", "recovery_expected_collection_amount": 60.0},
+        {"client_id": "004", "recovery_expected_collection_amount": 500.0},
+    ]
+
+    result = apply_collection_target_candidate_selection(
+        ordered_candidates,
+        {"mode": "target_collection", "requested_target_collection_amount": 100.0},
+    )
+
+    assert result == {
+        "mode": "target_collection",
+        "requested_target_collection_amount": 100.0,
+        "selected_candidates": ordered_candidates[:3],
+        "selected_candidates_count": 3,
+        "selected_estimated_collection_amount": 100.0,
+        "is_target_reached": True,
+        "estimated_remaining_amount": 0.0,
+        "stop_reason": "target_reached",
+    }
+
+
+def test_collection_target_candidate_selection_keeps_last_necessary_candidate_when_target_is_exceeded():
+    ordered_candidates = [
+        {"client_id": "001", "recovery_expected_collection_amount": 25.0},
+        {"client_id": "002", "recovery_expected_collection_amount": 30.0},
+        {"client_id": "003", "recovery_expected_collection_amount": 50.0},
+        {"client_id": "004", "recovery_expected_collection_amount": 5.0},
+    ]
+
+    result = apply_collection_target_candidate_selection(
+        ordered_candidates,
+        {"mode": "target_collection", "requested_target_collection_amount": 100.0},
+    )
+
+    assert result == {
+        "mode": "target_collection",
+        "requested_target_collection_amount": 100.0,
+        "selected_candidates": ordered_candidates[:3],
+        "selected_candidates_count": 3,
+        "selected_estimated_collection_amount": 105.0,
+        "is_target_reached": True,
+        "estimated_remaining_amount": 0.0,
+        "stop_reason": "target_reached",
+    }
+
+
+def test_collection_target_candidate_selection_treats_null_invalid_and_zero_estimates_as_zero():
+    ordered_candidates = [
+        {"client_id": "001", "recovery_expected_collection_amount": "abc"},
+        {"client_id": "002", "recovery_expected_collection_amount": 0},
+        {"client_id": "003", "recovery_expected_collection_amount": None},
+        {"client_id": "004", "recovery_expected_collection_amount": 30.0},
+        {"client_id": "005", "recovery_expected_collection_amount": 20.0},
+    ]
+
+    result = apply_collection_target_candidate_selection(
+        ordered_candidates,
+        {"mode": "target_collection", "requested_target_collection_amount": 50.0},
+    )
+
+    assert result == {
+        "mode": "target_collection",
+        "requested_target_collection_amount": 50.0,
+        "selected_candidates": ordered_candidates,
+        "selected_candidates_count": 5,
+        "selected_estimated_collection_amount": 50.0,
+        "is_target_reached": True,
+        "estimated_remaining_amount": 0.0,
+        "stop_reason": "target_reached",
+    }
+
+
+def test_collection_target_candidate_selection_keeps_all_candidates_when_target_is_unreachable():
+    ordered_candidates = [
+        {"client_id": "001", "recovery_expected_collection_amount": 20.0},
+        {"client_id": "002", "recovery_expected_collection_amount": 30.0},
+        {"client_id": "003", "recovery_expected_collection_amount": None},
+    ]
+
+    result = apply_collection_target_candidate_selection(
+        ordered_candidates,
+        {"mode": "target_collection", "requested_target_collection_amount": 75.0},
+    )
+
+    assert result == {
+        "mode": "target_collection",
+        "requested_target_collection_amount": 75.0,
+        "selected_candidates": ordered_candidates,
+        "selected_candidates_count": 3,
+        "selected_estimated_collection_amount": 50.0,
+        "is_target_reached": False,
+        "estimated_remaining_amount": 25.0,
+        "stop_reason": "target_unreachable",
+    }
+
+
+def test_collection_target_candidate_selection_handles_empty_candidate_list():
+    result = apply_collection_target_candidate_selection(
+        [],
+        {"mode": "target_collection", "requested_target_collection_amount": 75.0},
+    )
+
+    assert result == {
+        "mode": "target_collection",
+        "requested_target_collection_amount": 75.0,
+        "selected_candidates": [],
+        "selected_candidates_count": 0,
+        "selected_estimated_collection_amount": 0.0,
+        "is_target_reached": False,
+        "estimated_remaining_amount": 75.0,
+        "stop_reason": "no_candidates",
+    }
+
+
+def test_collection_target_candidate_selection_preserves_order_and_distinguishes_00152_from_152():
+    ordered_candidates = [
+        {"client_id": "00152", "recovery_expected_collection_amount": 10.0},
+        {"client_id": "152", "recovery_expected_collection_amount": 15.0},
+        {"client_id": "00099", "recovery_expected_collection_amount": 25.0},
+    ]
+
+    result = apply_collection_target_candidate_selection(
+        ordered_candidates,
+        {"mode": "target_collection", "requested_target_collection_amount": 25.0},
+    )
+
+    assert [candidate["client_id"] for candidate in result["selected_candidates"]] == ["00152", "152"]
+    assert result["selected_candidates"][0]["client_id"] != result["selected_candidates"][1]["client_id"]
+    assert result["selected_candidates"] == ordered_candidates[:2]
+
+
+def test_collection_target_candidate_selection_does_not_mutate_inputs():
+    ordered_candidates = [
+        {"client_id": "00152", "recovery_expected_collection_amount": 10.005, "nested": {"value": "A"}},
+        {"client_id": "152", "recovery_expected_collection_amount": None, "nested": {"value": "B"}},
+        {"client_id": "900", "recovery_expected_collection_amount": 15.005, "nested": {"value": "C"}},
+    ]
+    original_candidates_snapshot = json.loads(json.dumps(ordered_candidates))
+    collection_target_context = {
+        "mode": "target_collection",
+        "requested_target_collection_amount": 25.01,
+    }
+    original_context_snapshot = json.loads(json.dumps(collection_target_context))
+
+    result = apply_collection_target_candidate_selection(
+        ordered_candidates,
+        collection_target_context,
+    )
+
+    assert ordered_candidates == original_candidates_snapshot
+    assert collection_target_context == original_context_snapshot
+    assert result["selected_candidates"] == ordered_candidates
+    assert result["selected_candidates"][0] is ordered_candidates[0]
+    assert result["selected_candidates"][1] is ordered_candidates[1]
+    assert result["selected_candidates"][2] is ordered_candidates[2]
 
 
 def test_cg_sales_coverage_result_exposes_single_visit_only_without_inventing_history():

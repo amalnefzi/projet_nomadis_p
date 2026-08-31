@@ -1219,6 +1219,290 @@ class NomadisFeatureStoreServingTest(unittest.TestCase):
 
         self.assertEqual(result["predictions"], {})
 
+    def test_dashboard_output_global_rounding_avoids_fractional_all_zero_collapse(self):
+        filtered_clients = pd.DataFrame([
+            {
+                "client_id": "204",
+                "client_code": "00204",
+                "Score": 88.0,
+                "Confidence": 71.0,
+                "VIP": 60,
+                "Qte_predite": 0.38,
+                "Vn_predit": 38.0,
+                "Pred_ca_if_buy": 100.0,
+                "Pred_qte_if_buy": 4.0,
+                "Prob_achat": 35.0,
+                "Prob_modele": 33.0,
+                "Habit_score": 44.0,
+                "Recency_score": 40.0,
+                "Cadence_score": 55.0,
+                "Basket_fit_score": 61.0,
+                "home_commercial": "1",
+                "Prix_pred": 10.0,
+            },
+            {
+                "client_id": "205",
+                "client_code": "00205",
+                "Score": 83.0,
+                "Confidence": 68.0,
+                "VIP": 55,
+                "Qte_predite": 0.27,
+                "Vn_predit": 27.0,
+                "Pred_ca_if_buy": 90.0,
+                "Pred_qte_if_buy": 3.0,
+                "Prob_achat": 30.0,
+                "Prob_modele": 29.0,
+                "Habit_score": 41.0,
+                "Recency_score": 39.0,
+                "Cadence_score": 52.0,
+                "Basket_fit_score": 54.0,
+                "home_commercial": "1",
+                "Prix_pred": 10.0,
+            },
+            {
+                "client_id": "206",
+                "client_code": "00206",
+                "Score": 79.0,
+                "Confidence": 67.0,
+                "VIP": 52,
+                "Qte_predite": 0.18,
+                "Vn_predit": 18.0,
+                "Pred_ca_if_buy": 80.0,
+                "Pred_qte_if_buy": 2.0,
+                "Prob_achat": 24.0,
+                "Prob_modele": 23.0,
+                "Habit_score": 36.0,
+                "Recency_score": 35.0,
+                "Cadence_score": 47.0,
+                "Basket_fit_score": 49.0,
+                "home_commercial": "1",
+                "Prix_pred": 10.0,
+            },
+            {
+                "client_id": "207",
+                "client_code": "00207",
+                "Score": 76.0,
+                "Confidence": 66.0,
+                "VIP": 49,
+                "Qte_predite": 0.17,
+                "Vn_predit": 17.0,
+                "Pred_ca_if_buy": 75.0,
+                "Pred_qte_if_buy": 2.0,
+                "Prob_achat": 22.0,
+                "Prob_modele": 21.0,
+                "Habit_score": 34.0,
+                "Recency_score": 33.0,
+                "Cadence_score": 44.0,
+                "Basket_fit_score": 45.0,
+                "home_commercial": "1",
+                "Prix_pred": 10.0,
+            },
+        ])
+        preferences_frame = pd.DataFrame([
+            {"client_code": "00204", "produit_nom": "P204", "produit_code": "P204", "qte_moyenne": 1.0},
+            {"client_code": "00205", "produit_nom": "P205", "produit_code": "P205", "qte_moyenne": 1.0},
+            {"client_code": "00206", "produit_nom": "P206", "produit_code": "P206", "qte_moyenne": 1.0},
+            {"client_code": "00207", "produit_nom": "P207", "produit_code": "P207", "qte_moyenne": 1.0},
+        ])
+
+        original_model_affectation = api_ia.model_affectation
+        api_ia.model_affectation = None
+        try:
+            first_result = api_ia.build_dashboard_prediction_output(
+                filtered_clients,
+                selected_limit=4,
+                selected_commercials=[],
+                preferences_frame=preferences_frame,
+            )
+            second_result = api_ia.build_dashboard_prediction_output(
+                filtered_clients,
+                selected_limit=4,
+                selected_commercials=[],
+                preferences_frame=preferences_frame,
+            )
+        finally:
+            api_ia.model_affectation = original_model_affectation
+
+        allocated_total = sum(item["qte"] for item in first_result["predictions"].values())
+        expected_total = round(float(filtered_clients["Qte_predite"].sum()))
+
+        self.assertEqual(first_result["predictions"], second_result["predictions"])
+        self.assertTrue(first_result["predictions"])
+        self.assertEqual(allocated_total, expected_total)
+        self.assertLessEqual(allocated_total, expected_total)
+        self.assertEqual(set(first_result["predictions"].keys()), {"00204"})
+        self.assertEqual(first_result["predictions"]["00204"]["qte"], 1)
+
+    def test_dashboard_output_global_rounding_tie_break_uses_canonical_client_id(self):
+        filtered_clients = pd.DataFrame([
+            {
+                "client_id": "12",
+                "client_code": "00152",
+                "Score": 80.0,
+                "Confidence": 70.0,
+                "VIP": 50,
+                "Qte_predite": 0.5,
+                "Vn_predit": 20.0,
+                "Pred_ca_if_buy": 40.0,
+                "Pred_qte_if_buy": 2.0,
+                "Prob_achat": 20.0,
+                "Prob_modele": 20.0,
+                "Habit_score": 20.0,
+                "Recency_score": 20.0,
+                "Cadence_score": 20.0,
+                "Basket_fit_score": 20.0,
+                "home_commercial": "1",
+                "Prix_pred": 10.0,
+            },
+            {
+                "client_id": "11",
+                "client_code": "152",
+                "Score": 80.0,
+                "Confidence": 70.0,
+                "VIP": 50,
+                "Qte_predite": 0.5,
+                "Vn_predit": 20.0,
+                "Pred_ca_if_buy": 40.0,
+                "Pred_qte_if_buy": 2.0,
+                "Prob_achat": 20.0,
+                "Prob_modele": 20.0,
+                "Habit_score": 20.0,
+                "Recency_score": 20.0,
+                "Cadence_score": 20.0,
+                "Basket_fit_score": 20.0,
+                "home_commercial": "1",
+                "Prix_pred": 10.0,
+            },
+        ])
+
+        allocations, allocated_total = api_ia.allocate_dashboard_client_quantities(filtered_clients)
+
+        self.assertEqual(allocated_total, 1)
+        self.assertEqual(allocations, {"152": 1})
+
+    def test_dashboard_output_global_rounding_stays_empty_when_global_sum_rounds_to_zero(self):
+        filtered_clients = pd.DataFrame([
+            {
+                "client_id": "301",
+                "client_code": "00301",
+                "Score": 70.0,
+                "Confidence": 60.0,
+                "VIP": 40,
+                "Qte_predite": 0.17,
+                "Vn_predit": 17.0,
+                "Pred_ca_if_buy": 60.0,
+                "Pred_qte_if_buy": 2.0,
+                "Prob_achat": 18.0,
+                "Prob_modele": 18.0,
+                "Habit_score": 20.0,
+                "Recency_score": 20.0,
+                "Cadence_score": 20.0,
+                "Basket_fit_score": 20.0,
+                "home_commercial": "1",
+                "Prix_pred": 10.0,
+            },
+            {
+                "client_id": "302",
+                "client_code": "00302",
+                "Score": 69.0,
+                "Confidence": 60.0,
+                "VIP": 40,
+                "Qte_predite": 0.12,
+                "Vn_predit": 12.0,
+                "Pred_ca_if_buy": 55.0,
+                "Pred_qte_if_buy": 2.0,
+                "Prob_achat": 16.0,
+                "Prob_modele": 16.0,
+                "Habit_score": 20.0,
+                "Recency_score": 19.0,
+                "Cadence_score": 19.0,
+                "Basket_fit_score": 19.0,
+                "home_commercial": "1",
+                "Prix_pred": 10.0,
+            },
+        ])
+        preferences_frame = pd.DataFrame([
+            {"client_code": "00301", "produit_nom": "P301", "produit_code": "P301", "qte_moyenne": 1.0},
+            {"client_code": "00302", "produit_nom": "P302", "produit_code": "P302", "qte_moyenne": 1.0},
+        ])
+
+        original_model_affectation = api_ia.model_affectation
+        api_ia.model_affectation = None
+        try:
+            result = api_ia.build_dashboard_prediction_output(
+                filtered_clients,
+                selected_limit=2,
+                selected_commercials=[],
+                preferences_frame=preferences_frame,
+            )
+        finally:
+            api_ia.model_affectation = original_model_affectation
+
+        self.assertEqual(round(float(filtered_clients["Qte_predite"].sum())), 0)
+        self.assertEqual(result["predictions"], {})
+
+    def test_dashboard_output_global_rounding_preserves_existing_integer_quantities(self):
+        filtered_clients = pd.DataFrame([
+            {
+                "client_id": "401",
+                "client_code": "00401",
+                "Score": 82.0,
+                "Confidence": 72.0,
+                "VIP": 61,
+                "Qte_predite": 2.0,
+                "Vn_predit": 40.0,
+                "Pred_ca_if_buy": 50.0,
+                "Pred_qte_if_buy": 3.0,
+                "Prob_achat": 50.0,
+                "Prob_modele": 49.0,
+                "Habit_score": 40.0,
+                "Recency_score": 35.0,
+                "Cadence_score": 45.0,
+                "Basket_fit_score": 42.0,
+                "home_commercial": "1",
+                "Prix_pred": 20.0,
+            },
+            {
+                "client_id": "402",
+                "client_code": "00402",
+                "Score": 78.0,
+                "Confidence": 70.0,
+                "VIP": 57,
+                "Qte_predite": 1.0,
+                "Vn_predit": 10.0,
+                "Pred_ca_if_buy": 20.0,
+                "Pred_qte_if_buy": 1.0,
+                "Prob_achat": 50.0,
+                "Prob_modele": 48.0,
+                "Habit_score": 30.0,
+                "Recency_score": 28.0,
+                "Cadence_score": 33.0,
+                "Basket_fit_score": 31.0,
+                "home_commercial": "1",
+                "Prix_pred": 10.0,
+            },
+        ])
+        preferences_frame = pd.DataFrame([
+            {"client_code": "00401", "produit_nom": "P401", "produit_code": "P401", "qte_moyenne": 2.0},
+            {"client_code": "00402", "produit_nom": "P402", "produit_code": "P402", "qte_moyenne": 1.0},
+        ])
+
+        original_model_affectation = api_ia.model_affectation
+        api_ia.model_affectation = None
+        try:
+            result = api_ia.build_dashboard_prediction_output(
+                filtered_clients,
+                selected_limit=2,
+                selected_commercials=[],
+                preferences_frame=preferences_frame,
+            )
+        finally:
+            api_ia.model_affectation = original_model_affectation
+
+        self.assertEqual(result["predictions"]["00401"]["qte"], 2)
+        self.assertEqual(result["predictions"]["00402"]["qte"], 1)
+        self.assertEqual(sum(item["qte"] for item in result["predictions"].values()), 3)
+
 
 class FeatureStoreSourceSummaryQueryFilterTest(unittest.TestCase):
     def test_source_summary_query_uses_shared_sales_document_policy(self):
