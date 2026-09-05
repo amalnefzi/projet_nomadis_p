@@ -2104,6 +2104,29 @@ def build_model_status_payload():
     }
 
 
+@app.route('/health', methods=['GET'])
+@app.route('/healthz', methods=['GET'])
+def health_check():
+    """Liveness probe pour PM2 / systemd / Docker."""
+    return jsonify({
+        "status": "ok",
+        "service": "nomadis-ai",
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }), 200
+
+
+@app.route('/health/ready', methods=['GET'])
+@app.route('/readyz', methods=['GET'])
+def readiness_check():
+    """Readiness probe: l'API n'est prete que si les modeles sont charges."""
+    payload = build_model_status_payload()
+    models_ready = bool(payload.get('ready'))
+    return jsonify({
+        "status": "ok" if models_ready else "unavailable",
+        **payload
+    }), (200 if models_ready else 503)
+
+
 @app.route('/api/reload-models', methods=['POST'])
 def reload_models():
     success, message = load_artifacts()
@@ -2798,4 +2821,7 @@ def analyze_coverage_plan():
 
 
 if __name__ == '__main__':
-    app.run(port=5001, debug=True, use_reloader=False)
+    _flask_port = int(os.getenv('FLASK_PORT', '5001'))
+    _flask_host = os.getenv('FLASK_HOST', '127.0.0.1')
+    _flask_debug = os.getenv('FLASK_DEBUG', 'False').strip().lower() in ('1', 'true', 'yes', 'on')
+    app.run(host=_flask_host, port=_flask_port, debug=_flask_debug, use_reloader=False)

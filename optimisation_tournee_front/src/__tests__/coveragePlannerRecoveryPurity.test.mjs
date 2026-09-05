@@ -78,8 +78,8 @@ test('recovery form no longer exposes commercial CA inputs while keeping collect
   assert.equal(source.includes('CA minimum journalier'), false)
   assert.equal(source.includes('min_daily_ca_per_commercial'), false)
   assert.equal(source.includes('Objectif de collecte sur la periode (DT)'), true)
-  assert.equal(source.includes('Minimum clients'), true)
-  assert.equal(source.includes('Maximum clients'), true)
+  assert.equal(source.includes('Clients min / commercial / jour'), true)
+  assert.equal(source.includes('Clients max / commercial / jour'), true)
 })
 
 test('recovery KPI sources and detail helpers hide purchase and predicted CA fields', () => {

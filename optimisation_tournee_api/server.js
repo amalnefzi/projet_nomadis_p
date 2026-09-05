@@ -95,6 +95,47 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 
+// --- Health checks (liveness / readiness) for PM2, systemd, Docker et load balancers ---
+const SERVICE_STARTED_AT = Date.now()
+const AI_BASE_URL = process.env.AI_API_URL || 'http://127.0.0.1:5001'
+
+app.get(['/health', '/healthz'], (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'nomadis-api',
+    uptime_s: Math.round((Date.now() - SERVICE_STARTED_AT) / 1000),
+    pid: process.pid,
+    timestamp: new Date().toISOString()
+  })
+})
+
+app.get(['/health/ready', '/readyz'], async (req, res) => {
+  const checks = {}
+  let healthy = true
+
+  try {
+    await queryAsync('SELECT 1')
+    checks.database = { status: 'ok', target: getDbTargetLabel() }
+  } catch (error) {
+    healthy = false
+    checks.database = { status: 'error', target: getDbTargetLabel(), message: formatDbError(error) }
+  }
+
+  try {
+    const aiResponse = await axios.get(`${AI_BASE_URL}/health`, { timeout: 2000 })
+    checks.ai_api = { status: aiResponse.status === 200 ? 'ok' : 'degraded', url: AI_BASE_URL }
+  } catch (error) {
+    // L'API IA est une dependance souple: on la signale sans faire echouer la readiness.
+    checks.ai_api = { status: 'unreachable', url: AI_BASE_URL, message: error.message }
+  }
+
+  res.status(healthy ? 200 : 503).json({
+    status: healthy ? 'ok' : 'unavailable',
+    checks,
+    timestamp: new Date().toISOString()
+  })
+})
+
 const apiDir = __dirname
 const SALES_V2_AUTO_LEARNING_ENABLED = parseBooleanEnv(
   process.env.SALES_V2_LEARNING_AUTO_ENABLED,
@@ -529,6 +570,12 @@ const coveragePurchasePredictionCache = new CoverageHistoryCache({
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value))
+}
+
+function clampNumber(value, min, max, fallback) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return fallback
+  return clamp(parsed, min, max)
 }
 
 function stableStringify(value) {
@@ -2920,6 +2967,7 @@ function buildCoverageRecoveryPayloadFields(profile = null) {
     recovery_priority_score: Number.isFinite(recoveryPriorityScore)
       ? roundScore(Math.max(0, Math.min(100, recoveryPriorityScore)))
       : null,
+    recovery_has_impaye: Number(profile?.legacy?.has_impaye || 0) === 1,
     recovery_data_known: recoveryDataKnown,
     recovery_source: recoverySourceParts.length ? recoverySourceParts.join('|') : null
   }
@@ -3153,6 +3201,9 @@ function buildCoveragePlanInputFromQuery(query = {}) {
     coverage_window_days: query.coverage_window_days,
     visit_frequency_days: query.visit_frequency_days || query.coverage_frequency_days,
     target_collection_amount: query.target_collection_amount,
+    workday_hours: query.workday_hours,
+    visit_service_minutes: query.visit_service_minutes,
+    travel_speed_kmh: query.travel_speed_kmh,
     daily_max_mode: query.daily_max_mode,
     default_max_visits_per_slot: query.default_max_visits_per_slot || query.max_visits,
     min_daily_ca_per_commercial: query.min_daily_ca_per_commercial ?? query.min_daily_ca ?? query.min_total_ca,
@@ -3886,6 +3937,10 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
     Number(rawBody.min_daily_ca_per_commercial ?? rawBody.min_daily_ca ?? rawBody.min_total_ca ?? 0) || 0
   )
   const requestedStrictCa = parseBooleanFlag(rawBody.strict_ca, false)
+  // Parametres de temps estimes (defauts configurables quand la base n'a ni horaires ni duree).
+  const workdayHours = clampNumber(Number(rawBody.workday_hours), 1, 14, 8)
+  const visitServiceMinutes = clampNumber(Number(rawBody.visit_service_minutes), 1, 120, 15)
+  const travelSpeedKmh = clampNumber(Number(rawBody.travel_speed_kmh), 5, 120, 30)
   const minDailyCaPerCommercial = isSalesCoverageMode ? requestedMinDailyCaPerCommercial : 0
   const strictCa = isSalesCoverageMode ? requestedStrictCa : false
   const allowCommercialReassignment = parseBooleanFlag(rawBody.allow_commercial_reassignment, true)
@@ -4269,6 +4324,12 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
         }
         if (Number.isFinite(maxRouteMinutes) && maxRouteMinutes > 0) {
           maxRouteMinutesByDate[date] = roundScore(maxRouteMinutes)
+        } else if (!timeCapacityKnown) {
+          // Aucune donnee terrain: on borne la journee avec l'estimation configurable.
+          maxRouteMinutesByDate[date] = roundScore(workdayHours * 60)
+          if (!timeConstraintSourceByDate[date]) {
+            timeConstraintSourceByDate[date] = 'configured_defaults'
+          }
         }
         if (Number.isFinite(breakMinutes) && breakMinutes >= 0) {
           breakMinutesByDate[date] = roundScore(breakMinutes)
@@ -4556,6 +4617,7 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
       .filter(entry => entry[0])
   )
   const activeCommercialCodes = commercials.map(item => item.code)
+  const commercialGeoByCode = buildCoverageCommercialGeoByCode(activeCommercialCodes, clients)
   const optimizerPayload = await runCoveragePerfStage(perfTracker, 'build_client_payload', async () => ({
     planning_mode: planningMode,
     planning_start_date: startDate,
@@ -4574,9 +4636,13 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
     working_days: workingDaySelection,
     capacity_mode: capacityModeContext.capacityMode,
     time_capacity_known: timeCapacityKnown,
+    time_capacity_basis: timeCapacityKnown ? 'commercial_constraints' : 'configured_defaults',
+    travel_speed_kmh: travelSpeedKmh,
+    assumed_service_minutes: visitServiceMinutes,
     operational_capacity_known: operationalCapacityKnown,
     depot: SHARED_DEPOT_ORIGIN,
     commercials,
+    commercial_geo_by_code: commercialGeoByCode,
     clients: planningClients.map(client => {
       const purchasePredictionContext = isSalesCoverageMode
         ? purchasePredictionProfileByClientId.get(String(client.client_id || '').trim()) || null
@@ -4596,12 +4662,14 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
             predicted_ca_known: false,
             predicted_ca_source: null
           }
-      const recoveryContext = isSalesCoverageMode
-        ? buildCoverageRecoveryPayloadFields(null)
-        : buildCoverageRecoveryPayloadFields(
-            recoveryProfileByClientId.get(String(client.client_id || '').trim()) || null
-          )
+      const recoveryProfileForClient = isSalesCoverageMode
+        ? null
+        : (recoveryProfileByClientId.get(String(client.client_id || '').trim()) || null)
+      const recoveryContext = buildCoverageRecoveryPayloadFields(recoveryProfileForClient)
+      // En recouvrement, le commercial habituel fiable vient des BL du client
+      // (clients.user_code est souvent vide), calculé par loadRecoveryProfiles.
       const historicalCommercialCode = String(
+        recoveryProfileForClient?.legacy?.dominant_commercial_code ||
         client.historical_commercial_code ||
         client.resolved_commercial_code ||
         client.user_code ||
@@ -4655,6 +4723,7 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
         recovery_payment_behavior_score: recoveryContext.recovery_payment_behavior_score,
         recovery_expected_collection_amount: recoveryContext.recovery_expected_collection_amount,
         recovery_priority_score: recoveryContext.recovery_priority_score,
+        recovery_has_impaye: recoveryContext.recovery_has_impaye,
         recovery_data_known: recoveryContext.recovery_data_known,
         recovery_source: recoveryContext.recovery_source,
         purchase_prediction_score: isSalesCoverageMode ? (purchasePredictionContext?.purchase_prediction_score ?? null) : null,
@@ -4704,6 +4773,10 @@ async function buildCoveragePlanningContext(rawBody = {}, dependencyOverrides = 
     capacityMode: capacityModeContext.capacityMode,
     timeCapacityKnown,
     operationalCapacityKnown,
+    timeCapacityBasis: timeCapacityKnown ? 'commercial_constraints' : 'configured_defaults',
+    workdayHours,
+    visitServiceMinutes,
+    travelSpeedKmh,
     hardPhysicalCapacityTotal,
     hardPhysicalLimitedSlotsCount,
     maxHardPhysicalMaxVisitsPerSlot,
@@ -5272,6 +5345,83 @@ function buildCoverageCommercialZoneLabel(client = {}) {
   }
 
   return userCode || 'Non disponible'
+}
+
+// Repere geographique/zone par commercial, derive du repertoire clients deja charge.
+// Sert uniquement a expliquer l'affectation (raison "meme zone" / "plus proche"),
+// jamais a contraindre la selection.
+function buildCoverageCommercialGeoByCode(commercialCodes = [], clients = []) {
+  const wanted = new Set(
+    (Array.isArray(commercialCodes) ? commercialCodes : [])
+      .map(code => String(code || '').trim())
+      .filter(Boolean)
+  )
+  if (!wanted.size) return {}
+
+  const accumulator = new Map()
+  ;(Array.isArray(clients) ? clients : []).forEach(client => {
+    const code = String(
+      client.user_code ||
+      client.historical_commercial_code ||
+      client.resolved_commercial_code ||
+      client.commercial_code ||
+      ''
+    ).trim()
+    if (!code || !wanted.has(code)) return
+
+    const entry = accumulator.get(code) || {
+      delegationCounts: new Map(),
+      regionCounts: new Map(),
+      latSum: 0,
+      lonSum: 0,
+      coordCount: 0
+    }
+    const delegation = String(client.delegation || '').trim()
+    if (delegation) {
+      entry.delegationCounts.set(delegation, (entry.delegationCounts.get(delegation) || 0) + 1)
+    }
+    const region = String(client.region || '').trim()
+    if (region) {
+      entry.regionCounts.set(region, (entry.regionCounts.get(region) || 0) + 1)
+    }
+    const latitude = Number(client.latitude)
+    const longitude = Number(client.longitude)
+    if (Number.isFinite(latitude) && Number.isFinite(longitude) && (latitude !== 0 || longitude !== 0)) {
+      entry.latSum += latitude
+      entry.lonSum += longitude
+      entry.coordCount += 1
+    }
+    accumulator.set(code, entry)
+  })
+
+  const mostFrequent = countsMap => {
+    let bestKey = null
+    let bestCount = -1
+    ;[...countsMap.entries()]
+      .sort((left, right) => right[1] - left[1] || String(left[0]).localeCompare(String(right[0])))
+      .forEach(([key, count]) => {
+        if (count > bestCount) {
+          bestCount = count
+          bestKey = key
+        }
+      })
+    return bestKey
+  }
+
+  const result = {}
+  accumulator.forEach((entry, code) => {
+    const delegation = mostFrequent(entry.delegationCounts)
+    const region = mostFrequent(entry.regionCounts)
+    result[code] = {
+      // delegation est souvent vide -> on retombe sur la region pour la raison "meme zone".
+      zone: delegation || region,
+      delegation,
+      region,
+      ref_latitude: entry.coordCount > 0 ? roundScore(entry.latSum / entry.coordCount) : null,
+      ref_longitude: entry.coordCount > 0 ? roundScore(entry.lonSum / entry.coordCount) : null
+    }
+  })
+  return result
 }
 
 function shouldReplaceCoverageHistoryEntry(previousEntry, nextDate, nextRank) {
@@ -9744,5 +9894,31 @@ module.exports = {
 }
 
 if (require.main === module) {
-  app.listen(PORT, () => console.log(`Serveur API pret sur http://localhost:${PORT}`))
+  const server = app.listen(PORT, () => console.log(`Serveur API pret sur http://localhost:${PORT}`))
+
+  let shuttingDown = false
+  const shutdown = signal => {
+    if (shuttingDown) return
+    shuttingDown = true
+    console.log(`\n[${signal}] Arret propre du serveur Nomadis...`)
+
+    const forceExit = setTimeout(() => {
+      console.error('Arret force apres le delai de grace (10s).')
+      process.exit(1)
+    }, 10000)
+    forceExit.unref()
+
+    server.close(() => {
+      try {
+        dbPool.end(() => {
+          console.log('Pool MySQL ferme. Arret termine.')
+          process.exit(0)
+        })
+      } catch (error) {
+        process.exit(0)
+      }
+    })
+  }
+
+  ;['SIGINT', 'SIGTERM'].forEach(signal => process.on(signal, () => shutdown(signal)))
 }

@@ -176,7 +176,8 @@ model_achat = XGBClassifier(
     objective='binary:logistic',
     eval_metric='logloss',
     random_state=42,
-    verbosity=0
+    verbosity=0,
+    scale_pos_weight=achat_negative_count / achat_positive_count
 )
 model_achat.fit(X_train, y_achat_train, sample_weight=achat_train_weights)
 

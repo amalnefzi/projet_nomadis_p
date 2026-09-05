@@ -1,6 +1,15 @@
-const RECOVERY_CREDIT_DOC_TYPES = Object.freeze(['facture', 'bl', 'blf'])
-const RECOVERY_CREDIT_SOURCE = 'entetecommercials.client_code_exact'
+// Documents de vente livrés qui génèrent une dette client (le BL est le document réel ;
+// la facture est marginale et atypique dans les données observées).
+const RECOVERY_CREDIT_DOC_TYPES = Object.freeze(['bl', 'blf'])
+const RECOVERY_CREDIT_NOTE_DOC_TYPE = 'avoir'
+const RECOVERY_CREDIT_SOURCE = 'entetecommercials.net_a_payer_minus_paiements'
 const RECOVERY_PAYMENT_SOURCE = 'paiements.client_code_exact'
+const RECOVERY_DEFAULT_GRACE_DAYS = 7
+// En dessous de ce montant (DT), on vise l'encaissement total : pas de sens de planifier
+// un recouvrement partiel sur une petite dette.
+const RECOVERY_FULL_COLLECTION_CEILING = 300
+// Reliquat en dessous duquel on arrondit l'estimation a la dette totale.
+const RECOVERY_NEGLIGIBLE_RESIDUAL = 15
 const RECOVERY_MIN_DEBT_DAYS = 2
 const RECOVERY_MIN_SALE_GAP_DAYS = 2
 const RECOVERY_MIN_PAYMENT_GAP_DAYS = 3
@@ -11,6 +20,51 @@ function clamp(value, min, max) {
 
 function roundScore(value) {
   return Math.round(Number(value || 0) * 10) / 10
+}
+
+function roundMoney(value) {
+  return Math.round((Number(value) || 0) * 1000) / 1000
+}
+
+function firstDefinedSqlDate(...values) {
+  for (const value of values) {
+    const normalized = normalizeSqlDate(value)
+    if (normalized) return normalized
+  }
+  return null
+}
+
+// Impute une file de paiements sur une liste de BL triés par date (du plus ancien au plus
+// récent). Imputation exacte d'abord via code_bl, puis FIFO pour le reliquat + les avoirs.
+function allocateRecoveryPayments({ invoices = [], payments = [], creditNotesTotal = 0 }) {
+  const invoicesByCode = new Map(
+    invoices.filter(invoice => invoice.doc_code).map(invoice => [String(invoice.doc_code), invoice])
+  )
+
+  payments.forEach(payment => {
+    if (!(payment.allocatable > 0) || !payment.payment_code_bl) return
+    const target = invoicesByCode.get(String(payment.payment_code_bl))
+    if (!target) return
+    const applied = Math.min(target.remaining, payment.allocatable)
+    target.remaining = roundMoney(target.remaining - applied)
+    payment.allocatable = roundMoney(payment.allocatable - applied)
+    if (applied > 0 && payment.echeance && (!target.matched_echeance || payment.echeance < target.matched_echeance)) {
+      target.matched_echeance = payment.echeance
+    }
+  })
+
+  let fifoPool = roundMoney(
+    payments.reduce((sum, payment) => sum + Math.max(0, payment.allocatable), 0) +
+    Math.max(0, Number(creditNotesTotal) || 0)
+  )
+  for (const invoice of invoices) {
+    if (fifoPool <= 0) break
+    const applied = Math.min(invoice.remaining, fifoPool)
+    invoice.remaining = roundMoney(invoice.remaining - applied)
+    fifoPool = roundMoney(fifoPool - applied)
+  }
+
+  return { invoices, unallocatedPool: fifoPool }
 }
 
 function parseSqlDate(value) {
@@ -246,6 +300,9 @@ function buildDefaultProfile(clientRow = {}) {
       overdue_weighted_ratio: null,
       severe_overdue_ratio: null,
       days_since_oldest_debt: null,
+      earliest_due_date: null,
+      dominant_commercial_code: null,
+      has_impaye: 0,
       last_sale_date: null,
       days_since_last_sale: null,
       days_since_last_payment: null,
@@ -558,37 +615,27 @@ async function loadRecoveryProfiles({
   const codePlaceholders = buildSqlPlaceholders(exactClientCodes)
   const nonCancelledDocumentCondition = buildRecoveryNonCancelledDocumentSqlCondition('e.annule')
 
-  const creditRows = await queryRows(`
-    SELECT
-      e.client_code,
-      DATE(e.date) AS credit_date,
-      CAST(COALESCE(e.solde, '0') AS DECIMAL(15,3)) AS doc_solde,
-      CAST(COALESCE(e.net_a_payer, '0') AS DECIMAL(15,3)) AS doc_credit_amount
-    FROM entetecommercials e
-    WHERE e.deleted_at IS NULL
-      AND e.type IN (${RECOVERY_CREDIT_DOC_TYPES.map(() => '?').join(', ')})
-      AND (
-        LOWER(TRIM(COALESCE(e.mode_paiement, ''))) = 'credit'
-        OR TRIM(COALESCE(e.mode_paiement, '')) = ''
-      )
-      AND ${nonCancelledDocumentCondition}
-      AND CAST(COALESCE(e.solde, '0') AS DECIMAL(15,3)) > 0
-      AND DATE(e.date) <= ?
-      AND TRIM(e.client_code) IN (${codePlaceholders})
-  `, [...RECOVERY_CREDIT_DOC_TYPES, referenceDate, ...exactClientCodes], connection)
+  const docTypePlaceholders = [...RECOVERY_CREDIT_DOC_TYPES, RECOVERY_CREDIT_NOTE_DOC_TYPE]
+    .map(() => '?')
+    .join(', ')
 
-  const lastSaleRows = await queryRows(`
+  // Documents livrés (BL/BLF = dette) + avoirs (= crédit client). On prend net_a_payer
+  // (montant TTC du document), jamais e.solde qui n'est pas maintenu dans les donnees.
+  const documentRows = await queryRows(`
     SELECT
       e.client_code,
-      MAX(DATE(e.date)) AS last_sale_date
+      e.code AS doc_code,
+      LOWER(TRIM(COALESCE(e.type, ''))) AS doc_type,
+      DATE(e.date) AS doc_date,
+      COALESCE(NULLIF(TRIM(e.commercial_code), ''), NULLIF(TRIM(e.user_code), '')) AS doc_commercial_code,
+      CAST(COALESCE(e.net_a_payer, '0') AS DECIMAL(15,3)) AS doc_net_a_payer
     FROM entetecommercials e
     WHERE e.deleted_at IS NULL
-      AND e.type IN (${RECOVERY_CREDIT_DOC_TYPES.map(() => '?').join(', ')})
+      AND LOWER(TRIM(COALESCE(e.type, ''))) IN (${docTypePlaceholders})
       AND ${nonCancelledDocumentCondition}
       AND DATE(e.date) <= ?
       AND TRIM(e.client_code) IN (${codePlaceholders})
-    GROUP BY e.client_code
-  `, [...RECOVERY_CREDIT_DOC_TYPES, referenceDate, ...exactClientCodes], connection)
+  `, [...RECOVERY_CREDIT_DOC_TYPES, RECOVERY_CREDIT_NOTE_DOC_TYPE, referenceDate, ...exactClientCodes], connection)
 
   let paymentRows = []
   let paymentQueryFailed = false
@@ -599,8 +646,12 @@ async function loadRecoveryProfiles({
         p.id AS payment_id,
         p.client_code,
         DATE(p.date) AS payment_date,
-        CAST(COALESCE(p.montant, '0') AS DECIMAL(15,3)) AS payment_amount,
-        COALESCE(NULLIF(p.code_bl, ''), NULLIF(p.bl_code, ''), CONCAT('NOREF-', p.id)) AS payment_ref,
+        CAST(COALESCE(p.montant, '0') AS DECIMAL(15,3)) AS payment_montant,
+        CAST(COALESCE(p.credit, '0') AS DECIMAL(15,3)) AS payment_credit,
+        NULLIF(TRIM(p.code_bl), '') AS payment_code_bl,
+        DATE(p.date_echeance_credit) AS echeance_credit,
+        DATE(p.date_echeance_traite) AS echeance_traite,
+        DATE(p.date_echeance_cheque) AS echeance_cheque,
         p.codeAnnulation,
         p.recouvrement,
         p.impaye
@@ -616,8 +667,7 @@ async function loadRecoveryProfiles({
     }
   }
 
-  const creditDocsByClientId = new Map()
-  const lastSalesByClientId = new Map()
+  const documentsByClientId = new Map()
   const paymentsByClientId = new Map()
 
   function attachHistoricalRow(targetMap, clientCode, payload, skippedField) {
@@ -642,38 +692,40 @@ async function loadRecoveryProfiles({
     targetMap.get(clientId).push(payload)
   }
 
-  ;(creditRows || []).forEach(row => {
+  ;(documentRows || []).forEach(row => {
+    const netAPayer = Number(row.doc_net_a_payer || 0)
     attachHistoricalRow(
-      creditDocsByClientId,
+      documentsByClientId,
       row.client_code,
       {
-        credit_date: normalizeSqlDate(row.credit_date),
-        doc_solde: Number(row.doc_solde || 0),
-        doc_credit_amount: Number(row.doc_credit_amount || 0)
+        doc_code: row.doc_code != null && String(row.doc_code).trim() !== '' ? String(row.doc_code).trim() : null,
+        doc_type: String(row.doc_type || '').trim().toLowerCase(),
+        doc_date: normalizeSqlDate(row.doc_date),
+        doc_commercial_code: row.doc_commercial_code ? String(row.doc_commercial_code).trim() : null,
+        net_a_payer: Number.isFinite(netAPayer) ? netAPayer : 0
       },
       'skipped_credit_rows'
     )
   })
 
-  ;(lastSaleRows || []).forEach(row => {
-    const exactCode = normalizeExactClientCode(row.client_code)
-    const matchedClientIds = clientIdsByCode.get(exactCode) || []
-    if (matchedClientIds.length !== 1) return
-    lastSalesByClientId.set(matchedClientIds[0], normalizeSqlDate(row.last_sale_date))
-  })
-
   ;(paymentRows || []).forEach(row => {
+    const montant = Number(row.payment_montant ?? row.payment_amount ?? 0)
+    const creditPart = Math.max(0, Number(row.payment_credit || 0))
+    const safeMontant = Number.isFinite(montant) ? montant : 0
     attachHistoricalRow(
       paymentsByClientId,
       row.client_code,
       {
         payment_id: normalizeClientId(row.payment_id),
         payment_date: normalizeSqlDate(row.payment_date),
-        payment_amount: Number(row.payment_amount || 0),
-        payment_ref: row.payment_ref ? String(row.payment_ref).trim() : null,
+        payment_montant: safeMontant,
+        payment_credit: creditPart,
+        payment_collected: Math.max(0, roundMoney(safeMontant - creditPart)),
+        payment_code_bl: row.payment_code_bl ? String(row.payment_code_bl).trim() : null,
+        echeance: firstDefinedSqlDate(row.echeance_credit, row.echeance_traite, row.echeance_cheque),
         codeAnnulation: row.codeAnnulation,
         recouvrement: row.recouvrement,
-        impaye: row.impaye
+        impaye: Number(row.impaye || 0)
       },
       'skipped_payment_rows'
     )
@@ -686,59 +738,89 @@ async function loadRecoveryProfiles({
   profilesById.forEach((profile, clientId) => {
     const clientRow = clientsById.get(clientId) || {}
     const delaiPaiementJours = Math.max(0, Math.round(Number(clientRow.delai_paiement || 0)))
-    const graceDays = Math.max(2, delaiPaiementJours)
-    const docs = creditDocsByClientId.get(clientId) || []
-    const paymentHistory = (paymentsByClientId.get(clientId) || [])
-      .filter(row => Number.isFinite(row.payment_amount) && row.payment_amount > 0 && row.payment_date)
-      .sort((left, right) => String(left.payment_date).localeCompare(String(right.payment_date)))
+    const graceDays = Math.max(1, delaiPaiementJours || RECOVERY_DEFAULT_GRACE_DAYS)
 
     profile.legacy.delai_paiement = delaiPaiementJours
 
-    if (docs.length > 0) {
-      let totalSolde = 0
-      let totalCreditHist = 0
-      let maxCreditAmount = 0
-      let oldestCreditDate = null
-      let lastCreditDate = null
+    const rawDocs = documentsByClientId.get(clientId) || []
+    const invoices = rawDocs
+      .filter(doc => (doc.doc_type === 'bl' || doc.doc_type === 'blf') && doc.doc_date)
+      .map(doc => {
+        const original = Math.max(0, roundMoney(Number(doc.net_a_payer) || 0))
+        return {
+          doc_code: doc.doc_code || null,
+          doc_date: doc.doc_date,
+          doc_commercial_code: doc.doc_commercial_code || null,
+          original_amount: original,
+          remaining: original,
+          matched_echeance: null
+        }
+      })
+      .sort((left, right) => String(left.doc_date).localeCompare(String(right.doc_date)))
+    const creditNotesTotal = rawDocs
+      .filter(doc => doc.doc_type === RECOVERY_CREDIT_NOTE_DOC_TYPE)
+      .reduce((sum, doc) => sum + Math.abs(Number(doc.net_a_payer) || 0), 0)
+
+    const rawPayments = (paymentsByClientId.get(clientId) || [])
+      .filter(payment => payment.payment_date)
+      .map(payment => ({ ...payment, allocatable: Math.max(0, Number(payment.payment_collected) || 0) }))
+      .sort((left, right) => String(left.payment_date).localeCompare(String(right.payment_date)))
+
+    allocateRecoveryPayments({ invoices, payments: rawPayments, creditNotesTotal })
+
+    const outstanding = invoices.filter(invoice => invoice.remaining > 0.009)
+
+    if (outstanding.length > 0) {
+      let totalBalance = 0
+      let dueAmount = 0
       let overdue0to30 = 0
       let overdue31to60 = 0
       let overdue61to90 = 0
       let overdue90plus = 0
       let maxDocPastDue = 0
+      let oldestCreditDate = null
+      let lastCreditDate = null
+      let totalOriginal = 0
+      let maxOriginal = 0
+      let earliestDueDate = null
 
-      docs.forEach(doc => {
-        const soldeDoc = Number(doc.doc_solde || 0)
-        const creditAmount = Number(doc.doc_credit_amount || 0)
+      outstanding.forEach(invoice => {
+        const remaining = Number(invoice.remaining) || 0
+        totalBalance += remaining
+        totalOriginal += invoice.original_amount
+        if (invoice.original_amount > maxOriginal) maxOriginal = invoice.original_amount
 
-        totalSolde += soldeDoc
-        totalCreditHist += creditAmount
-        if (creditAmount > maxCreditAmount) maxCreditAmount = creditAmount
-
-        if (!oldestCreditDate || String(doc.credit_date) < String(oldestCreditDate)) {
-          oldestCreditDate = doc.credit_date
+        if (!oldestCreditDate || String(invoice.doc_date) < String(oldestCreditDate)) {
+          oldestCreditDate = invoice.doc_date
         }
-        if (!lastCreditDate || String(doc.credit_date) > String(lastCreditDate)) {
-          lastCreditDate = doc.credit_date
+        if (!lastCreditDate || String(invoice.doc_date) > String(lastCreditDate)) {
+          lastCreditDate = invoice.doc_date
         }
 
-        const rawDays = diffDays(doc.credit_date, referenceDate)
-        const daysPastDoc = Math.max(0, (rawDays ?? 0) - graceDays)
+        const dueDate = invoice.matched_echeance || addRoundedDays(invoice.doc_date, graceDays)
+        if (dueDate && (!earliestDueDate || String(dueDate) < String(earliestDueDate))) {
+          earliestDueDate = dueDate
+        }
+
+        const daysPastDoc = Math.max(0, diffDays(dueDate, referenceDate) ?? 0)
         if (daysPastDoc > maxDocPastDue) maxDocPastDue = daysPastDoc
 
-        if (daysPastDoc > 90) overdue90plus += soldeDoc
-        else if (daysPastDoc > 60) overdue61to90 += soldeDoc
-        else if (daysPastDoc > 30) overdue31to60 += soldeDoc
-        else if (daysPastDoc > 0) overdue0to30 += soldeDoc
+        if (daysPastDoc > 0) {
+          dueAmount += remaining
+          if (daysPastDoc > 90) overdue90plus += remaining
+          else if (daysPastDoc > 60) overdue61to90 += remaining
+          else if (daysPastDoc > 30) overdue31to60 += remaining
+          else overdue0to30 += remaining
+        }
       })
 
-      const dueAmount = overdue0to30 + overdue31to60 + overdue61to90 + overdue90plus
-      const effectiveDueBalance = dueAmount > 0 ? dueAmount : totalSolde
+      const effectiveDueBalance = dueAmount > 0 ? dueAmount : totalBalance
       const severeOverdueBalance = overdue61to90 + overdue90plus
       const daysSinceOldestDebt = diffDays(oldestCreditDate, referenceDate)
       const daysToDue = daysSinceOldestDebt == null ? 0 : Math.max(0, graceDays - daysSinceOldestDebt)
 
       profile.credit = {
-        total_balance: roundScore(totalSolde),
+        total_balance: roundScore(totalBalance),
         due_amount: roundScore(dueAmount),
         oldest_credit_date: oldestCreditDate,
         last_credit_date: lastCreditDate,
@@ -750,26 +832,48 @@ async function loadRecoveryProfiles({
       }
       profile.sources.credit = RECOVERY_CREDIT_SOURCE
       profile.legacy.effective_due_balance = roundScore(effectiveDueBalance)
-      profile.legacy.nb_docs_credit = docs.length
-      profile.legacy.avg_credit_amount = docs.length > 0 ? roundScore(totalCreditHist / docs.length) : null
-      profile.legacy.max_credit_amount = roundScore(maxCreditAmount)
+      profile.legacy.nb_docs_credit = outstanding.length
+      profile.legacy.avg_credit_amount = outstanding.length > 0 ? roundScore(totalOriginal / outstanding.length) : null
+      profile.legacy.max_credit_amount = roundScore(maxOriginal)
       profile.legacy.severe_overdue_balance = roundScore(severeOverdueBalance)
-      profile.legacy.overdue_weighted_ratio = totalSolde > 0
-        ? clamp(((overdue0to30 * 0.25) + (overdue31to60 * 0.55) + (overdue61to90 * 0.8) + (overdue90plus * 1.0)) / totalSolde, 0, 1)
+      profile.legacy.overdue_weighted_ratio = totalBalance > 0
+        ? clamp(((overdue0to30 * 0.25) + (overdue31to60 * 0.55) + (overdue61to90 * 0.8) + (overdue90plus * 1.0)) / totalBalance, 0, 1)
         : null
-      profile.legacy.severe_overdue_ratio = totalSolde > 0
-        ? clamp(severeOverdueBalance / totalSolde, 0, 1)
+      profile.legacy.severe_overdue_ratio = totalBalance > 0
+        ? clamp(severeOverdueBalance / totalBalance, 0, 1)
         : null
       profile.legacy.days_since_oldest_debt = daysSinceOldestDebt
-      profile.legacy.is_due_today = daysToDue <= 0 ? 1 : 0
+      profile.legacy.earliest_due_date = earliestDueDate
+      profile.legacy.is_due_today = (dueAmount > 0 || daysToDue <= 0) ? 1 : 0
       profile.legacy.days_to_due = daysToDue
     }
 
-    profile.legacy.last_sale_date = lastSalesByClientId.get(clientId) || null
+    // Commercial habituel = commercial_code dominant dans les BL du client
+    // (les BL, plus fiables que clients.user_code souvent vide).
+    const commercialTally = new Map()
+    invoices.forEach(invoice => {
+      const code = invoice.doc_commercial_code
+      if (!code) return
+      const entry = commercialTally.get(code) || { count: 0, lastDate: '' }
+      entry.count += 1
+      if (String(invoice.doc_date) > entry.lastDate) entry.lastDate = String(invoice.doc_date)
+      commercialTally.set(code, entry)
+    })
+    const dominantCommercial = [...commercialTally.entries()].sort((left, right) =>
+      right[1].count - left[1].count ||
+      right[1].lastDate.localeCompare(left[1].lastDate) ||
+      String(left[0]).localeCompare(String(right[0]))
+    )[0]
+    profile.legacy.dominant_commercial_code = dominantCommercial ? dominantCommercial[0] : null
+    profile.legacy.has_impaye = rawPayments.some(payment => Number(payment.impaye) === 1) ? 1 : 0
+
+    profile.legacy.last_sale_date = invoices.length > 0 ? invoices[invoices.length - 1].doc_date : null
     profile.legacy.days_since_last_sale = diffDays(profile.legacy.last_sale_date, referenceDate)
 
+    const paymentHistory = rawPayments.filter(payment => Number(payment.payment_collected) > 0)
+
     if (paymentHistory.length > 0) {
-      const paymentAmounts = paymentHistory.map(row => Number(row.payment_amount || 0))
+      const paymentAmounts = paymentHistory.map(payment => Number(payment.payment_collected) || 0)
       const paymentByDate = new Map()
       const paymentRefSet = new Set()
       let totalPaid30d = 0
@@ -777,13 +881,15 @@ async function loadRecoveryProfiles({
 
       paymentHistory.forEach(payment => {
         const paymentDate = String(payment.payment_date)
-        paymentByDate.set(paymentDate, (paymentByDate.get(paymentDate) || 0) + Number(payment.payment_amount || 0))
-        if (payment.payment_ref) {
-          paymentRefSet.add(payment.payment_ref)
+        paymentByDate.set(paymentDate, (paymentByDate.get(paymentDate) || 0) + Number(payment.payment_collected || 0))
+        if (payment.payment_code_bl) {
+          paymentRefSet.add(payment.payment_code_bl)
+        } else if (payment.payment_id) {
+          paymentRefSet.add(`P-${payment.payment_id}`)
         }
         const daysFromReference = diffDays(payment.payment_date, referenceDate)
         if (daysFromReference !== null && daysFromReference <= 30) {
-          totalPaid30d += Number(payment.payment_amount || 0)
+          totalPaid30d += Number(payment.payment_collected || 0)
         }
         if (daysFromReference !== null && daysFromReference <= 90) {
           nbPayments90d += 1
@@ -807,7 +913,9 @@ async function loadRecoveryProfiles({
       const medianPaymentIntervalDays = median(paymentIntervals)
       const expectedIntervalDays = medianPaymentIntervalDays ?? averagePaymentIntervalDays
       const lastPaymentDate = paymentDates[paymentDates.length - 1]
-      const expectedNextPaymentDate = addRoundedDays(lastPaymentDate, expectedIntervalDays)
+      const cadenceExpectedDate = addRoundedDays(lastPaymentDate, expectedIntervalDays)
+      // Priorité à l'échéance réelle du plus vieux BL impayé, sinon rythme de paiement.
+      const expectedNextPaymentDate = profile.legacy.earliest_due_date || cadenceExpectedDate
       const daysSinceExpectedPayment = diffDays(expectedNextPaymentDate, referenceDate)
       const effectiveDueBalance = Number(profile.legacy.effective_due_balance || 0)
       const paymentBehaviorScore = effectiveDueBalance > 0
@@ -839,6 +947,9 @@ async function loadRecoveryProfiles({
       profile.legacy.nb_payment_refs = paymentRefSet.size
       profile.legacy.nb_payments_90d = nbPayments90d
       profile.legacy.days_since_last_payment = diffDays(lastPaymentDate, referenceDate)
+    } else if (profile.legacy.earliest_due_date) {
+      profile.payment_behavior.expected_next_payment_date = profile.legacy.earliest_due_date
+      profile.payment_behavior.days_since_expected_payment = diffDays(profile.legacy.earliest_due_date, referenceDate)
     }
 
     if (Number(profile.legacy.effective_due_balance || 0) > 0) {
@@ -874,9 +985,53 @@ async function loadRecoveryProfiles({
         ))
       }
 
+      // Pas de reliquat inutile : on vise la totalite quand
+      //  - la dette est faible (<= plafond), OU
+      //  - le client a deja paye au moins autant en une seule fois, OU
+      //  - l'estimation ne laisserait qu'un residu negligeable.
+      const dueBalance = Number(profile.legacy.effective_due_balance || 0)
+      const residual = dueBalance - expectedCollectionAmount
+      const smallDebt = dueBalance <= RECOVERY_FULL_COLLECTION_CEILING
+      const payableInOneShot = maxPaymentAmount > 0 && maxPaymentAmount >= dueBalance
+      const negligibleResidual = residual > 0 && residual <= Math.max(RECOVERY_NEGLIGIBLE_RESIDUAL, dueBalance * 0.05)
+      if (smallDebt || payableInOneShot || negligibleResidual) {
+        expectedCollectionAmount = roundScore(dueBalance)
+      }
+
       profile.recovery.expected_collection_amount = expectedCollectionAmount
       profile.legacy.likely_recovery_amount = baseLikelyRecovery
     }
+  })
+
+  // Score IA de recouvrement (0-100) : composite montant du + anciennete + potentiel
+  // d'encaissement + comportement de paiement, normalise sur la population du plan.
+  const scorableProfiles = [...profilesById.values()].filter(
+    profile => Number(profile.legacy?.effective_due_balance || 0) > 0
+  )
+  const maxDueBalance = scorableProfiles.reduce(
+    (max, profile) => Math.max(max, Number(profile.legacy?.effective_due_balance || 0)),
+    0
+  )
+  const maxSevereOverdue = scorableProfiles.reduce(
+    (max, profile) => Math.max(max, Number(profile.legacy?.severe_overdue_balance || 0)),
+    0
+  )
+  const maxLikelyRecovery = scorableProfiles.reduce(
+    (max, profile) => Math.max(max, Number(profile.legacy?.likely_recovery_amount || 0)),
+    0
+  )
+  scorableProfiles.forEach(profile => {
+    profile.recovery.collection_priority_score = computeSmartRecoveryScore({
+      dueBalance: Number(profile.legacy?.effective_due_balance || 0),
+      maxDueBalance,
+      likelyRecoveryAmount: Number(profile.legacy?.likely_recovery_amount || 0),
+      maxLikelyRecovery,
+      severeOverdueBalance: Number(profile.legacy?.severe_overdue_balance || 0),
+      maxSevereOverdue,
+      paymentBehaviorScore: Number(profile.payment_behavior?.payment_behavior_score || 0),
+      distanceKm: 0,
+      maxDistanceKm: 0
+    })
   })
 
   return normalizedClientIds
@@ -1029,8 +1184,11 @@ function buildRecoveryPlanRowsFromProfiles({
 
 module.exports = {
   RECOVERY_CREDIT_DOC_TYPES,
+  RECOVERY_CREDIT_NOTE_DOC_TYPE,
   RECOVERY_CREDIT_SOURCE,
   RECOVERY_PAYMENT_SOURCE,
+  RECOVERY_DEFAULT_GRACE_DAYS,
+  allocateRecoveryPayments,
   buildRecoveryNonCancelledDocumentSqlCondition,
   buildValidRecoveryPaymentSqlCondition,
   classifyRecoveryProfilesForPeriod,

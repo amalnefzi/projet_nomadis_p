@@ -1097,7 +1097,7 @@ export default function CoveragePlanner() {
           </label>
 
           <label style={{ display: 'grid', gap: 6 }}>
-            <span style={{ fontSize: 13, color: '#516579' }}>Minimum clients</span>
+            <span style={{ fontSize: 13, color: '#516579' }}>Clients min / commercial / jour</span>
             <input
               type="number"
               min="0"
@@ -1109,7 +1109,7 @@ export default function CoveragePlanner() {
           </label>
 
           <label style={{ display: 'grid', gap: 6 }}>
-            <span style={{ fontSize: 13, color: '#516579' }}>Maximum clients</span>
+            <span style={{ fontSize: 13, color: '#516579' }}>Clients max / commercial / jour</span>
             <input
               type="number"
               min="0"
@@ -1478,6 +1478,17 @@ export default function CoveragePlanner() {
                     </div>
                   </div>
 
+                  {selectedBlockHeader.assignmentReasonSummary.length ? (
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '0 0 4px' }}>
+                      <span style={{ fontSize: 12, color: '#607284' }}>Affectations :</span>
+                      {selectedBlockHeader.assignmentReasonSummary.map(item => (
+                        <span key={item.reason} className="coverage-inline-badge coverage-inline-badge-muted">
+                          {item.label} : {formatInteger(item.count)}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+
                   <div className="coverage-detail-metrics">
                     <div className="coverage-detail-metric">
                       <div className="coverage-detail-metric-label">Collecte prevue</div>
@@ -1494,6 +1505,16 @@ export default function CoveragePlanner() {
                     <div className="coverage-detail-metric">
                       <div className="coverage-detail-metric-label">Duree estimee</div>
                       <div className="coverage-detail-metric-value">{selectedBlockHeader.totalDurationLabel}</div>
+                    </div>
+                    <div className="coverage-detail-metric">
+                      <div className="coverage-detail-metric-label">Charge / journee</div>
+                      <div
+                        className="coverage-detail-metric-value"
+                        style={selectedBlockHeader.exceedsWorkday ? { color: '#c0392b' } : undefined}
+                      >
+                        {selectedBlockHeader.workdayLabel}
+                        {selectedBlockHeader.exceedsWorkday ? ' - depassement' : ''}
+                      </div>
                     </div>
                     <div className="coverage-detail-metric">
                       <div className="coverage-detail-metric-label">Clients cartographies</div>

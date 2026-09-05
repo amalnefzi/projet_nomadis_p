@@ -1,11 +1,11 @@
 {
   "strategy_version": 1,
-  "generated_at": "2026-08-23T18:57:15.752428+00:00Z",
+  "generated_at": "2026-08-31T18:39:38.016253+00:00Z",
   "selection_metric": "mae",
   "purchase": {
     "metrics": {
-      "auc": 0.8794,
-      "accuracy": 98.7
+      "auc": 0.8866,
+      "accuracy": 88.5
     }
   },
   "targets": {
@@ -15,14 +15,14 @@
       "reason": "model_beats_or_matches_baseline",
       "baseline_name": "historical_avg_ca_per_order_90d_fallback_vente_avg_3_then_vente_last",
       "model_metrics": {
-        "r2": 0.1171,
-        "mae": 80.1129,
-        "mape": 80.3
+        "r2": 0.1205,
+        "mae": 81.4704,
+        "mape": 80.9
       },
       "baseline_metrics": {
-        "r2": 0.1033,
-        "mae": 89.0357,
-        "mape": 116.6
+        "r2": 0.1324,
+        "mae": 89.5782,
+        "mape": 115.5
       }
     },
     "qte_if_buy": {
@@ -31,14 +31,14 @@
       "reason": "model_beats_or_matches_baseline",
       "baseline_name": "historical_avg_qte_per_order_90d_fallback_qte_avg_3_then_qte_last",
       "model_metrics": {
-        "r2": -0.0938,
-        "mae": 18.3557,
-        "mape": 386.6
+        "r2": -0.1001,
+        "mae": 18.3446,
+        "mape": 371.8
       },
       "baseline_metrics": {
-        "r2": -0.1199,
-        "mae": 20.2539,
-        "mape": 682.1
+        "r2": -0.1147,
+        "mae": 20.2834,
+        "mape": 676.1
       }
     },
     "price_if_buy": {
@@ -47,50 +47,50 @@
       "reason": "model_beats_or_matches_baseline",
       "baseline_name": "historical_avg_price_hist_fallback_ca_over_qte",
       "model_metrics": {
-        "r2": -0.3234,
-        "mae": 25.3806,
-        "mape": 175.0
+        "r2": -0.284,
+        "mae": 25.4853,
+        "mape": 191.4
       },
       "baseline_metrics": {
-        "r2": -0.4317,
-        "mae": 25.8049,
-        "mape": 129.0
+        "r2": -0.4376,
+        "mae": 26.0393,
+        "mape": 128.9
       }
     }
   },
   "expected": {
     "ca_all_days": {
       "model_metrics": {
-        "r2": 0.0453,
-        "mae": 3.011,
-        "mape": 81.5
+        "r2": -1.4168,
+        "mae": 19.8946,
+        "mape": 71.3
       },
       "baseline_metrics": {
-        "r2": 0.0314,
-        "mae": 3.6473,
-        "mape": 79.9
+        "r2": -4.3263,
+        "mae": 27.023,
+        "mape": 90.6
       },
       "selected_metrics": {
-        "r2": 0.0453,
-        "mae": 3.011,
-        "mape": 81.5
+        "r2": -1.4168,
+        "mae": 19.8946,
+        "mape": 71.3
       }
     },
     "qte_all_days": {
       "model_metrics": {
-        "r2": 0.049,
-        "mae": 0.4221,
-        "mape": 105.7
+        "r2": -0.3508,
+        "mae": 2.2667,
+        "mape": 250.4
       },
       "baseline_metrics": {
-        "r2": 0.0543,
-        "mae": 0.555,
-        "mape": 140.3
+        "r2": -2.4355,
+        "mae": 3.8102,
+        "mape": 457.1
       },
       "selected_metrics": {
-        "r2": 0.049,
-        "mae": 0.4221,
-        "mape": 105.7
+        "r2": -0.3508,
+        "mae": 2.2667,
+        "mape": 250.4
       }
     }
   }

@@ -23,6 +23,54 @@ export const PRIORITY_REASON_LABELS = {
   purchase_prediction_unavailable: 'Prediction indisponible'
 }
 
+export const ASSIGNMENT_REASON_LABELS = {
+  usual_commercial: 'Commercial habituel',
+  same_zone: 'Meme zone',
+  nearest_commercial: 'Commercial le plus proche',
+  capacity_balance: 'Reaffecte (capacite / temps)',
+  only_available_commercial: 'Seul commercial disponible',
+  optimisation_globale: 'Optimisation globale'
+}
+
+export function buildAssignmentReasonModel(client = {}) {
+  const explanation = client?.assignment_explanation
+  if (!explanation || typeof explanation !== 'object') {
+    return {
+      primaryReason: null,
+      primaryLabel: 'Raison : non precisee',
+      reasonLabels: [],
+      distanceKm: null,
+      zone: null
+    }
+  }
+  const primaryReason = String(explanation.primary_reason || '').trim() || null
+  const reasonLabels = Array.isArray(explanation.reason_labels)
+    ? explanation.reason_labels.map(label => String(label || '').trim()).filter(Boolean)
+    : []
+  return {
+    primaryReason,
+    primaryLabel: primaryReason
+      ? (ASSIGNMENT_REASON_LABELS[primaryReason] || reasonLabels[0] || primaryReason)
+      : 'Raison : non precisee',
+    reasonLabels,
+    distanceKm: Number.isFinite(Number(explanation.distance_km)) ? Number(explanation.distance_km) : null,
+    zone: String(explanation.zone || '').trim() || null
+  }
+}
+
+export function buildAssignmentReasonSummary(block = {}) {
+  const counts = block?.assignment_reason_counts
+  if (!counts || typeof counts !== 'object') return []
+  return Object.entries(counts)
+    .filter(([, count]) => Number(count) > 0)
+    .sort((left, right) => Number(right[1]) - Number(left[1]) || String(left[0]).localeCompare(String(right[0])))
+    .map(([reason, count]) => ({
+      reason,
+      count: Number(count),
+      label: ASSIGNMENT_REASON_LABELS[reason] || reason
+    }))
+}
+
 const FRENCH_DAY_LABELS = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi']
 
 const RECOVERY_HIDDEN_REASON_CODES = new Set([
@@ -439,21 +487,36 @@ export function buildCoverageSidebarCardModel(block = {}) {
 }
 
 export function buildCoverageClientRows(block = {}) {
-  return (Array.isArray(block?.clients) ? block.clients : []).map((client, index) => ({
+  const rows = (Array.isArray(block?.clients) ? block.clients : []).map((client, index) => ({
     clientId: String(client?.client_id || `client-${index + 1}`),
     clientCode: String(client?.client_code || ''),
     clientName: String(client?.client_name || client?.client_code || `Client ${index + 1}`),
-    order: index + 1,
+    routeOrder: index + 1,
     zoneLabel: client?.zone || client?.zone_comm || client?.commercia_zone || null,
     gpsAvailable: hasValidGps(client),
     reasons: translatePriorityReasons(client?.priority_reasons),
+    assignmentReason: buildAssignmentReasonModel(client),
     coverageUrgency: client?.priority_breakdown?.coverage_urgency ?? null,
     recoveryPriorityScore: client?.recovery_priority_score ?? null,
+    totalBalance: client?.recovery_total_balance ?? null,
     dueAmount: client?.recovery_due_amount ?? null,
     overdueDays: client?.recovery_days_past_due ?? null,
     expectedCollectionAmount: client?.recovery_expected_collection_amount ?? null,
-    paymentBehaviorScore: client?.recovery_payment_behavior_score ?? null
+    paymentBehaviorScore: client?.recovery_payment_behavior_score ?? null,
+    hasImpaye: Boolean(client?.recovery_has_impaye)
   }))
+
+  // Ordre metier : le meilleur score IA de recouvrement en premier (comme le plan de
+  // tournee classique). L'ordre physique de visite reste disponible via routeOrder.
+  const num = value => (Number.isFinite(Number(value)) ? Number(value) : -1)
+  rows.sort((left, right) =>
+    num(right.recoveryPriorityScore) - num(left.recoveryPriorityScore) ||
+    num(right.dueAmount) - num(left.dueAmount) ||
+    num(right.totalBalance) - num(left.totalBalance) ||
+    String(left.clientCode).localeCompare(String(right.clientCode))
+  )
+
+  return rows.map((row, index) => ({ ...row, order: index + 1 }))
 }
 
 export function buildCoverageDetailHeaderModel(block = {}, routePlan = null) {
@@ -471,11 +534,25 @@ export function buildCoverageDetailHeaderModel(block = {}, routePlan = null) {
     ? Math.round((Number(driveDuration) / 60) + knownServiceMinutes + (Number.isFinite(breakMinutes) ? breakMinutes : 0))
     : null
 
+  const routeEstimatedMinutes = Number(
+    block?.time?.estimated_route_minutes ?? block?.estimated_duration_minutes ?? 0
+  )
+  const workdayMinutes = Number(block?.time?.max_route_minutes ?? 0)
+  const exceedsWorkday = Boolean(
+    block?.exceeds_workday ??
+    (workdayMinutes > 0 && Number.isFinite(routeEstimatedMinutes) && routeEstimatedMinutes > workdayMinutes)
+  )
+
   return {
     commercialLabel: block?.commercial_label || block?.commercial_code || '-',
     date: block?.date || '-',
     clientsLabel: `${formatInteger(block?.clients_count || 0)} client(s)`,
     zoneLabel: block?.main_zone || block?.zone || null,
+    workdayLabel: workdayMinutes > 0
+      ? `${formatDurationMinutes(Math.round(routeEstimatedMinutes))} / journee ${formatDurationMinutes(Math.round(workdayMinutes))}`
+      : 'Non disponible',
+    exceedsWorkday,
+    assignmentReasonSummary: buildAssignmentReasonSummary(block),
     expectedCollectionLabel: block?.expected_collection_total == null
       ? 'Non disponible'
       : formatNullableCurrency(block.expected_collection_total),

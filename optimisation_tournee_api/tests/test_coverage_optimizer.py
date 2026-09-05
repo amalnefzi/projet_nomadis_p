@@ -15,6 +15,10 @@ import coverage_optimizer as optimizer_module  # noqa: E402
 
 from coverage_optimizer import (  # noqa: E402
     CoverageModelBuilder,
+    build_client_assignment_explanation,
+    normalize_commercial_geo_by_code,
+    resolve_drive_speed_kmh,
+    resolve_assumed_service_minutes,
     apply_collection_target_candidate_selection,
     apply_effective_visit_bounds_to_slots,
     build_assignment_candidates,
@@ -4999,3 +5003,208 @@ def test_cg_sales_coverage_result_exposes_single_visit_only_without_inventing_hi
     normalized = normalize_payload(payload)
     assert normalized["clients"][0].last_real_visit_date is None
     assert normalized["clients"][0].next_visit_deadline == normalized["planning_end_date"]
+
+
+def _normalized_client_and_slots(client_overrides, commercial_codes=("C001", "C002"), geo=None):
+    clients = build_clients(1, allowed_codes=list(commercial_codes), predicted_ca=100.0)
+    clients[0].update(client_overrides)
+    payload = base_payload(
+        clients=clients,
+        commercials=build_commercials(
+            count=len(commercial_codes),
+            days=3,
+            max_visits=5,
+            commercial_codes=list(commercial_codes),
+        ),
+    )
+    if geo is not None:
+        payload["commercial_geo_by_code"] = geo
+    normalized = normalize_payload(payload)
+    slots = build_slots(normalized)
+    slots_by_commercial = {}
+    for slot in slots:
+        slots_by_commercial.setdefault(slot.commercial_code, slot)
+    return normalized, normalized["clients"][0], slots_by_commercial
+
+
+def test_assignment_explanation_usual_commercial_wins():
+    normalized, client, slots_by_commercial = _normalized_client_and_slots(
+        {"historical_commercial_code": "C002"}
+    )
+    explanation = build_client_assignment_explanation(
+        slots_by_commercial["C002"],
+        client,
+        normalized["commercial_geo_by_code"],
+        ["C001", "C002"],
+    )
+    assert explanation["primary_reason"] == "usual_commercial"
+    assert explanation["assigned_commercial_code"] == "C002"
+
+
+def test_assignment_explanation_same_zone_and_nearest():
+    geo = {
+        "C001": {"zone": "RADES", "delegation": "RADES", "region": "GT", "ref_latitude": 36.77, "ref_longitude": 10.28},
+        "C002": {"zone": "ARIANA", "delegation": "ARIANA", "region": "GT", "ref_latitude": 36.86, "ref_longitude": 10.19},
+    }
+    normalized, client, slots_by_commercial = _normalized_client_and_slots(
+        {
+            "historical_commercial_code": "C009",
+            "latitude": 36.771,
+            "longitude": 10.279,
+            "commercial_zone": "Comm C001 - RADES",
+            "delegation": "RADES",
+            "region": "GT",
+        },
+        geo=geo,
+    )
+    explanation = build_client_assignment_explanation(
+        slots_by_commercial["C001"],
+        client,
+        normalized["commercial_geo_by_code"],
+        ["C001", "C002"],
+    )
+    assert explanation["primary_reason"] == "same_zone"
+    assert "nearest_commercial" in explanation["reason_codes"]
+    assert explanation["distance_km"] is not None
+
+
+def test_assignment_explanation_capacity_balance_fallback():
+    geo = {
+        "C001": {"zone": "RADES", "delegation": "RADES", "region": "GT", "ref_latitude": 36.77, "ref_longitude": 10.28},
+        "C002": {"zone": "ARIANA", "delegation": "ARIANA", "region": "GT", "ref_latitude": 36.86, "ref_longitude": 10.19},
+    }
+    normalized, client, slots_by_commercial = _normalized_client_and_slots(
+        {
+            "historical_commercial_code": "C001",
+            "latitude": 36.771,
+            "longitude": 10.279,
+            "commercial_zone": "Comm C001 - RADES",
+            "delegation": "RADES",
+            "region": "GT",
+        },
+        geo=geo,
+    )
+    explanation = build_client_assignment_explanation(
+        slots_by_commercial["C002"],
+        client,
+        normalized["commercial_geo_by_code"],
+        ["C001", "C002"],
+    )
+    assert explanation["primary_reason"] == "capacity_balance"
+    assert explanation["historical_commercial_code"] == "C001"
+
+
+def test_normalize_commercial_geo_by_code_filters_garbage():
+    result = normalize_commercial_geo_by_code({
+        "C001": {"zone": " RADES ", "ref_latitude": "36.8", "ref_longitude": "10.2"},
+        "": {"zone": "X"},
+        "C002": "not-a-dict",
+    })
+    assert set(result.keys()) == {"C001"}
+    assert result["C001"]["zone"] == "RADES"
+    assert result["C001"]["ref_latitude"] == 36.8
+
+
+def test_time_defaults_resolvers():
+    assert resolve_drive_speed_kmh({"travel_speed_kmh": 25}) == 25
+    assert resolve_drive_speed_kmh({"travel_speed_kmh": 0}) == 30.0
+    assert resolve_drive_speed_kmh({}) == 30.0
+    assert resolve_assumed_service_minutes({"assumed_service_minutes": 15}) == 15
+    assert resolve_assumed_service_minutes({}) == 12.0
+
+
+def test_solve_coverage_plan_emits_assignment_explanation_and_time_basis():
+    clients = build_clients(6, allowed_codes=["C001", "C002"], predicted_ca=100.0)
+    for client in clients:
+        client["recovery_expected_collection_amount"] = 120.0
+        client["recovery_total_balance"] = 400.0
+        client["recovery_due_amount"] = 120.0
+        client["recovery_days_past_due"] = 10
+        client["recovery_data_known"] = True
+    payload = base_payload(
+        clients=clients,
+        commercials=build_commercials(count=2, days=3, max_visits=5, commercial_codes=["C001", "C002"]),
+    )
+    payload["target_collection_amount"] = 300.0
+    payload["time_capacity_basis"] = "configured_defaults"
+    payload["travel_speed_kmh"] = 30
+    payload["assumed_service_minutes"] = 15
+    payload["commercial_geo_by_code"] = {
+        "C001": {"zone": "RADES", "delegation": "RADES", "region": "GT", "ref_latitude": 36.8, "ref_longitude": 10.18},
+        "C002": {"zone": "ARIANA", "delegation": "ARIANA", "region": "GT", "ref_latitude": 36.86, "ref_longitude": 10.19},
+    }
+
+    result = solve_coverage_plan(payload)
+
+    assert result["blocks"], "expected at least one planned block"
+    for block in result["blocks"]:
+        assert "assignment_reason_counts" in block
+        assert block["time"]["time_capacity_basis"] == "configured_defaults"
+        assert block["time"]["travel_speed_kmh"] == 30
+        for row in block["clients"]:
+            explanation = row["assignment_explanation"]
+            assert explanation["assigned_commercial_code"] == block["commercial_code"]
+            assert explanation["primary_reason"] in {
+                "usual_commercial",
+                "same_zone",
+                "nearest_commercial",
+                "capacity_balance",
+                "only_available_commercial",
+                "optimisation_globale",
+            }
+
+
+def test_recovery_min_clients_consolidates_into_few_slots():
+    clients = build_clients(10, allowed_codes=["C001", "C002", "C003"], predicted_ca=0.0)
+    for client in clients:
+        client["recovery_total_balance"] = 500.0
+        client["recovery_due_amount"] = 150.0
+        client["recovery_days_past_due"] = 12
+        client["recovery_expected_collection_amount"] = 120.0
+        client["recovery_data_known"] = True
+    payload = base_payload(
+        clients=clients,
+        commercials=build_commercials(count=3, days=5, max_visits=8, commercial_codes=["C001", "C002", "C003"]),
+        planning_days=5,
+    )
+    payload["user_min_visits_per_slot"] = 4
+
+    result = solve_coverage_plan(payload)
+
+    used_blocks = [b for b in result["blocks"] if b["clients_count"] > 0]
+    assert used_blocks, "expected planned blocks"
+    # 10 clients avec min 4 => au plus 3 slots utilises (pas un etalement 1-par-slot)
+    assert len(used_blocks) <= 3, [b["clients_count"] for b in used_blocks]
+    # aucun slot utilise ne doit rester bien en dessous du minimum quand d'autres pourraient l'accueillir
+    assert max(b["clients_count"] for b in used_blocks) >= 4
+
+
+def test_recovery_min_clients_overrides_low_historical_capacity():
+    # 24 clients endettés, min 20 / max 30, 2 commerciaux x 3 jours.
+    # Même si la capacité historique est basse, le plan doit remplir un
+    # commercial-jour vers 20, pas s'étaler à ~6 par slot.
+    clients = build_clients(24, allowed_codes=["C001", "C002"], predicted_ca=0.0)
+    for client in clients:
+        client["recovery_total_balance"] = 800.0
+        client["recovery_due_amount"] = 300.0
+        client["recovery_days_past_due"] = 20
+        client["recovery_expected_collection_amount"] = 250.0
+        client["recovery_data_known"] = True
+    payload = base_payload(
+        clients=clients,
+        commercials=build_commercials(
+            count=2, days=3, max_visits=30, commercial_codes=["C001", "C002"],
+            historical_soft_capacities={"C001": 6, "C002": 6},
+        ),
+        planning_days=3,
+    )
+    payload["user_min_visits_per_slot"] = 20
+    payload["user_max_visits_per_slot"] = 30
+
+    result = solve_coverage_plan(payload)
+
+    used_blocks = [b for b in result["blocks"] if b["clients_count"] > 0]
+    assert used_blocks, "expected planned blocks"
+    # 24 clients, min 20 => 1 slot plein (>=20) + 1 slot avec le reste, pas 4+ slots à 6
+    assert len(used_blocks) <= 2, [b["clients_count"] for b in used_blocks]
+    assert max(b["clients_count"] for b in used_blocks) >= 20
