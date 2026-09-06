@@ -69,9 +69,11 @@ const {
 } = nextBestVisitService
 const {
   buildPlannedVisitMetadata,
+  buildValidatedTourComparison,
   fetchSalesVisitFeedbackRecords,
   getSalesVisitFeedbackMonitoring,
   getSalesVisitFeedbackMonitoringDetails,
+  loadSalesVisitFeedbackRecordsByTourneeCode,
   replacePendingSalesVisitFeedbackForTournee,
   upsertSalesVisitFeedback
 } = require('./sales_visit_feedback_service')
@@ -89,9 +91,22 @@ const {
   isV2ValidationLabEnabled,
   registerNextBestVisitValidationLabRoutes
 } = require('./next_best_visit_validation_lab_routes')
+const {
+  completeValidatedTour,
+  listValidatedTourHeaders,
+  loadValidatedTourHeaderByBusinessKey,
+  loadValidatedTourHeaderByCode,
+  markValidatedTourInProgress,
+  replaceOrCreateValidatedTourHeader
+} = require('./sales_v2_tour_lifecycle_service')
 require('dotenv').config()
 
 const app = express()
+// Express 5 defaults to the 'simple' query parser (Node's querystring), which does not
+// understand bracket-array syntax (?foo[]=a&foo[]=b) and silently drops such params.
+// axios serializes array params with brackets by default, so array query params
+// (e.g. planned_visit_ids[]=...) used across the Sales V2 feedback routes need 'extended'.
+app.set('query parser', 'extended')
 app.use(cors())
 app.use(express.json())
 
@@ -1160,6 +1175,38 @@ async function ensureCoverageSupportTables() {
     )
 
     console.log('Table sales_v2_visit_feedback verifiee.')
+
+    await queryAsync(`
+      CREATE TABLE IF NOT EXISTS sales_v2_validated_tours (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        tournee_code VARCHAR(191) NOT NULL,
+        commercial_code VARCHAR(191) NOT NULL,
+        tour_type VARCHAR(64) NOT NULL DEFAULT 'sales_v2',
+        planned_date DATE NOT NULL,
+        route_code VARCHAR(191) DEFAULT NULL,
+        depot_code VARCHAR(191) DEFAULT NULL,
+        clients_count INT NOT NULL DEFAULT 0,
+        status VARCHAR(32) NOT NULL DEFAULT 'validated',
+        replaced_by_tournee_code VARCHAR(191) DEFAULT NULL,
+        started_at DATETIME DEFAULT NULL,
+        completed_at DATETIME DEFAULT NULL,
+        created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        active_business_key VARCHAR(400) GENERATED ALWAYS AS (
+          CASE WHEN status IN ('validated', 'in_progress')
+            THEN CONCAT(commercial_code, '|', tour_type, '|', planned_date)
+            ELSE NULL
+          END
+        ) STORED,
+        PRIMARY KEY (id),
+        UNIQUE KEY uq_sales_v2_validated_tours_active (active_business_key),
+        KEY idx_sales_v2_validated_tours_business (commercial_code, tour_type, planned_date),
+        KEY idx_sales_v2_validated_tours_code (tournee_code),
+        KEY idx_sales_v2_validated_tours_status (status)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+    `)
+
+    console.log('Table sales_v2_validated_tours verifiee.')
   })().catch(error => {
     coverageSupportTablesPending = null
     throw error
@@ -5119,6 +5166,9 @@ async function validateNextBestVisitBlockPlan(rawBody = {}, dependencyOverrides 
   const replacePendingSalesVisitFeedbackForTourneeImpl = typeof dependencyOverrides.replacePendingSalesVisitFeedbackForTournee === 'function'
     ? dependencyOverrides.replacePendingSalesVisitFeedbackForTournee
     : replacePendingSalesVisitFeedbackForTournee
+  const replaceOrCreateValidatedTourHeaderImpl = typeof dependencyOverrides.replaceOrCreateValidatedTourHeader === 'function'
+    ? dependencyOverrides.replaceOrCreateValidatedTourHeader
+    : replaceOrCreateValidatedTourHeader
 
   await validateSalesV2BlockRequest(blockPayload, dependencyOverrides)
   await ensureCoverageSupportTablesImpl()
@@ -5128,9 +5178,20 @@ async function validateNextBestVisitBlockPlan(rawBody = {}, dependencyOverrides 
     queryExecutor: queryAsyncImpl
   })
   const visits = buildSalesV2ValidationVisits(blockPayload, normalizedStops)
+  const validationCode = buildValidatedTourneeCode('sales-v2', blockPayload.date, blockPayload.commercialCode)
   const persisted = await withTransactionImpl(async connection => {
     await ensureValidatedTourneeIdentityColumnsImpl(connection)
     const txQueryAsync = async (sql, params = []) => queryAsyncImpl(sql, params, connection)
+
+    const tourHeader = await replaceOrCreateValidatedTourHeaderImpl(txQueryAsync, {
+      tourneeCode: validationCode,
+      commercialCode: blockPayload.commercialCode,
+      tourType: 'sales_v2',
+      plannedDate: blockPayload.date,
+      routeCode: blockPayload.routeCode || blockPayload.commercialCode,
+      depotCode: blockPayload.depotCode || null,
+      clientsCount: normalizedStops.length
+    })
 
     const persistedTournee = await replaceValidatedTourneeRowsInTransaction({
       selectedDate: blockPayload.date,
@@ -5146,7 +5207,8 @@ async function validateNextBestVisitBlockPlan(rawBody = {}, dependencyOverrides 
       typeClient: 'sales_v2_plan',
       codePrefix: 'sales-v2',
       connection,
-      queryExecutor: txQueryAsync
+      queryExecutor: txQueryAsync,
+      validationCode: tourHeader.tourneeCode
     })
 
     const feedbackResult = await replacePendingSalesVisitFeedbackForTourneeImpl(txQueryAsync, {
@@ -5155,6 +5217,7 @@ async function validateNextBestVisitBlockPlan(rawBody = {}, dependencyOverrides 
     })
 
     return {
+      tourHeader,
       persistedTournee,
       feedbackResult
     }
@@ -5166,6 +5229,8 @@ async function validateNextBestVisitBlockPlan(rawBody = {}, dependencyOverrides 
     saved_rows: normalizedStops.length,
     feedback_rows: persisted.feedbackResult.savedRows,
     tournee_code: persisted.persistedTournee.validationCode,
+    tournee_status: 'validated',
+    replaced_tournee_code: persisted.tourHeader.replacedTourneeCode,
     commercial_code: blockPayload.commercialCode,
     date: blockPayload.date
   }
@@ -6421,10 +6486,11 @@ async function replaceValidatedTourneeRowsInTransaction({
   typeClient,
   codePrefix,
   connection,
-  queryExecutor = queryAsync
+  queryExecutor = queryAsync,
+  validationCode: validationCodeOverride = null
 }) {
   const resolvedDayLabel = resolveFrenchDayLabel(selectedDate, dayLabel)
-  const validationCode = buildValidatedTourneeCode(codePrefix, selectedDate, commercialCode)
+  const validationCode = validationCodeOverride || buildValidatedTourneeCode(codePrefix, selectedDate, commercialCode)
   const routingCode = routeCode || commercialCode || 'plan-ia'
   const depotValue = depotCode || depotName || null
   const tourneeLabel = `${commercialLabel} - ${selectedDate}`
@@ -6510,6 +6576,118 @@ async function replaceValidatedTourneeRowsInTransaction({
     routingCode,
     depotValue,
     tourneeLabel
+  }
+}
+
+async function fetchValidatedSalesTours(filters = {}, queryExecutor = queryAsync) {
+  const headers = await listValidatedTourHeaders(queryExecutor, {
+    date: filters.date,
+    commercialCode: filters.commercialCode,
+    tourneeCode: filters.tourneeCode,
+    tourType: 'sales_v2'
+  })
+
+  return headers.map(header => ({
+    tournee_code: header.tourneeCode,
+    date: header.date,
+    commercial_code: header.commercialCode,
+    route_code: header.routeCode,
+    depot_code: header.depotCode,
+    clients_count: header.clientsCount,
+    status: header.status,
+    started_at: header.startedAt,
+    completed_at: header.completedAt
+  }))
+}
+
+async function fetchValidatedSalesTourDetail(tourneeCode, queryExecutor = queryAsync) {
+  const normalizedCode = String(tourneeCode || '').trim()
+  if (!normalizedCode) {
+    const error = new Error('Le code de tournee est requis.')
+    error.statusCode = 400
+    throw error
+  }
+
+  const tourHeader = await loadValidatedTourHeaderByCode(queryExecutor, normalizedCode)
+  if (!tourHeader) {
+    const error = new Error(`Aucune tournee validee trouvee pour le code ${normalizedCode}.`)
+    error.statusCode = 404
+    throw error
+  }
+
+  const stopRows = await queryExecutor(
+    `
+      SELECT
+        client_code,
+        client_id,
+        client AS client_name,
+        adresse,
+        latitude,
+        longitude,
+        rang,
+        date_debut AS tour_date,
+        code_layer AS commercial_code,
+        routing_code AS route_code,
+        depot_code
+      FROM tournees
+      WHERE deleted_at IS NULL
+        AND frequence = 'sales_v2'
+        AND code = ?
+      ORDER BY rang ASC, client_code ASC
+    `,
+    [normalizedCode]
+  )
+
+  const feedbackRecords = await loadSalesVisitFeedbackRecordsByTourneeCode(queryExecutor, normalizedCode)
+  const feedbackByClientCode = new Map(
+    feedbackRecords.map(record => [String(record.client_code || '').trim(), record])
+  )
+
+  const stops = (Array.isArray(stopRows) ? stopRows : []).map((row, index) => {
+    const clientCode = String(row.client_code || '').trim()
+    const feedback = feedbackByClientCode.get(clientCode) || null
+    const snapshot = feedback && feedback.prediction_snapshot ? feedback.prediction_snapshot : null
+
+    return {
+      rang: Number(row.rang) || index + 1,
+      client_id: row.client_id == null ? null : String(row.client_id),
+      client_code: clientCode,
+      client_name: String(row.client_name || clientCode || `Client ${index + 1}`).trim(),
+      adresse: row.adresse == null ? null : String(row.adresse),
+      latitude: row.latitude == null ? null : Number(row.latitude),
+      longitude: row.longitude == null ? null : Number(row.longitude),
+      planned_visit_id: feedback ? feedback.planned_visit_id : null,
+      assigned_slot_id: feedback ? feedback.assigned_slot_id : null,
+      commercial_code: (feedback && feedback.commercial_code) || String(row.commercial_code || ''),
+      planned_date: (feedback && feedback.planned_date) || normalizeDateOnly(row.tour_date),
+      execution_status: (feedback && feedback.execution_status) || 'pending',
+      purchase_made: feedback ? feedback.purchase_made : null,
+      actual_ca: feedback ? feedback.actual_ca : null,
+      actual_quantity: feedback ? feedback.actual_quantity : null,
+      note: feedback ? feedback.note : null,
+      predicted_ca: snapshot ? snapshot.predicted_ca ?? null : null,
+      predicted_ca_if_buy: snapshot ? snapshot.predicted_ca_if_buy ?? null : null,
+      recommended_quantity: snapshot ? snapshot.recommended_quantity ?? null : null,
+      predicted_quantity_if_buy: snapshot ? snapshot.predicted_quantity_if_buy ?? null : null,
+      purchase_probability: snapshot ? snapshot.purchase_probability ?? null : null,
+      portfolio_status: snapshot ? snapshot.portfolio_status ?? null : null,
+      basket_prediction_source: snapshot ? snapshot.basket_prediction_source ?? null : null,
+      recommended_products: snapshot && Array.isArray(snapshot.recommended_products) ? snapshot.recommended_products : [],
+      prediction_snapshot: snapshot
+    }
+  })
+
+  return {
+    tournee_code: tourHeader.tourneeCode,
+    date: tourHeader.date,
+    commercial_code: tourHeader.commercialCode,
+    route_code: tourHeader.routeCode,
+    depot_code: tourHeader.depotCode,
+    status: tourHeader.status,
+    started_at: tourHeader.startedAt,
+    completed_at: tourHeader.completedAt,
+    clients_count: stops.length,
+    stops
   }
 }
 
@@ -8738,6 +8916,15 @@ app.put('/api/tournees/next-best-visits/visit-feedback/:plannedVisitId', async (
     const record = await upsertSalesVisitFeedback(queryAsync, rawBody, plannedVisitId, {
       updateOnly: true
     })
+
+    if (record?.tournee_code && String(record.execution_status || 'pending') !== 'pending') {
+      try {
+        await markValidatedTourInProgress(queryAsync, record.tournee_code)
+      } catch (lifecycleError) {
+        console.error('Erreur passage en cours d execution de la tournee validee:', lifecycleError.message)
+      }
+    }
+
     return res.json({
       status: 'success',
       record
@@ -8748,6 +8935,93 @@ app.put('/api/tournees/next-best-visits/visit-feedback/:plannedVisitId', async (
     return res.status(statusCode).json({
       status: 'error',
       message: error.message || 'Erreur inattendue pendant la sauvegarde du feedback V2.'
+    })
+  }
+})
+
+app.get('/api/tournees/next-best-visits/validated-tours', async (req, res) => {
+  try {
+    const tours = await fetchValidatedSalesTours({
+      date: req.query?.date,
+      commercialCode: req.query?.commercial_code,
+      tourneeCode: req.query?.tournee_code
+    })
+
+    return res.json({
+      status: 'success',
+      tours
+    })
+  } catch (error) {
+    const statusCode = error.statusCode || 500
+    console.error('Erreur lecture tournees validees Sales V2:', error.message)
+    return res.status(statusCode).json({
+      status: 'error',
+      message: error.message || 'Erreur inattendue pendant la lecture des tournees validees.'
+    })
+  }
+})
+
+app.get('/api/tournees/next-best-visits/validated-tours/:tourneeCode', async (req, res) => {
+  try {
+    const tour = await fetchValidatedSalesTourDetail(req.params?.tourneeCode)
+    return res.json({
+      status: 'success',
+      tour
+    })
+  } catch (error) {
+    const statusCode = error.statusCode || 500
+    console.error('Erreur lecture detail tournee validee Sales V2:', error.message)
+    return res.status(statusCode).json({
+      status: 'error',
+      message: error.message || 'Erreur inattendue pendant la lecture du detail de la tournee validee.'
+    })
+  }
+})
+
+app.post('/api/tournees/next-best-visits/validated-tours/:tourneeCode/complete', async (req, res) => {
+  try {
+    const tour = await completeValidatedTour(queryAsync, req.params?.tourneeCode)
+    return res.json({
+      status: 'success',
+      message: `La tournee ${tour.tourneeCode} est marquee terminee.`,
+      tour
+    })
+  } catch (error) {
+    const statusCode = error.statusCode || 500
+    console.error('Erreur cloture tournee validee Sales V2:', error.message)
+    return res.status(statusCode).json({
+      status: 'error',
+      message: error.message || 'Erreur inattendue pendant la cloture de la tournee validee.'
+    })
+  }
+})
+
+app.get('/api/tournees/next-best-visits/validated-tours/:tourneeCode/comparison', async (req, res) => {
+  try {
+    const normalizedCode = String(req.params?.tourneeCode || '').trim()
+    const tourHeader = await loadValidatedTourHeaderByCode(queryAsync, normalizedCode)
+    if (!tourHeader) {
+      return res.status(404).json({
+        status: 'error',
+        message: `Aucune tournee validee trouvee pour le code ${normalizedCode}.`
+      })
+    }
+
+    const records = await loadSalesVisitFeedbackRecordsByTourneeCode(queryAsync, normalizedCode)
+    const comparison = buildValidatedTourComparison(records)
+
+    return res.json({
+      status: 'success',
+      tournee_code: tourHeader.tourneeCode,
+      tournee_status: tourHeader.status,
+      ...comparison
+    })
+  } catch (error) {
+    const statusCode = error.statusCode || 500
+    console.error('Erreur comparaison prevision/reel Sales V2:', error.message)
+    return res.status(statusCode).json({
+      status: 'error',
+      message: error.message || 'Erreur inattendue pendant le calcul de la comparaison prevision/reel.'
     })
   }
 })
@@ -9872,6 +10146,15 @@ module.exports = {
     registerNextBestVisitValidationLabRoutes,
     replaceValidatedTourneeRowsInTransaction,
     validateAndResolveValidatedTourneeStops,
+    fetchValidatedSalesTours,
+    fetchValidatedSalesTourDetail,
+    replaceOrCreateValidatedTourHeader,
+    loadValidatedTourHeaderByCode,
+    loadValidatedTourHeaderByBusinessKey,
+    listValidatedTourHeaders,
+    markValidatedTourInProgress,
+    completeValidatedTour,
+    buildValidatedTourComparison,
     loadCoverageConstraintsForApi: params => loadCoverageConstraints(params, {
       queryAsync,
       sharedDepotOrigin: SHARED_DEPOT_ORIGIN,

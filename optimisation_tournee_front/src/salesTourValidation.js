@@ -135,6 +135,7 @@ export function buildSalesBlockValidationPayload(block = {}, routePlan = null) {
           recommended_quantity: normalizeNullableNumber(client?.recommended_quantity),
           predicted_quantity_if_buy: normalizeNullableNumber(client?.predicted_quantity_if_buy),
           purchase_prediction_score: normalizeNullableNumber(client?.purchase_prediction_score),
+          purchase_probability: normalizeNullableNumber(client?.purchase_probability),
           portfolio_status: normalizeExactString(client?.portfolio_status ?? client?.final_client_status),
           recommended_products: normalizeRecommendedProducts(client),
           prediction_snapshot: client?.prediction_snapshot && typeof client.prediction_snapshot === 'object'

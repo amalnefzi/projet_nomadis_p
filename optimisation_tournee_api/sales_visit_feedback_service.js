@@ -1,4 +1,5 @@
 const crypto = require('node:crypto')
+const { HIGH_PROBABILITY_THRESHOLD_PERCENT } = require('./next_best_visit_engine')
 
 const ALLOWED_EXECUTION_STATUSES = new Set(['pending', 'visited', 'not_visited'])
 const ALLOWED_MONITORING_SEGMENTS = new Set([
@@ -115,6 +116,7 @@ function buildVisitPredictionSnapshot(raw = {}) {
     recommended_quantity: raw?.recommended_quantity == null ? null : Number(raw.recommended_quantity),
     predicted_quantity_if_buy: raw?.predicted_quantity_if_buy == null ? null : Number(raw.predicted_quantity_if_buy),
     priority: raw?.purchase_prediction_score == null ? null : Number(raw.purchase_prediction_score),
+    purchase_probability: raw?.purchase_probability == null ? null : Number(raw.purchase_probability),
     portfolio_status: normalizeNullableText(raw?.portfolio_status || raw?.final_client_status),
     planned_date: normalizeDateOnly(raw?.assigned_date ?? raw?.planned_date ?? raw?.candidate_date),
     basket_prediction_source: normalizeNullableText(raw?.basket_prediction_source),
@@ -390,6 +392,97 @@ function buildSalesVisitMonitoringDetail(record = {}) {
       conditional_ca_error: conditionalCaError,
       quantity_error: quantityError
     }
+  }
+}
+
+function normalizeProbabilityToPercent(value) {
+  if (value == null || !Number.isFinite(Number(value))) return null
+  const numericValue = Number(value)
+  return numericValue > 1 ? numericValue : numericValue * 100
+}
+
+function classifySalesVisitOutcome(detail = {}) {
+  const executionStatus = String(detail?.execution_status || 'pending')
+  const visited = executionStatus === 'visited'
+  const purchaseMade = detail?.purchase_made == null ? null : Boolean(detail.purchase_made)
+  const predictedProbabilityPercent = normalizeProbabilityToPercent(detail?.predicted?.priority)
+  const predictedPurchase = predictedProbabilityPercent == null
+    ? null
+    : predictedProbabilityPercent >= HIGH_PROBABILITY_THRESHOLD_PERCENT
+
+  let purchaseOutcome = 'unknown'
+  if (executionStatus === 'pending') {
+    purchaseOutcome = 'pending'
+  } else if (!visited) {
+    purchaseOutcome = 'not_visited'
+  } else if (purchaseMade == null || predictedPurchase == null) {
+    purchaseOutcome = 'unknown'
+  } else if (predictedPurchase && purchaseMade) {
+    purchaseOutcome = 'predicted_and_realized'
+  } else if (predictedPurchase && !purchaseMade) {
+    purchaseOutcome = 'predicted_not_realized'
+  } else if (!predictedPurchase && purchaseMade) {
+    purchaseOutcome = 'not_predicted_but_realized'
+  } else {
+    purchaseOutcome = 'not_predicted_and_not_realized'
+  }
+
+  return {
+    ...detail,
+    visited,
+    predicted_purchase_probability_percent: predictedProbabilityPercent,
+    predicted_purchase: predictedPurchase,
+    purchase_outcome: purchaseOutcome
+  }
+}
+
+function summarizeSalesVisitOutcomes(rows = []) {
+  return rows.reduce((summary, row) => {
+    const key = String(row?.purchase_outcome || 'unknown')
+    summary[key] = Number(summary[key] || 0) + 1
+    return summary
+  }, {
+    pending: 0,
+    not_visited: 0,
+    predicted_and_realized: 0,
+    predicted_not_realized: 0,
+    not_predicted_but_realized: 0,
+    not_predicted_and_not_realized: 0,
+    unknown: 0
+  })
+}
+
+function buildValidatedTourComparison(records = []) {
+  const rows = (Array.isArray(records) ? records : [])
+    .map(buildSalesVisitMonitoringDetail)
+    .map(classifySalesVisitOutcome)
+
+  return {
+    rows,
+    outcome_counts: summarizeSalesVisitOutcomes(rows),
+    summary: finalizeSummaryAccumulator(
+      rows.reduce((accumulator, detail) => {
+        updateExecutionAccumulator(accumulator.execution, detail)
+        updatePurchaseAccumulator(accumulator.purchase, detail)
+        const expectedActualValue = detail.execution_status === 'visited' && detail.purchase_made != null
+          ? (detail.purchase_made ? detail.actual.actual_ca : 0)
+          : null
+        updateErrorAccumulator(accumulator.ca_expected, detail.predicted.expected_visit_ca, expectedActualValue, { includeMape: true })
+        updateErrorAccumulator(
+          accumulator.ca_if_buy,
+          detail.predicted.ca_if_buy,
+          detail.execution_status === 'visited' && detail.purchase_made === true ? detail.actual.actual_ca : null,
+          { includeMape: true }
+        )
+        updateErrorAccumulator(
+          accumulator.quantity,
+          detail.predicted.quantity_if_buy,
+          detail.execution_status === 'visited' && detail.purchase_made === true ? detail.actual.actual_quantity : null,
+          { includeMape: false }
+        )
+        return accumulator
+      }, createSummaryAccumulator())
+    )
   }
 }
 
@@ -942,10 +1035,13 @@ module.exports = {
   buildVisitPredictionSnapshot,
   buildSalesVisitMonitoringDetail,
   buildSalesVisitFeedbackMonitoring,
+  buildValidatedTourComparison,
+  classifySalesVisitOutcome,
   fetchSalesVisitFeedbackRecords,
   fetchSalesVisitFeedbackMonitoringRecords,
   getSalesVisitFeedbackMonitoring,
   getSalesVisitFeedbackMonitoringDetails,
+  loadSalesVisitFeedbackRecordsByTourneeCode,
   replacePendingSalesVisitFeedbackForTournee,
   upsertSalesVisitFeedback,
   __testables: {
@@ -953,7 +1049,6 @@ module.exports = {
     ALLOWED_EXECUTION_STATUSES,
     finalizeSummaryAccumulator,
     loadSalesVisitFeedbackRecordById,
-    loadSalesVisitFeedbackRecordsByTourneeCode,
     mapFeedbackRow,
     normalizeFeedbackUpsertInput,
     normalizePendingFeedbackSeed,

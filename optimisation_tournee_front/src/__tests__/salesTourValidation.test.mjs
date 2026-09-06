@@ -37,6 +37,7 @@ test('validation payload keeps one Sales V2 block only with exact identities and
         recommended_quantity: 8,
         predicted_quantity_if_buy: 11,
         purchase_prediction_score: 64.6,
+        purchase_probability: 72.5,
         portfolio_status: 'due_now',
         basket_prediction_source: 'historical_pattern',
         recommended_products: [
@@ -85,6 +86,7 @@ test('validation payload keeps one Sales V2 block only with exact identities and
           recommended_quantity: 8,
           predicted_quantity_if_buy: 11,
           purchase_prediction_score: 64.6,
+          purchase_probability: 72.5,
           portfolio_status: 'due_now',
           recommended_products: [
             {
