@@ -92,9 +92,48 @@ function createMockRes() {
 function createSalesV2ValidationHarness({ failOnFeedbackInsertForClientCode = null } = {}) {
   const tournees = []
   const feedback = []
+  const validatedTours = []
+  let validatedTourAutoIncrement = 1
 
   const queryAsync = async (sql, params = []) => {
     const normalizedSql = String(sql).replace(/\s+/g, ' ').trim()
+
+    if (normalizedSql.startsWith('SELECT * FROM sales_v2_validated_tours WHERE commercial_code = ? AND tour_type = ? AND planned_date = ? ORDER BY id DESC FOR UPDATE')) {
+      const [commercialCode, tourType, plannedDate] = params
+      return validatedTours
+        .filter(row => row.commercial_code === commercialCode && row.tour_type === tourType && row.planned_date === plannedDate)
+        .sort((a, b) => b.id - a.id)
+        .map(row => ({ ...row }))
+    }
+
+    if (normalizedSql.startsWith("UPDATE sales_v2_validated_tours SET status = 'replaced'")) {
+      const [replacedByTourneeCode, id] = params
+      const row = validatedTours.find(entry => entry.id === id)
+      if (row) {
+        row.status = 'replaced'
+        row.replaced_by_tournee_code = replacedByTourneeCode
+      }
+      return { affectedRows: row ? 1 : 0 }
+    }
+
+    if (normalizedSql.startsWith('INSERT INTO sales_v2_validated_tours')) {
+      const [tourneeCode, commercialCode, tourType, plannedDate, routeCode, depotCode, clientsCount] = params
+      validatedTours.push({
+        id: validatedTourAutoIncrement++,
+        tournee_code: tourneeCode,
+        commercial_code: commercialCode,
+        tour_type: tourType,
+        planned_date: plannedDate,
+        route_code: routeCode,
+        depot_code: depotCode,
+        clients_count: clientsCount,
+        status: 'validated',
+        replaced_by_tournee_code: null,
+        started_at: null,
+        completed_at: null
+      })
+      return { insertId: validatedTourAutoIncrement - 1 }
+    }
 
     if (normalizedSql.includes('FROM clients c') && normalizedSql.includes('WHERE c.deleted_at IS NULL')) {
       const requestedCodes = new Set(params.map(value => String(value || '').trim()))
@@ -277,7 +316,8 @@ function createSalesV2ValidationHarness({ failOnFeedbackInsertForClientCode = nu
   const withTransaction = async handler => {
     const snapshot = {
       tournees: clone(tournees),
-      feedback: clone(feedback)
+      feedback: clone(feedback),
+      validatedTours: clone(validatedTours)
     }
 
     try {
@@ -285,6 +325,7 @@ function createSalesV2ValidationHarness({ failOnFeedbackInsertForClientCode = nu
     } catch (error) {
       tournees.splice(0, tournees.length, ...snapshot.tournees)
       feedback.splice(0, feedback.length, ...snapshot.feedback)
+      validatedTours.splice(0, validatedTours.length, ...snapshot.validatedTours)
       throw error
     }
   }
@@ -292,12 +333,14 @@ function createSalesV2ValidationHarness({ failOnFeedbackInsertForClientCode = nu
   return {
     tournees,
     feedback,
+    validatedTours,
     dependencies: {
       queryAsync,
       withTransaction,
       fetchCommercialOptions: async () => [{ value: 'C01', label: 'Commercial 1' }],
       ensureCoverageSupportTables: async () => {},
-      ensureValidatedTourneeIdentityColumns: async () => {}
+      ensureValidatedTourneeIdentityColumns: async () => {},
+      todayIso: '2026-08-24'
     }
   }
 }
@@ -388,12 +431,40 @@ test('repeating the same Sales V2 validation stays idempotent without duplicates
   const harness = createSalesV2ValidationHarness()
   const request = buildValidationRequest()
 
-  await serverTestables.validateNextBestVisitBlockPlan(request, harness.dependencies)
+  const firstResult = await serverTestables.validateNextBestVisitBlockPlan(request, harness.dependencies)
   const secondResult = await serverTestables.validateNextBestVisitBlockPlan(request, harness.dependencies)
 
   assert.equal(secondResult.status, 'success')
   assert.equal(harness.tournees.length, 2)
   assert.equal(harness.feedback.length, 2)
+
+  assert.equal(firstResult.tournee_code, secondResult.tournee_code)
+  assert.equal(secondResult.replaced_tournee_code, firstResult.tournee_code)
+  assert.equal(harness.validatedTours.length, 2)
+  assert.equal(harness.validatedTours[0].status, 'replaced')
+  assert.equal(harness.validatedTours[0].replaced_by_tournee_code, secondResult.tournee_code)
+  assert.equal(harness.validatedTours[1].status, 'validated')
+})
+
+test('a validated tour blocks revalidation once it moved to in_progress, but a fresh unstarted plan replaces the previous one', async () => {
+  const harness = createSalesV2ValidationHarness()
+  const request = buildValidationRequest()
+
+  const firstResult = await serverTestables.validateNextBestVisitBlockPlan(request, harness.dependencies)
+  assert.equal(harness.validatedTours.length, 1)
+  assert.equal(harness.validatedTours[0].status, 'validated')
+
+  harness.validatedTours[0].status = 'in_progress'
+  harness.validatedTours[0].started_at = '2026-08-24 09:00:00'
+
+  await assert.rejects(
+    () => serverTestables.validateNextBestVisitBlockPlan(request, harness.dependencies),
+    error => error.statusCode === 409 && /deja en cours d'execution/.test(error.message)
+  )
+
+  assert.equal(harness.validatedTours.length, 1)
+  assert.equal(harness.validatedTours[0].status, 'in_progress')
+  assert.equal(harness.validatedTours[0].tournee_code, firstResult.tournee_code)
 })
 
 test('validation rolls back tournees and feedback completely when feedback insertion fails', async () => {

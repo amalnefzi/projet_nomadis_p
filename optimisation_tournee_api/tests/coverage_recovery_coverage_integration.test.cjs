@@ -159,6 +159,7 @@ test('maps known recovery profile fields for coverage payloads', () => {
     recovery_payment_behavior_score: 78.4,
     recovery_expected_collection_amount: 250.6,
     recovery_priority_score: 91.4,
+    recovery_has_impaye: false,
     recovery_data_known: true,
     recovery_source: 'credit:entetecommercials.client_code_exact|payments:paiements.client_code_exact'
   })
@@ -176,6 +177,7 @@ test('keeps recovery nulls distinct from zero when profile data is unavailable',
     recovery_payment_behavior_score: null,
     recovery_expected_collection_amount: null,
     recovery_priority_score: null,
+    recovery_has_impaye: false,
     recovery_data_known: false,
     recovery_source: null
   })
@@ -223,22 +225,15 @@ test('buildCoveragePlanningContext passes a callable queryRows to loadRecoveryPr
       ]
     }
 
-    if (sql.includes('FROM entetecommercials e') && sql.includes('doc_credit_amount')) {
+    if (sql.includes('FROM entetecommercials e')) {
       return [
         {
           client_code: '00600',
-          credit_date: '2026-06-01',
-          doc_solde: 250,
-          doc_credit_amount: 250
-        }
-      ]
-    }
-
-    if (sql.includes('FROM entetecommercials e') && sql.includes('last_sale_date')) {
-      return [
-        {
-          client_code: '00600',
-          last_sale_date: '2026-06-20'
+          doc_code: 'BL600',
+          doc_type: 'bl',
+          doc_date: '2026-06-01',
+          doc_commercial_code: 'C01',
+          doc_net_a_payer: 250
         }
       ]
     }
@@ -249,8 +244,9 @@ test('buildCoveragePlanningContext passes a callable queryRows to loadRecoveryPr
           payment_id: 'p1',
           client_code: '00600',
           payment_date: '2026-06-15',
-          payment_amount: 125,
-          payment_ref: 'A'
+          payment_montant: 125,
+          payment_credit: 0,
+          payment_code_bl: 'BL600'
         }
       ]
     }
@@ -327,35 +323,29 @@ test('buildCoveragePlanningContext passes a callable queryRows to loadRecoveryPr
   assert.equal(typeof capturedLoadRecoveryArgs?.queryRows, 'function')
   assert.equal(capturedLoadRecoveryArgs?.queryRows, recoveryQueryRows)
   assert.equal(capturedLoadRecoveryArgs?.connection, undefined)
-  assert.ok(queryRowsCalls.length >= 3)
+  assert.ok(queryRowsCalls.length >= 2)
   assert.ok(queryRowsCalls.every(call => call.connection === null))
   assert.equal(planningContext.optimizerPayload.clients.length, 1)
-  assert.equal(planningContext.optimizerPayload.clients[0].recovery_total_balance, 250)
-  assert.equal(planningContext.optimizerPayload.clients[0].recovery_due_amount, 250)
+  // net_a_payer 250 - paiement 125 (imputé sur BL600) => reste 125
+  assert.equal(planningContext.optimizerPayload.clients[0].recovery_total_balance, 125)
+  assert.equal(planningContext.optimizerPayload.clients[0].recovery_due_amount, 125)
   assert.equal(planningContext.optimizerPayload.clients[0].recovery_data_known, true)
 })
 
-test('recovery_coverage keeps relaxed historical recouvrement clients when total balance is positive but no expected payment date can be inferred', async () => {
+test('recovery_coverage keeps relaxed recouvrement clients whose only echeance falls just after the period', async () => {
   const queryRowsCalls = []
   const recoveryQueryRows = async (sql, params = [], connection = null) => {
     queryRowsCalls.push({ sql, params, connection })
 
-    if (sql.includes('FROM entetecommercials e') && sql.includes('doc_credit_amount')) {
+    if (sql.includes('FROM entetecommercials e')) {
       return [
         {
           client_code: '00999',
-          credit_date: '2026-08-28',
-          doc_solde: 250,
-          doc_credit_amount: 250
-        }
-      ]
-    }
-
-    if (sql.includes('FROM entetecommercials e') && sql.includes('last_sale_date')) {
-      return [
-        {
-          client_code: '00999',
-          last_sale_date: '2026-08-20'
+          doc_code: 'BL999',
+          doc_type: 'bl',
+          doc_date: '2026-08-28',
+          doc_commercial_code: 'C01',
+          doc_net_a_payer: 250
         }
       ]
     }
@@ -430,13 +420,14 @@ test('recovery_coverage keeps relaxed historical recouvrement clients when total
     }
   )
 
-  assert.ok(queryRowsCalls.length >= 3)
+  assert.ok(queryRowsCalls.length >= 2)
   assert.equal(planningContext.selectedClientsCount, 1)
   assert.equal(planningContext.optimizerPayload.clients.length, 1)
   assert.equal(planningContext.optimizerPayload.clients[0].client_id, '99')
   assert.equal(planningContext.optimizerPayload.clients[0].recovery_total_balance, 250)
   assert.equal(planningContext.optimizerPayload.clients[0].recovery_due_amount, 0)
-  assert.equal(planningContext.optimizerPayload.clients[0].recovery_expected_next_payment_date, null)
+  // echeance inferee = date BL (2026-08-28) + delai defaut 7 j = 2026-09-04 (juste apres la periode)
+  assert.equal(planningContext.optimizerPayload.clients[0].recovery_expected_next_payment_date, '2026-09-04')
   assert.deepEqual(planningContext.recoveryEligibilityDiagnostic.reasonCounts, {
     positive_total_balance_relaxed: 1
   })

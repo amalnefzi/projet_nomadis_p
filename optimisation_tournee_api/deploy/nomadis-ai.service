@@ -1,0 +1,29 @@
+# Unite systemd pour l'API IA Python/Flask Nomadis.
+# Voir nomadis-api.service pour les instructions d'installation.
+
+[Unit]
+Description=Nomadis AI API (Python/Flask + OR-Tools)
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=nomadis
+WorkingDirectory=/opt/nomadis/optimisation_tournee_api
+EnvironmentFile=/opt/nomadis/optimisation_tournee_api/.env
+Environment=FLASK_DEBUG=False
+Environment=FLASK_HOST=127.0.0.1
+Environment=FLASK_PORT=5001
+# Adapter au venv du projet: /opt/nomadis/venv/bin/python
+ExecStart=/opt/nomadis/venv/bin/python api_ia.py
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=120
+StartLimitBurst=5
+TimeoutStopSec=15
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nomadis-ai
+
+[Install]
+WantedBy=multi-user.target

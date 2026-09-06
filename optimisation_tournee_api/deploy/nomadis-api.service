@@ -1,0 +1,35 @@
+# Unite systemd pour l'API Node Nomadis (alternative a PM2 en production Linux).
+#
+# Installation:
+#   sudo cp deploy/nomadis-api.service /etc/systemd/system/
+#   sudo cp deploy/nomadis-ai.service  /etc/systemd/system/
+#   # adapter User, WorkingDirectory et le chemin node/python ci-dessous
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now nomadis-ai nomadis-api
+#   systemctl status nomadis-api
+#   journalctl -u nomadis-api -f
+
+[Unit]
+Description=Nomadis API (Node/Express)
+After=network.target mysql.service nomadis-ai.service
+Wants=nomadis-ai.service
+
+[Service]
+Type=simple
+User=nomadis
+WorkingDirectory=/opt/nomadis/optimisation_tournee_api
+EnvironmentFile=/opt/nomadis/optimisation_tournee_api/.env
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=3
+StartLimitIntervalSec=60
+StartLimitBurst=5
+# Laisse au serveur le temps de l'arret propre (SIGTERM -> close -> pool.end)
+TimeoutStopSec=15
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nomadis-api
+
+[Install]
+WantedBy=multi-user.target

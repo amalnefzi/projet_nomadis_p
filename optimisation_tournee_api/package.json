@@ -3,6 +3,13 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
+    "start": "node server.js",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:stop": "pm2 stop ecosystem.config.cjs",
+    "pm2:reload": "pm2 reload ecosystem.config.cjs",
+    "pm2:status": "pm2 status",
+    "pm2:logs": "pm2 logs",
+    "healthcheck": "node -e \"fetch('http://127.0.0.1:'+(process.env.PORT||5000)+'/health').then(r=>{if(!r.ok)process.exit(1);return r.json()}).then(j=>console.log(j)).catch(()=>process.exit(1))\"",
     "test": "pytest tests/test_coverage_optimizer.py && node --test tests/coverage_capacity_policy.test.cjs tests/client_identity_resolution.test.cjs",
     "test:coverage-capacity": "node --test tests/coverage_capacity_policy.test.cjs",
     "test:coverage-optimizer": "pytest tests/test_coverage_optimizer.py",
@@ -24,5 +31,8 @@
     "express": "^5.2.1",
     "mysql2": "^3.18.1",
     "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "pm2": "^5.4.3"
   }
 }

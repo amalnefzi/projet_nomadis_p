@@ -2052,6 +2052,7 @@ module.exports = {
   DEFAULT_MAX_CANDIDATE_DATES_PER_CLIENT,
   DEFAULT_MINIMUM_CONFIDENCE,
   DEFAULT_OBJECTIVE_MODE,
+  HIGH_PROBABILITY_THRESHOLD_PERCENT,
   buildAvailabilitySignalMap,
   buildCandidateDatesByClientId,
   buildCandidateDateEntriesByClientId,

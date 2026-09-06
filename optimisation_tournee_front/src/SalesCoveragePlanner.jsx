@@ -5,6 +5,7 @@ import './SalesCoveragePlanner.css'
 import useOptimizedTourRoute from './useOptimizedTourRoute'
 import SalesCommercialMultiSelect from './SalesCommercialMultiSelect.jsx'
 import SalesTourDetails from './SalesTourDetails.jsx'
+import SalesValidatedToursPanel from './SalesValidatedToursPanel.jsx'
 import {
   DEFAULT_COVERAGE_PERIOD_DAYS,
   formatInteger,
@@ -167,6 +168,7 @@ export default function SalesCoveragePlanner() {
   const generationRequestSequenceRef = useRef(0)
   const [planView, setPlanView] = useState(null)
   const [selectedBlockId, setSelectedBlockId] = useState(null)
+  const [viewMode, setViewMode] = useState('generate')
   const readinessStartDate = String(filters.start_date || todayIsoDate()).slice(0, 10)
 
   readinessStateRef.current = readinessState
@@ -551,6 +553,29 @@ export default function SalesCoveragePlanner() {
 
   return (
     <div className="sales-coverage-shell">
+      <div className="sales-coverage-form-actions" style={{ marginBottom: '20px' }}>
+        <button
+          type="button"
+          className="sales-coverage-submit"
+          onClick={() => setViewMode('generate')}
+          disabled={viewMode === 'generate'}
+        >
+          Generer un plan
+        </button>
+        <button
+          type="button"
+          className="sales-coverage-retry-button"
+          onClick={() => setViewMode('validated')}
+          disabled={viewMode === 'validated'}
+        >
+          Consulter les tournees validees
+        </button>
+      </div>
+
+      {viewMode === 'validated' ? (
+        <SalesValidatedToursPanel commerciaux={optionsState.commerciaux} />
+      ) : (
+        <>
       <section className="sales-coverage-card">
         <h2>Plan de tournees ventes</h2>
         <p>
@@ -962,6 +987,8 @@ export default function SalesCoveragePlanner() {
           ) : null}
         </section>
       ) : null}
+        </>
+      )}
     </div>
   )
 }

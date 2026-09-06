@@ -2101,6 +2101,11 @@ def normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     raw_capacity_mode = payload.get("capacity_mode")
     capacity_mode = normalize_capacity_mode(raw_capacity_mode)
     time_capacity_known = _safe_bool(payload.get("time_capacity_known"), False)
+    travel_speed_kmh = max(1.0, _safe_float(payload.get("travel_speed_kmh"), DEFAULT_DRIVE_SPEED_KMH))
+    assumed_service_minutes = max(0.0, _safe_float(payload.get("assumed_service_minutes"), DEFAULT_SERVICE_MINUTES))
+    time_capacity_basis = str(payload.get("time_capacity_basis") or "").strip().lower() or (
+        "commercial_constraints" if time_capacity_known else "unknown"
+    )
     user_min_visits_per_slot = max(
         0,
         _safe_int(
@@ -2637,12 +2642,16 @@ def normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "user_max_visits_per_slot": user_max_visits_per_slot,
         "capacity_mode": capacity_mode,
         "time_capacity_known": time_capacity_known,
+        "time_capacity_basis": time_capacity_basis,
+        "travel_speed_kmh": round(travel_speed_kmh, 2),
+        "assumed_service_minutes": round(assumed_service_minutes, 2),
         "operational_capacity_known": operational_capacity_known,
         "working_days": working_days,
         "planning_dates": planning_dates,
         "depot": depot,
         "commercials": commercials,
         "clients": deduped_clients,
+        "commercial_geo_by_code": normalize_commercial_geo_by_code(payload.get("commercial_geo_by_code")),
         "input_duplicate_client_ids": duplicate_client_ids,
         "input_duplicate_client_codes": duplicate_client_codes
     }
@@ -2995,8 +3004,27 @@ def build_effective_constraints(payload: dict[str, Any], slots: list[NormalizedS
     }
 
 
+def user_visit_range_priority(payload: dict[str, Any]) -> bool:
+    """Vrai quand l'utilisateur a fixe explicitement min ET max clients / slot :
+    dans ce cas sa fourchette prime sur la capacite historique estimee."""
+    return bool(
+        _safe_bool(payload.get("enforce_user_visit_range"), False) and
+        max(0, _safe_int(payload.get("user_min_visits_per_slot"), 0)) > 0 and
+        max(0, _safe_int(payload.get("user_max_visits_per_slot"), 0)) > 0
+    )
+
+
 def resolve_slot_min_visits(slot: NormalizedSlot, payload: dict[str, Any]) -> int:
     if not _safe_bool(payload.get("enforce_user_visit_range"), False):
+        return 0
+
+    user_min = max(0, _safe_int(payload.get("user_min_visits_per_slot"), 0))
+    diluted_min = max(0, _safe_int(payload.get("effective_min_visits_per_slot"), 0))
+
+    # Si le minimum utilisateur a du etre dilue (pas assez de clients pour le tenir sur
+    # CHAQUE slot de l'horizon), on ne l'impose pas comme plancher dur : ce serait forcer
+    # l'etalement. Le minimum devient alors un objectif souple (consolidation via slot_used).
+    if user_min > 0 and diluted_min < user_min:
         return 0
 
     effective_min = max(
@@ -3006,7 +3034,6 @@ def resolve_slot_min_visits(slot: NormalizedSlot, payload: dict[str, Any]) -> in
             payload.get("effective_min_visits_per_slot")
         )
     )
-
     return min(
         effective_min,
         max(0, _safe_int(slot.max_visits, 0))
@@ -3138,6 +3165,159 @@ def build_client_priority_breakdown(
         "distance_penalty": round(distance_km, 2) if distance_km is not None else None,
         "habitual_commercial_bonus": habitual_bonus
     }, reasons
+
+
+ASSIGNMENT_REASON_LABELS = {
+    "usual_commercial": "Commercial habituel du client",
+    "same_zone": "Meme zone que le commercial",
+    "nearest_commercial": "Commercial le plus proche",
+    "capacity_balance": "Reaffecte pour respecter la capacite / le temps",
+    "only_available_commercial": "Seul commercial disponible sur la periode",
+    "optimisation_globale": "Meilleur compromis global (priorite, distance, charge)",
+}
+
+ASSIGNMENT_REASON_ORDER = [
+    "usual_commercial",
+    "same_zone",
+    "nearest_commercial",
+    "capacity_balance",
+    "only_available_commercial",
+    "optimisation_globale",
+]
+
+
+def _normalize_zone_token(value: Any) -> str | None:
+    token = str(value or "").strip().lower()
+    return token or None
+
+
+def normalize_commercial_geo_by_code(raw: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return {}
+    normalized: dict[str, dict[str, Any]] = {}
+    for code, entry in raw.items():
+        commercial_code = str(code or "").strip()
+        if not commercial_code or not isinstance(entry, dict):
+            continue
+        normalized[commercial_code] = {
+            "zone": str(entry.get("zone") or "").strip() or None,
+            "delegation": str(entry.get("delegation") or "").strip() or None,
+            "region": str(entry.get("region") or "").strip() or None,
+            "ref_latitude": _safe_float(entry.get("ref_latitude"), None),
+            "ref_longitude": _safe_float(entry.get("ref_longitude"), None),
+        }
+    return normalized
+
+
+def _assignment_reason_label(code: str, details: dict[str, Any]) -> str:
+    if code == "same_zone" and details.get("zone"):
+        return f"Meme zone que le commercial ({details['zone']})"
+    if code == "nearest_commercial" and details.get("distance_km") is not None:
+        return f"Commercial le plus proche ({details['distance_km']} km)"
+    if code == "capacity_balance" and details.get("historical_commercial_code"):
+        return (
+            f"Reaffecte depuis {details['historical_commercial_code']} "
+            "pour respecter la capacite / le temps"
+        )
+    return ASSIGNMENT_REASON_LABELS.get(code, code)
+
+
+def build_client_assignment_explanation(
+    slot: NormalizedSlot,
+    client: NormalizedClient,
+    commercial_geo_by_code: dict[str, dict[str, Any]] | None,
+    selected_commercial_codes: list[str],
+    context: CoverageOptimizationContext | None = None,
+) -> dict[str, Any]:
+    commercial_geo_by_code = commercial_geo_by_code or {}
+    assigned_code = str(slot.commercial_code or "").strip()
+    geo = commercial_geo_by_code.get(assigned_code) or {}
+    reason_codes: list[str] = []
+    details: dict[str, Any] = {}
+
+    historical_code = str(client.historical_commercial_code or "").strip()
+    if historical_code and historical_code == assigned_code:
+        reason_codes.append("usual_commercial")
+
+    # Zone match: on compare la delegation/zone du commercial au libelle de zone du
+    # client. La region (ex: "Grand Tunis") est trop large pour servir de raison.
+    client_zone_text = " ".join(
+        token for token in [
+            _normalize_zone_token(client.commercial_zone),
+            _normalize_zone_token(client.route_code),
+        ]
+        if token
+    )
+    commercial_zone_tokens = [
+        token for token in [
+            _normalize_zone_token(geo.get("zone")),
+            _normalize_zone_token(geo.get("delegation")),
+        ]
+        if token
+    ]
+    client_zone_words = set(client_zone_text.split())
+    matched_zone_token = None
+    for token in commercial_zone_tokens:
+        if not token or not client_zone_text:
+            continue
+        if token == client_zone_text or token in client_zone_words or token in client_zone_text:
+            matched_zone_token = token
+            break
+    if matched_zone_token:
+        reason_codes.append("same_zone")
+        details["zone"] = matched_zone_token
+
+    assigned_distance_km: float | None = None
+    nearest_code: str | None = None
+    nearest_distance_km: float | None = None
+    if client.latitude is not None and client.longitude is not None:
+        for code in selected_commercial_codes:
+            ref = commercial_geo_by_code.get(code) or {}
+            ref_lat = ref.get("ref_latitude")
+            ref_lon = ref.get("ref_longitude")
+            if ref_lat is None or ref_lon is None:
+                continue
+            distance_km = _get_context_distance_km(
+                context, ref_lat, ref_lon, client.latitude, client.longitude
+            )
+            if distance_km is None:
+                continue
+            if code == assigned_code:
+                assigned_distance_km = distance_km
+            if nearest_distance_km is None or distance_km < nearest_distance_km - 1e-9:
+                nearest_distance_km = distance_km
+                nearest_code = code
+    if assigned_distance_km is not None:
+        details["distance_km"] = round(assigned_distance_km, 2)
+    if nearest_code is not None and nearest_code == assigned_code and "nearest_commercial" not in reason_codes:
+        reason_codes.append("nearest_commercial")
+
+    if not reason_codes:
+        distinct_targets = [
+            str(code or "").strip()
+            for code in (client.allowed_commercial_codes or [])
+            if str(code or "").strip()
+        ] or list(selected_commercial_codes)
+        if historical_code and historical_code != assigned_code:
+            reason_codes.append("capacity_balance")
+            details["historical_commercial_code"] = historical_code
+        elif len(set(distinct_targets)) <= 1:
+            reason_codes.append("only_available_commercial")
+
+    ordered_codes = [code for code in ASSIGNMENT_REASON_ORDER if code in reason_codes]
+    primary_reason = ordered_codes[0] if ordered_codes else "optimisation_globale"
+    if not ordered_codes:
+        ordered_codes = ["optimisation_globale"]
+
+    return {
+        "assigned_commercial_code": assigned_code,
+        "primary_reason": primary_reason,
+        "reason_codes": ordered_codes,
+        "reason_labels": [_assignment_reason_label(code, details) for code in ordered_codes],
+        "distance_km": details.get("distance_km"),
+        "zone": details.get("zone"),
+        "historical_commercial_code": historical_code or None,
+    }
 
 
 def build_slot_time_usage(
@@ -4944,12 +5124,14 @@ def solve_greedy_capacity_plan(
                 slot.commercial_code,
                 current_load
             )
-        return (
+        recovery_head = (
             int(score_components["recovery_urgency_date_penalty"]),
             int(score_components["recovery_date_penalty"]),
             int(score_components["expected_collection_date_penalty"]),
             0 if client.is_critical else 1,
             int(score_components["coverage_date_penalty"]),
+        )
+        recovery_tail = (
             round(projected_global_max_ratio, 6),
             round(projected_ratio_above_target, 6),
             round(projected_ratio_gap, 6),
@@ -4966,6 +5148,18 @@ def solve_greedy_capacity_plan(
             slot.commercial_code,
             current_load
         )
+        if user_min_target > 0:
+            # L'utilisateur impose un minimum de clients / commercial / jour.
+            # Priorite : (1) remplir un slot deja ouvert encore sous le minimum,
+            # (2) reduire l'ecart au minimum, (3) date la plus proche (recouvrement
+            # = encaisser vite), puis seulement l'urgence metier et le reste.
+            fill_open_slot_under_min = 0 if 0 < current_load < user_min_target else 1
+            return (
+                fill_open_slot_under_min,
+                user_under_penalty,
+                slot.date_iso,
+            ) + recovery_head + recovery_tail
+        return recovery_head + recovery_tail
 
     unassigned_clients: list[str] = []
     mandatory_assignment_started_at = time.perf_counter()
@@ -4976,10 +5170,15 @@ def solve_greedy_capacity_plan(
         best_score: tuple[Any, ...] | None = None
         best_stop_minutes = 0.0
         feasible_slot_ids = feasible_slot_ids_by_client.get(client.client_id, [])
+        # Quand l'utilisateur impose un minimum, un slot reste "a remplir" jusqu'a ce
+        # minimum, pas seulement jusqu'a la capacite historique (souvent plus basse).
         preferred_slot_ids = [
             slot_id
             for slot_id in feasible_slot_ids
-            if current_load_by_slot.get(slot_id, 0) < max(0, _safe_int(resolved_slot_targets.get(slot_id), 0))
+            if current_load_by_slot.get(slot_id, 0) < max(
+                user_min_target,
+                _safe_int(resolved_slot_targets.get(slot_id), 0),
+            )
         ]
         candidate_slot_ids = preferred_slot_ids or feasible_slot_ids
         if candidate_slot_ids is feasible_slot_ids and candidate_slot_ids:
@@ -5291,6 +5490,9 @@ def build_coverage_cp_sat_model_artifacts(
     slot_overload_vars: dict[str, Any] = {}
     slot_user_under_vars: dict[str, Any] = {}
     slot_user_over_vars: dict[str, Any] = {}
+    slot_used_vars: dict[str, Any] = {}
+    prioritize_user_range = user_visit_range_priority(payload)
+    slot_activation_weight = 100
     slot_load_vars: dict[str, Any] = {}
     slot_load_units_vars: dict[str, Any] = {}
     slot_route_minutes_vars: dict[str, Any] = {}
@@ -5337,6 +5539,17 @@ def build_coverage_cp_sat_model_artifacts(
         load_var = model.NewIntVar(slot_min_visits, slot.max_visits, f"load_{slot.slot_id}")
         slot_load_vars[slot.slot_id] = load_var
         builder.register_int_var(("load", slot.slot_id), slot_min_visits, slot.max_visits, load_var)
+
+        if prioritize_user_range:
+            # Semi-continu : un slot est "ouvert" (>=1) ou vide (=0). Permet d'exprimer
+            # "min utilisateur uniquement sur les slots ouverts" + minimiser le nombre
+            # de slots ouverts (consolidation), sans imposer un plancher dur qui forcerait
+            # l'etalement quand l'horizon offre plus de slots que necessaire.
+            slot_used_var = model.NewBoolVar(f"slot_used_{slot.slot_id}")
+            slot_used_vars[slot.slot_id] = slot_used_var
+            builder.register_bool_var(("slot_used", slot.slot_id), slot_used_var)
+            model.Add(load_var <= slot.max_visits * slot_used_var)
+            model.Add(load_var >= slot_used_var)
 
         slot_target = max(0, _safe_int(slot_targets.get(slot.slot_id), 0))
         target_under_var = model.NewIntVar(0, max(slot_target, 0), f"target_under_{slot.slot_id}")
@@ -5566,12 +5779,26 @@ def build_coverage_cp_sat_model_artifacts(
         )
 
         if slot.slot_id in slot_user_under_vars:
-            builder.add_linear_constraint(
-                [(("user_under", slot.slot_id), slot_user_under_vars[slot.slot_id], 1), (("load", slot.slot_id), load_var, 1)],
-                ">=",
-                user_min_target,
-                "slot_user_under"
-            )
+            if prioritize_user_range and slot.slot_id in slot_used_vars:
+                # user_under >= user_min_target * slot_used - load
+                # => l'ecart au minimum n'est penalise que sur les slots ouverts.
+                builder.add_linear_constraint(
+                    [
+                        (("user_under", slot.slot_id), slot_user_under_vars[slot.slot_id], 1),
+                        (("load", slot.slot_id), load_var, 1),
+                        (("slot_used", slot.slot_id), slot_used_vars[slot.slot_id], -user_min_target),
+                    ],
+                    ">=",
+                    0,
+                    "slot_user_under_semi_continuous"
+                )
+            else:
+                builder.add_linear_constraint(
+                    [(("user_under", slot.slot_id), slot_user_under_vars[slot.slot_id], 1), (("load", slot.slot_id), load_var, 1)],
+                    ">=",
+                    user_min_target,
+                    "slot_user_under"
+                )
         if slot.slot_id in slot_user_over_vars:
             builder.add_linear_constraint(
                 [(("user_over", slot.slot_id), slot_user_over_vars[slot.slot_id], 1), (("load", slot.slot_id), load_var, -1)],
@@ -5723,22 +5950,35 @@ def build_coverage_cp_sat_model_artifacts(
             builder.add_objective_term(("assigned", client.client_id), assigned_vars[client.client_id], 1)
 
     if not target_collection_mode:
-        builder.add_objective_term(("max_commercial_ratio", "all"), max_commercial_ratio_var, max_ratio_weight)
-        for commercial_code in commercial_ratio_gap_vars:
-            builder.add_objective_term(("commercial_ratio_gap", commercial_code), commercial_ratio_gap_vars[commercial_code], commercial_ratio_gap_weight)
-            builder.add_objective_term(("commercial_soft_over", commercial_code), commercial_soft_over_scaled_vars[commercial_code], commercial_soft_over_weight)
-            builder.add_objective_term(("commercial_target_over", commercial_code), commercial_target_over_scaled_vars[commercial_code], commercial_target_over_weight)
+        if not prioritize_user_range:
+            # Equilibrage inter-commerciaux base sur la capacite historique : neutralise
+            # quand l'utilisateur impose sa fourchette (il veut alors la consolidation,
+            # donc accepter qu'un commercial travaille beaucoup et un autre pas du tout).
+            builder.add_objective_term(("max_commercial_ratio", "all"), max_commercial_ratio_var, max_ratio_weight)
+            for commercial_code in commercial_ratio_gap_vars:
+                builder.add_objective_term(("commercial_ratio_gap", commercial_code), commercial_ratio_gap_vars[commercial_code], commercial_ratio_gap_weight)
+                builder.add_objective_term(("commercial_soft_over", commercial_code), commercial_soft_over_scaled_vars[commercial_code], commercial_soft_over_weight)
+                builder.add_objective_term(("commercial_target_over", commercial_code), commercial_target_over_scaled_vars[commercial_code], commercial_target_over_weight)
 
         for slot in slots:
             if slot_shortfall_vars[slot.slot_id] is not None:
                 builder.add_objective_term(("ca_shortfall", slot.slot_id), slot_shortfall_vars[slot.slot_id], shortfall_weight)
-            builder.add_objective_term(("overload", slot.slot_id), slot_overload_vars[slot.slot_id], overload_weight)
-            builder.add_objective_term(("target_under", slot.slot_id), slot_target_under_vars[slot.slot_id], target_weight)
-            builder.add_objective_term(("target_over", slot.slot_id), slot_target_over_vars[slot.slot_id], target_weight)
+            if not prioritize_user_range:
+                # Penalites basees sur la capacite historique estimee : neutralisees
+                # quand l'utilisateur impose explicitement sa fourchette min/max.
+                builder.add_objective_term(("overload", slot.slot_id), slot_overload_vars[slot.slot_id], overload_weight)
+                builder.add_objective_term(("target_under", slot.slot_id), slot_target_under_vars[slot.slot_id], target_weight)
+                builder.add_objective_term(("target_over", slot.slot_id), slot_target_over_vars[slot.slot_id], target_weight)
             if slot.slot_id in slot_user_under_vars:
-                builder.add_objective_term(("user_under", slot.slot_id), slot_user_under_vars[slot.slot_id], user_target_weight)
+                builder.add_objective_term(
+                    ("user_under", slot.slot_id),
+                    slot_user_under_vars[slot.slot_id],
+                    target_weight if prioritize_user_range else user_target_weight
+                )
             if slot.slot_id in slot_user_over_vars:
-                builder.add_objective_term(("user_over", slot.slot_id), slot_user_over_vars[slot.slot_id], user_target_weight)
+                builder.add_objective_term(("user_over", slot.slot_id), slot_user_over_vars[slot.slot_id], target_weight if prioritize_user_range else user_target_weight)
+            if slot.slot_id in slot_used_vars:
+                builder.add_objective_term(("slot_used", slot.slot_id), slot_used_vars[slot.slot_id], slot_activation_weight)
     else:
         for previous_client, next_client in zip(recovery_client_order, recovery_client_order[1:]):
             builder.add_objective_term(
@@ -6408,6 +6648,12 @@ def solve_coverage_plan(raw_payload: dict[str, Any]) -> dict[str, Any]:
     planned_client_ids: set[str] = set()
     postprocess_assignments_seconds = 0.0
     build_visit_order_seconds = 0.0
+    commercial_geo_by_code = payload.get("commercial_geo_by_code") or {}
+    selected_commercial_codes = sorted({
+        str(entry.get("code") or "").strip()
+        for entry in (payload.get("commercials") or [])
+        if str(entry.get("code") or "").strip()
+    })
     for slot in slots:
         slot_postprocess_started_at = time.perf_counter()
         assigned_clients = slot_assignments_by_code.get(slot.slot_id, [])
@@ -6450,8 +6696,17 @@ def solve_coverage_plan(raw_payload: dict[str, Any]) -> dict[str, Any]:
         total_estimated_km += estimated_distance_km
         planned_load_units = round(sum(client.predicted_load_units for client in assigned_clients), 2)
         client_rows = []
+        assignment_reason_counter: Counter[str] = Counter()
         for visit_order, client in enumerate(route_order, start=1):
             priority_breakdown, priority_reasons = build_client_priority_breakdown(payload, slot, client, context=context)
+            assignment_explanation = build_client_assignment_explanation(
+                slot,
+                client,
+                commercial_geo_by_code,
+                selected_commercial_codes,
+                context=context,
+            )
+            assignment_reason_counter[assignment_explanation["primary_reason"]] += 1
             planned_client_ids.add(client.client_id)
             client_rows.append({
                 "visit_order": visit_order,
@@ -6497,6 +6752,7 @@ def solve_coverage_plan(raw_payload: dict[str, Any]) -> dict[str, Any]:
                     if client.historical_commercial_code and client.historical_commercial_code != slot.commercial_code
                     else None
                 ),
+                "assignment_explanation": assignment_explanation,
                 "latitude": client.latitude,
                 "longitude": client.longitude
             })
@@ -6507,6 +6763,7 @@ def solve_coverage_plan(raw_payload: dict[str, Any]) -> dict[str, Any]:
             "commercial_label": slot.commercial_label,
             "clients_count": load,
             "unique_clients_count": len({client.client_id for client in assigned_clients}),
+            "assignment_reason_counts": dict(sorted(assignment_reason_counter.items())),
             "predicted_ca": predicted_ca,
             "predicted_ca_known_total": predicted_ca,
             "predicted_ca_known_count": predicted_ca_aggregate["predicted_ca_known_count"],
@@ -6556,6 +6813,10 @@ def solve_coverage_plan(raw_payload: dict[str, Any]) -> dict[str, Any]:
                 "max_route_minutes": time_usage["max_route_minutes"],
                 "break_minutes": round(slot.break_minutes, 2),
                 "time_capacity_known": time_usage["time_capacity_known"],
+                "time_capacity_basis": payload.get("time_capacity_basis") or "unknown",
+                "travel_speed_kmh": resolve_drive_speed_kmh(payload),
+                "assumed_service_minutes": resolve_assumed_service_minutes(payload),
+                "estimated_route_minutes": round(estimated_duration_minutes, 2),
                 "time_constraint_source": slot.time_constraint_source,
                 "shift_start_time": slot.shift_start_time,
                 "shift_end_time": slot.shift_end_time,
@@ -6944,6 +7205,16 @@ def solve_coverage_plan(raw_payload: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def resolve_drive_speed_kmh(payload: dict[str, Any] | None) -> float:
+    value = _safe_float((payload or {}).get("travel_speed_kmh"), DEFAULT_DRIVE_SPEED_KMH)
+    return value if value and value > 0 else DEFAULT_DRIVE_SPEED_KMH
+
+
+def resolve_assumed_service_minutes(payload: dict[str, Any] | None) -> float:
+    value = _safe_optional_float((payload or {}).get("assumed_service_minutes"))
+    return value if value is not None and value >= 0 else DEFAULT_SERVICE_MINUTES
+
+
 def build_route_for_slot(
     payload: dict[str, Any],
     slot: NormalizedSlot,
@@ -6951,6 +7222,8 @@ def build_route_for_slot(
     context: CoverageOptimizationContext | None = None
 ) -> tuple[list[NormalizedClient], float, float]:
     sales_mode = is_sales_coverage_mode(payload)
+    drive_speed_kmh = resolve_drive_speed_kmh(payload)
+    assumed_service_minutes = resolve_assumed_service_minutes(payload)
     remaining = clients[:]
     ordered: list[NormalizedClient] = []
     depot_lat, depot_lon = resolve_slot_depot_coordinates(payload, slot)
@@ -6964,7 +7237,7 @@ def build_route_for_slot(
         if not with_gps:
             ordered.extend(remaining)
             total_duration += sum(
-                (client.service_minutes if client.service_minutes_known and client.service_minutes is not None else DEFAULT_SERVICE_MINUTES) +
+                (client.service_minutes if client.service_minutes_known and client.service_minutes is not None else assumed_service_minutes) +
                 DEFAULT_STOP_HANDLING_MINUTES
                 for client in remaining
             )
@@ -7001,15 +7274,15 @@ def build_route_for_slot(
         ordered.append(next_client)
         leg_distance = _get_context_distance_km(context, current_lat, current_lon, next_client.latitude, next_client.longitude) or 0.0
         total_distance += leg_distance
-        service_minutes = next_client.service_minutes if next_client.service_minutes_known and next_client.service_minutes is not None else DEFAULT_SERVICE_MINUTES
-        total_duration += ((leg_distance / DEFAULT_DRIVE_SPEED_KMH) * 60.0) + service_minutes + DEFAULT_STOP_HANDLING_MINUTES
+        service_minutes = next_client.service_minutes if next_client.service_minutes_known and next_client.service_minutes is not None else assumed_service_minutes
+        total_duration += ((leg_distance / drive_speed_kmh) * 60.0) + service_minutes + DEFAULT_STOP_HANDLING_MINUTES
         current_lat = next_client.latitude
         current_lon = next_client.longitude
 
     if ordered and depot_lat is not None and depot_lon is not None and current_lat is not None and current_lon is not None:
         return_distance = _get_context_distance_km(context, current_lat, current_lon, depot_lat, depot_lon) or 0.0
         total_distance += return_distance
-        total_duration += (return_distance / DEFAULT_DRIVE_SPEED_KMH) * 60.0
+        total_duration += (return_distance / drive_speed_kmh) * 60.0
 
     total_duration += max(0.0, slot.break_minutes)
 
